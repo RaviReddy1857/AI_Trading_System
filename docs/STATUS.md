@@ -7,7 +7,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | Phase | Name | State | Tests | Finished |
 |---|---|---|---|---|
 | 1 | Data feed and quality gate | Built; live Breeze run pending | 18 passing | 2026-11-11 |
-| 2 | Market-regime classifier | Built and tested in sim mode; review fixes applied; live Breeze history/VIX pending | 133 passing (whole suite) | 2026-11-11 |
+| 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes and review 2 findings 1-3 applied; live history works (user); live tick subscription fix awaiting a live re-run | 180 passing (whole suite) | 2026-11-11 |
 | 3 | Intraday and swing strategies with backtests | Not started | | |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
@@ -99,13 +99,22 @@ All five findings were confirmed and fixed, with regression tests in `tests/test
 They fail on it by construction: they use names that did not exist (`SimDataInLiveStore`, `write_request_problem`, `Settings.db_path()`), or the old behaviour
 they check against (empty calendar, ZeroDivisionError, `text/csv` accepted).
 
+## Review 2 fixes (2026-11-11)
+
+Findings 1-3 were confirmed and fixed (open issues 14-16), with tests in `tests/test_review2_fixes.py`.
+Before/after check: the new tests were run against a snapshot of the code taken before these fixes (the git commit plus the
+uncommitted Breeze subscription fix). 22 of 43 cases failed there and all pass now. The 21 that already passed are NaN/inf
+cases already caught by range limits, kept as regression coverage, and two guards against over-correction (a header-only CSV
+is a valid empty list; zero or missing quotes are "no quote").
+Findings 4-6 arrived as unfilled placeholders, so nothing was done for them.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
 |---|---|---|---|
 | 1 | 1 | Live Breeze connection never run | Waiting for user |
-| 2 | 1 | Watchlist Breeze codes unverified | Waiting for user |
-| 3 | 2 | India VIX Breeze code `INDVIX` unverified (`python scripts/lookup_code.py INDIAVIX`) | Waiting for user |
+| 2 | 1 | Watchlist Breeze codes unverified | Fixed 2026-11-11: verified by the user against ICICI |
+| 3 | 2 | India VIX Breeze code `INDVIX` unverified (`python scripts/lookup_code.py INDIAVIX`) | Fixed 2026-11-11: verified by the user |
 | 4 | 2 | Live history download never run (`python -m app.history`) | Waiting for user |
 | 5 | 2 | holidays.csv / events.csv / fii_dii.csv need real data from NSE, RBI and companies | Waiting for user |
 | 6 | 1 | Review: NaN/inf last, bid or ask passed the quality gate (and history parsing) | Fixed 2026-11-11 |
@@ -114,7 +123,12 @@ they check against (empty calendar, ZeroDivisionError, `text/csv` accepted).
 | 9 | 2 | Review: zero or missing ATR caused a division error in the regime | Fixed 2026-11-11 |
 | 10 | 2 | Review: write route open to cross-site requests | Fixed 2026-11-11 (Host/Origin check, JSON only) |
 | 11 | 2 | Old `data/market.db` (sim data only) is no longer used | Waiting for user: delete it if you wish |
-
+| 12 | 1 | Live run: every symbol logged "Unknown Breeze code ... skipped". In breeze-connect 1.0.69, `get_stock_token_value()` reads `self.interval`, which only `subscribe_feeds()` sets, and returns the AttributeError instead of a token | Fixed 2026-11-11: `BreezeFeed.start()` sets `interval = ""` before lookups and logs the SDK's actual return value on failure; tested with a fake SDK (`tests/test_breeze_feed.py`). Not yet re-run live |
+| 13 | 2 | Tests that build the app read the real config.yaml, so they failed when `feed.mode` was switched to breeze | Fixed 2026-11-11: app tests pin sim mode |
+| 14 | 1 | Review 2: config accepted +inf in fields with only a lower bound (`account.capital_inr`, `feed.max_jump_pct`); no capital ceiling | Fixed 2026-11-11: every config model rejects NaN/inf (`allow_inf_nan=False`); `capital_inr` <= Rs 100 crore |
+| 15 | 2 | Review 2: a missing (or 0-byte) events/holidays/fii_dii CSV erased the last good data | Fixed 2026-11-11: treated as unloadable; last good copy kept; regime UNKNOWN naming the file ("file not found" / "no header row"). A header-only file is still a valid empty list. An FII/DII paste with the file missing merges into the stored days |
+| 16 | 1 | Review 2: negative bid, ask, cumulative volume or previous close passed the quality gate; a negative bid with a zero ask was hidden by the Breeze parser as "no quote" | Fixed 2026-11-11: quarantined as BAD_PRICE / BAD_VOLUME / BAD_PREV_CLOSE (non-finite values too); the parser passes negatives through to the gate |
+| 17 | 2 | Review 2: findings 4-6 were placeholders in the request, not real findings | Waiting for user: paste the text |
 ## Decisions log
 
 | Date | Decision |

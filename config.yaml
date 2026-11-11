@@ -15,7 +15,7 @@ risk:
 
 # ---- Data feed ----
 feed:
-  mode: sim                    # sim = built-in fake prices | breeze = live ICICI data
+  mode: breeze                    # sim = built-in fake prices | breeze = live ICICI data
   stale_after_seconds: 30      # no tick for this long during market hours => STALE
   max_jump_pct: 5.0            # tick-to-tick move above this is quarantined
 
@@ -29,7 +29,7 @@ watchlist:
   - {symbol: ICICIBANK, breeze_code: ICIBAN, kind: stock}
   - {symbol: INFY,      breeze_code: INFTEC, kind: stock}
   - {symbol: TCS,       breeze_code: TCS,    kind: stock}
-  # India VIX: code UNVERIFIED. Check with: python scripts/lookup_code.py INDIAVIX
+   # All codes verified against ICICI on 2026-11-11.
   - {symbol: INDIAVIX,  breeze_code: INDVIX, kind: index}
 
 # ---- Market-regime rules (phase 2). Result: TRENDING_UP / TRENDING_DOWN / RANGE /

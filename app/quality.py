@@ -17,6 +17,8 @@ BAD_PRICE = "BAD_PRICE"
 CROSSED_QUOTE = "CROSSED_QUOTE"
 PRICE_JUMP = "PRICE_JUMP"
 VOLUME_WENT_BACK = "VOLUME_WENT_BACK"
+BAD_VOLUME = "BAD_VOLUME"            # negative or non-finite cumulative volume
+BAD_PREV_CLOSE = "BAD_PREV_CLOSE"    # negative or non-finite previous close
 
 
 def is_market_hours(now_utc: datetime, holidays: Collection[date] = ()) -> bool:
@@ -44,9 +46,15 @@ def check_tick(tick: Tick, prev_good: Tick | None, max_jump_pct: float) -> list[
     reasons: list[str] = []
     if not is_finite(tick.last) or tick.last <= 0:
         return [BAD_PRICE]
-    # A quote that is present must be a finite number; None means "not provided".
-    if any(q is not None and not is_finite(q) for q in (tick.bid, tick.ask)):
+    # A field that is present must be a finite, non-negative number; None means "not provided".
+    if any(q is not None and not (is_finite(q) and q >= 0) for q in (tick.bid, tick.ask)):
         return [BAD_PRICE]
+    if tick.cum_volume is not None and not (is_finite(tick.cum_volume) and tick.cum_volume >= 0):
+        reasons.append(BAD_VOLUME)
+    if tick.prev_close is not None and not (is_finite(tick.prev_close) and tick.prev_close >= 0):
+        reasons.append(BAD_PREV_CLOSE)
+    if reasons:
+        return reasons
     if tick.bid is not None and tick.ask is not None and tick.bid > 0 and tick.ask > 0:
         if tick.bid > tick.ask:
             reasons.append(CROSSED_QUOTE)

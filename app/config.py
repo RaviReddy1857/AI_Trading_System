@@ -5,17 +5,24 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-class Account(BaseModel):
-    capital_inr: float = Field(gt=0)
+class StrictModel(BaseModel):
+    """Base for every config section: NaN and +/-infinity are rejected in all numeric
+    fields, so no limit can silently become infinite or unknown."""
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class Account(StrictModel):
+    # Upper bound Rs 100 crore: far above this single-user account, but catches typos (extra zeros).
+    capital_inr: float = Field(gt=0, le=1_000_000_000)
     mode: Literal["paper", "live_manual"] = "paper"
 
 
-class Risk(BaseModel):
+class Risk(StrictModel):
     max_loss_per_trade_pct: float = Field(gt=0, le=5)
     max_loss_per_option_pct: float = Field(gt=0, le=10)
     daily_loss_stop_pct: float = Field(gt=0, le=10)
@@ -26,19 +33,19 @@ class Risk(BaseModel):
     drawdown_pause_pct: float = Field(gt=0, le=50)
 
 
-class Feed(BaseModel):
+class Feed(StrictModel):
     mode: Literal["sim", "breeze"] = "sim"
     stale_after_seconds: int = Field(gt=0)
     max_jump_pct: float = Field(gt=0)
 
 
-class Instrument(BaseModel):
+class Instrument(StrictModel):
     symbol: str
     breeze_code: str
     kind: Literal["index", "stock"]
 
 
-class Server(BaseModel):
+class Server(StrictModel):
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -50,7 +57,7 @@ class Server(BaseModel):
         return v
 
 
-class Storage(BaseModel):
+class Storage(StrictModel):
     """One SQLite file per feed mode, so simulated data can never mix with live data."""
     db_path_sim: str = "data/market_sim.db"
     db_path_live: str = "data/market_live.db"
@@ -65,7 +72,7 @@ class Storage(BaseModel):
 EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT")
 
 
-class Regime(BaseModel):
+class Regime(StrictModel):
     """Thresholds for the market-regime rules (app/regime.py)."""
     index_symbol: str = "NIFTY"
     vix_symbol: str = "INDIAVIX"
@@ -97,24 +104,24 @@ class Regime(BaseModel):
         return self
 
 
-class Bias(BaseModel):
+class Bias(StrictModel):
     """FII/DII next-day bias: N straight days of FII net buying/selling."""
     streak_days: int = Field(3, ge=1, le=10)
 
 
-class History(BaseModel):
+class History(StrictModel):
     daily_days: int = Field(400, ge=60, le=2000)       # calendar days of daily bars to keep
     intraday_days: int = Field(10, ge=1, le=60)        # calendar days of 5-minute bars
     sim_seed_on_start: bool = True                     # sim mode: generate fake history
 
 
-class Calendar(BaseModel):
+class Calendar(StrictModel):
     events_csv: str = "data/events.csv"
     holidays_csv: str = "data/holidays.csv"
     fii_dii_csv: str = "data/fii_dii.csv"
 
 
-class Settings(BaseModel):
+class Settings(StrictModel):
     account: Account
     risk: Risk
     feed: Feed

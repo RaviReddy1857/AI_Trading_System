@@ -35,8 +35,13 @@ def tick_from_breeze(raw: dict, symbol: str, kind: str) -> Tick | None:
     if last is None:
         return None
     bid, ask = _num(raw.get("bPrice")), _num(raw.get("sPrice"))
-    if kind == "index" or not bid or not ask:
+    negative = any(q is not None and q < 0 for q in (bid, ask))
+    if kind == "index":
         bid = ask = None  # indices carry no real bid/ask
+    elif not negative and (not bid or not ask):
+        bid = ask = None  # 0 or missing on either side = no quote
+    # Negative values are passed through on purpose: the quality gate quarantines
+    # and logs them (app/quality.py) instead of this parser hiding them.
     return Tick(
         symbol=symbol, last=last, bid=bid, ask=ask,
         cum_volume=_num(raw.get("ttq")) if kind == "stock" else None,
@@ -90,13 +95,19 @@ class BreezeFeed:
                 log.exception("failed to handle tick")
 
         self._sdk.on_ticks = handle
+        # SDK quirk (breeze-connect 1.0.69): get_stock_token_value() reads self.interval,
+        # which the SDK only sets inside subscribe_feeds(). Called before any subscription
+        # it raises AttributeError internally and RETURNS the exception instead of a token.
+        # "" is the same value subscribe_feeds() uses by default (plain quote stream).
+        self._sdk.interval = ""
         for inst in self._watch:
             token = self._sdk.get_stock_token_value(
                 exchange_code="NSE", stock_code=inst.breeze_code, product_type="cash",
                 get_exchange_quotes=True, get_market_depth=False,
             )
-            if not isinstance(token, tuple) or not token[0]:
-                log.error("Unknown Breeze code %s for %s - skipped", inst.breeze_code, inst.symbol)
+            if not isinstance(token, tuple) or not token or not token[0]:
+                log.error("Breeze token lookup failed for %s (code %s) - skipped; SDK returned %s: %r",
+                          inst.symbol, inst.breeze_code, type(token).__name__, token)
                 continue
             self._by_token[token[0]] = inst
             self._sdk.subscribe_feeds(stock_token=token[0])

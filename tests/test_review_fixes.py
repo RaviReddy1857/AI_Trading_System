@@ -46,9 +46,12 @@ def test_non_finite_tick_never_reaches_prices(tmp_path):
 
 def test_non_finite_extras_from_feed_are_ignored(tmp_path):
     hub = MarketHub(settings_with_tmp_data(tmp_path), Store(":memory:"), "breeze")
-    hub.on_tick(Tick("NIFTY", 23500.0, prev_close=INF, received_at=T0, day_high=INF, day_low=23400.0))
+    # An infinite previous close is now quarantined outright (second review, finding 3).
+    hub.on_tick(Tick("NIFTY", 23500.0, prev_close=INF, received_at=T0))
     row = next(r for r in hub.snapshot(T0) if r["symbol"] == "NIFTY")
-    assert row["change_pct"] is None                       # not inf, which breaks JSON
+    assert row["last"] is None and row["change_pct"] is None   # never inf, which breaks JSON
+    # An infinite day high is ignored; the range falls back to the ticks seen.
+    hub.on_tick(Tick("NIFTY", 23500.0, prev_close=23400.0, received_at=T0, day_high=INF, day_low=23400.0))
     q = hub.live_quote("NIFTY", T0)
     assert q["range_source"] != "feed" and math.isfinite(q["day_high"])
     t = tick_from_breeze({"last": "inf", "close": "nan"}, "NIFTY", "index")
@@ -209,7 +212,7 @@ def test_foreign_origin_is_refused(tmp_path, origin):
     with local_client(tmp_path) as c:
         r = c.post("/data/import/fii_dii", json=CSV, headers={"Origin": origin})
         assert r.status_code == 403
-    assert not (tmp_path / "fii_dii.csv").exists()          # nothing written
+    assert (tmp_path / "fii_dii.csv").read_text() == "date,fii_net_cr,dii_net_cr\n"   # nothing written
 
 
 def test_form_encoded_post_is_refused(tmp_path):
@@ -218,7 +221,7 @@ def test_form_encoded_post_is_refused(tmp_path):
         assert r.status_code == 415
         r = c.post("/data/import/fii_dii", content=CSV["text"], headers={"Content-Type": "text/plain"})
         assert r.status_code == 415
-    assert not (tmp_path / "fii_dii.csv").exists()
+    assert (tmp_path / "fii_dii.csv").read_text() == "date,fii_net_cr,dii_net_cr\n"
 
 
 def test_foreign_host_is_refused(tmp_path):

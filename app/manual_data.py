@@ -227,12 +227,20 @@ class ManualData:
     def load_all(self) -> None:
         """Load every CSV. A file that fails to parse is NOT applied: the last good
         copy already in SQLite stays in force (it is never replaced by an empty set),
-        and problems() reports the file and row so the regime stays UNKNOWN."""
+        and problems() reports the file and row so the regime stays UNKNOWN.
+        A missing file, or one with no header row at all, is treated the same way;
+        only a file with a header and no data rows means "the list is empty"."""
         for kind in KINDS:
             p = self._path(kind)
             try:
-                text = p.read_text(encoding="utf-8-sig") if p.exists() else ""
-                parsed, errors = self._parse(kind, text)
+                if not p.exists():
+                    parsed, errors = None, ["file not found"]
+                else:
+                    text = p.read_text(encoding="utf-8-sig")
+                    if not _rows(text):
+                        parsed, errors = None, ["file is empty (no header row)"]
+                    else:
+                        parsed, errors = self._parse(kind, text)
             except (OSError, UnicodeDecodeError) as e:
                 parsed, errors = None, [f"cannot read file: {type(e).__name__}"]
             with self._lock:
@@ -256,7 +264,7 @@ class ManualData:
             errors = {k: list(v) for k, v in self.errors.items() if v}
         for kind, errs in errors.items():
             shown = "; ".join(errs[:3]) + (f"; and {len(errs) - 3} more" if len(errs) > 3 else "")
-            out.append(f"{self.display_path(kind)} is invalid and was not loaded ({shown}); "
+            out.append(f"{self.display_path(kind)} could not be loaded ({shown}); "
                        f"the last good copy is in use until it is fixed or re-imported")
         return out
 
@@ -289,11 +297,15 @@ class ManualData:
         with self._lock:
             path = self._path(kind)
             if kind == "fii_dii":
-                existing_text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
-                existing, old_errors = parse_fii_dii(existing_text)
-                if old_errors:
-                    return {"ok": False, "rows_saved": 0,
-                            "errors": [f"existing {path.name} is invalid, fix it first"] + old_errors}
+                if path.exists():
+                    existing, old_errors = parse_fii_dii(path.read_text(encoding="utf-8-sig"))
+                    if old_errors:
+                        return {"ok": False, "rows_saved": 0,
+                                "errors": [f"existing {path.name} is invalid, fix it first"] + old_errors}
+                else:
+                    # File missing: merge into the last good copy so no stored day is lost.
+                    existing = {r["date"]: FiiDii(r["date"], r["fii_net_cr"], r["dii_net_cr"])
+                                for r in self.store.fii_dii_before(date.max, 1_000_000)}
                 merged = {**existing, **parsed}
                 out_text, final = fii_dii_to_csv(merged), merged
             elif kind == "events":

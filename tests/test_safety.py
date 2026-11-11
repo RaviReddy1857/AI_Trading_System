@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 from app.main import create_app
-from tests.test_step1 import FakeFeed
+from tests.test_step1 import FakeFeed, sim_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_CALLS = ["place_order", "modify_order", "cancel_order", "square_off", "gtt_",
@@ -24,7 +24,7 @@ def test_no_order_calls_in_source():
 
 
 def test_no_order_routes():
-    app = create_app(feed=FakeFeed(), db_path=":memory:")
+    app = create_app(sim_settings(), feed=FakeFeed(), db_path=":memory:")
     paths = [r.path.lower() for r in app.routes]
     bad = [p for p in paths if any(w in p for w in FORBIDDEN_ROUTE_WORDS)]
     assert bad == [], f"forbidden routes: {bad}"

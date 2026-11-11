@@ -122,6 +122,15 @@ def test_breeze_tick_parsing():
 
 
 # ---------- web app ----------
+def sim_settings() -> Settings:
+    """The user's config.yaml, pinned to sim mode, so app tests never depend on
+    whether the user has switched feed.mode to breeze."""
+    raw = load_settings().model_dump()
+    raw["feed"]["mode"] = "sim"
+    raw["history"]["sim_seed_on_start"] = False
+    return Settings.model_validate(raw)
+
+
 class FakeFeed:
     name = "sim"
 
@@ -133,7 +142,7 @@ class FakeFeed:
 
 
 def test_api_endpoints():
-    with TestClient(create_app(feed=FakeFeed(), db_path=":memory:")) as c:
+    with TestClient(create_app(sim_settings(), feed=FakeFeed(), db_path=":memory:")) as c:
         assert c.get("/health").json()["ok"] is True
         rows = c.get("/api/prices").json()["rows"]
         nifty = next(r for r in rows if r["symbol"] == "NIFTY")

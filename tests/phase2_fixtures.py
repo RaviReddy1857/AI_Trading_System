@@ -16,12 +16,23 @@ SESSION = date(2026, 11, 11)
 STOCKS = ["HDFCBANK", "ICICIBANK", "INFY", "RELIANCE", "TCS"]
 
 
-def settings_with_tmp_data(tmp_path: Path, **overrides) -> Settings:
+EMPTY_CSV = {"events.csv": "date,type,note,symbol\n", "holidays.csv": "date,note\n",
+             "fii_dii.csv": "date,fii_net_cr,dii_net_cr\n"}
+
+
+def settings_with_tmp_data(tmp_path: Path, create_files: bool = True, **overrides) -> Settings:
+    """Config pointing at CSV files in tmp_path. By default each file is created with
+    just its header (an intentionally empty list); a missing file would mean UNKNOWN."""
+    if create_files:
+        for name, header in EMPTY_CSV.items():
+            if not (tmp_path / name).exists():
+                (tmp_path / name).write_text(header)
     raw = load_settings().model_dump()
     raw["calendar"] = {"events_csv": str(tmp_path / "events.csv"),
                        "holidays_csv": str(tmp_path / "holidays.csv"),
                        "fii_dii_csv": str(tmp_path / "fii_dii.csv")}
     raw["history"]["sim_seed_on_start"] = False
+    raw["feed"]["mode"] = "sim"          # independent of the user's feed.mode
     for k, v in overrides.items():
         raw[k] = {**raw.get(k, {}), **v} if isinstance(v, dict) else v
     return Settings.model_validate(raw)
