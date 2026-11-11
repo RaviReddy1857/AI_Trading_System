@@ -1,0 +1,38 @@
+# ---- Account and risk (every limit is a % of capital, so it rescales) ----
+account:
+  capital_inr: 200000          # change this when you add capital
+  mode: paper                  # paper | live_manual  (the app never places orders)
+
+risk:
+  max_loss_per_trade_pct: 1.0        # intraday / swing
+  max_loss_per_option_pct: 2.5
+  daily_loss_stop_pct: 2.0
+  monthly_loss_pause_pct: 6.0
+  uncommitted_cash_pct: 25.0
+  max_open_selling_spreads: 2
+  drawdown_halve_pct: 10.0
+  drawdown_pause_pct: 15.0
+
+# ---- Data feed ----
+feed:
+  mode: sim                    # sim = built-in fake prices | breeze = live ICICI data
+  stale_after_seconds: 30      # no tick for this long during market hours => STALE
+  max_jump_pct: 5.0            # tick-to-tick move above this is quarantined
+
+# breeze_code is ICICI's own short code, not the NSE symbol.
+# Check any code with:  python scripts/lookup_code.py RELIANCE
+watchlist:
+  - {symbol: NIFTY,     breeze_code: NIFTY,  kind: index}
+  - {symbol: BANKNIFTY, breeze_code: CNXBAN, kind: index}
+  - {symbol: RELIANCE,  breeze_code: RELIND, kind: stock}
+  - {symbol: HDFCBANK,  breeze_code: HDFBAN, kind: stock}
+  - {symbol: ICICIBANK, breeze_code: ICIBAN, kind: stock}
+  - {symbol: INFY,      breeze_code: INFTEC, kind: stock}
+  - {symbol: TCS,       breeze_code: TCS,    kind: stock}
+
+server:
+  host: 127.0.0.1              # local only; do not change to 0.0.0.0
+  port: 8000
+
+storage:
+  db_path: data/market.db
