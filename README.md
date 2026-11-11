@@ -72,6 +72,8 @@ NEUTRAL. It is UNKNOWN if any of the last 3 sessions' figures are missing.
 4. In `config.yaml` set `feed.mode: breeze`, then run `python -m app.main`.
    In breeze mode the app downloads daily (400 days) and 5-minute (10 days) history in the background at start.
    You can also run the download on its own: `python -m app.history`.
+   Run these from the project folder: the Breeze SDK writes its own log files to `logs/` in the current folder
+   (this cannot be changed in the SDK). `logs/` is git-ignored.
 
 Outside 09:15-15:30 IST on weekdays, and on holidays in `holidays.csv`, symbols show `CLOSED`.
 

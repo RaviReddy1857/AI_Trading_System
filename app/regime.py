@@ -359,7 +359,14 @@ class RegimeService:
             "data_warnings": {k: v[:5] for k, v in self.manual.errors.items() if v},
         }
         with self._lock:
-            key = (out["session_date"], out["regime"], out["bias"], meta["basis"])
+            session = inputs.session_date.isoformat()
+            key = (session, result.regime, bias, meta["basis"], result.rules_version)
+            if self._last_logged is None or self._last_logged[0] != session:
+                # After a restart (or a new session) compare with what is stored, not with memory,
+                # so restarting the app does not add a duplicate entry.
+                last = self.store.last_regime(inputs.session_date)
+                self._last_logged = (session, last["regime"], last["bias"], last["basis"],
+                                     last["rules_version"]) if last else None
             if key != self._last_logged:
                 self.store.save_regime(now, inputs.session_date, result.regime, bias,
                                        {"regime": result.reasons, "bias": bias_reasons},

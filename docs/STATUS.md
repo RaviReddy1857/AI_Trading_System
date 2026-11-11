@@ -7,7 +7,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | Phase | Name | State | Tests | Finished |
 |---|---|---|---|---|
 | 1 | Data feed and quality gate | Built; live Breeze run pending | 18 passing | 2026-11-11 |
-| 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes and review 2 findings 1-3 applied; live history works (user); live tick subscription fix awaiting a live re-run | 180 passing (whole suite) | 2026-11-11 |
+| 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes, review 2 findings 1-3 and review 3 findings 1-2 applied; live history works (user); live subscriptions confirmed in the SDK log, live ticks not yet seen | 184 passing (whole suite) | 2026-11-11 |
 | 3 | Intraday and swing strategies with backtests | Not started | | |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
@@ -46,7 +46,8 @@ App run end to end in simulated mode.
   table layouts are accepted.
 - `GET /api/regime` (regime, reasons, bias, values, history) and `POST /data/import/{fii_dii|events|holidays}`.
 - Dashboard: regime and bias badges, reasons, history table, and a CSV paste box.
-- `regime_log` is written only when the session, regime, bias or basis changes. A background thread re-evaluates every 60 s.
+- `regime_log` is written only when the regime, bias, basis or rules version differs from the last stored entry for that session
+  (compared with the database, so a restart adds no duplicate). A background thread re-evaluates every 60 s.
 - `tests/test_safety.py`: the "no write routes" check was replaced with the allowlist `/journal/`, `/data/import/`, `/capital/`
   (the one change permitted by architecture.md section 10). All other safety checks are unchanged.
 
@@ -108,6 +109,23 @@ cases already caught by range limits, kept as regression coverage, and two guard
 is a valid empty list; zero or missing quotes are "no quote").
 Findings 4-6 arrived as unfilled placeholders, so nothing was done for them.
 
+## Review 3 fixes (2026-11-11)
+
+Findings 1 and 2 were confirmed and fixed (open issues 18-19), with tests in `tests/test_review3_fixes.py`.
+Before/after check: the new tests were run against the previous commit (`1b4e9f6`) in a temporary worktree. 3 of 4 failed there
+and all pass now. The one that passed is a guard against over-correction (a real regime change after a restart is still logged).
+- **SDK log files in git:** `logs/apiLogs.log` and `logs/websocketLogs.log` (written by breeze-connect) were committed in `1b4e9f6`.
+  They were removed from tracking with `git rm --cached` and kept on disk; `.gitignore` now has `logs/` and `*.log`.
+  They contain no API key, secret or session token (checked without printing values): only quote and history responses,
+  instrument lookups (`isec_token` is an instrument code) and "subscribed" messages. The SDK's header logging is commented out.
+  The log folder is hard-coded in the SDK as the relative path `logs` (current directory), with no option to change it;
+  started from the project root it is already the git-ignored `logs/`. The files remain in the history of commit `1b4e9f6`.
+- **Duplicate regime entries on restart:** the "last logged" check lived only in memory. It is now seeded from the newest stored
+  entry for the session (`Store.last_regime`), and the rules version is part of the comparison.
+- **FII/DII import (review comment, not changed):** a paste is still refused while `fii_dii.csv` itself is invalid. This is intended:
+  the user repairs a broken file by hand, so a paste never builds on rows the app could not read.
+- Finding 4 arrived as an unfilled placeholder, so nothing was done for it.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -123,12 +141,16 @@ Findings 4-6 arrived as unfilled placeholders, so nothing was done for them.
 | 9 | 2 | Review: zero or missing ATR caused a division error in the regime | Fixed 2026-11-11 |
 | 10 | 2 | Review: write route open to cross-site requests | Fixed 2026-11-11 (Host/Origin check, JSON only) |
 | 11 | 2 | Old `data/market.db` (sim data only) is no longer used | Waiting for user: delete it if you wish |
-| 12 | 1 | Live run: every symbol logged "Unknown Breeze code ... skipped". In breeze-connect 1.0.69, `get_stock_token_value()` reads `self.interval`, which only `subscribe_feeds()` sets, and returns the AttributeError instead of a token | Fixed 2026-11-11: `BreezeFeed.start()` sets `interval = ""` before lookups and logs the SDK's actual return value on failure; tested with a fake SDK (`tests/test_breeze_feed.py`). Not yet re-run live |
+| 12 | 1 | Live run: every symbol logged "Unknown Breeze code ... skipped". In breeze-connect 1.0.69, `get_stock_token_value()` reads `self.interval`, which only `subscribe_feeds()` sets, and returns the AttributeError instead of a token | Fixed 2026-11-11: `BreezeFeed.start()` sets `interval = ""` before lookups and logs the SDK's actual return value on failure; tested with a fake SDK (`tests/test_breeze_feed.py`). The user's live run at 16:48 IST on 2026-11-11 logged "subscribed" for all 8 symbols (SDK log); ticks during market hours not yet seen |
 | 13 | 2 | Tests that build the app read the real config.yaml, so they failed when `feed.mode` was switched to breeze | Fixed 2026-11-11: app tests pin sim mode |
 | 14 | 1 | Review 2: config accepted +inf in fields with only a lower bound (`account.capital_inr`, `feed.max_jump_pct`); no capital ceiling | Fixed 2026-11-11: every config model rejects NaN/inf (`allow_inf_nan=False`); `capital_inr` <= Rs 100 crore |
 | 15 | 2 | Review 2: a missing (or 0-byte) events/holidays/fii_dii CSV erased the last good data | Fixed 2026-11-11: treated as unloadable; last good copy kept; regime UNKNOWN naming the file ("file not found" / "no header row"). A header-only file is still a valid empty list. An FII/DII paste with the file missing merges into the stored days |
 | 16 | 1 | Review 2: negative bid, ask, cumulative volume or previous close passed the quality gate; a negative bid with a zero ask was hidden by the Breeze parser as "no quote" | Fixed 2026-11-11: quarantined as BAD_PRICE / BAD_VOLUME / BAD_PREV_CLOSE (non-finite values too); the parser passes negatives through to the gate |
 | 17 | 2 | Review 2: findings 4-6 were placeholders in the request, not real findings | Waiting for user: paste the text |
+| 18 | 1 | Review 3: breeze-connect log files (`logs/apiLogs.log`, `logs/websocketLogs.log`) were tracked in git | Fixed 2026-11-11: untracked (kept on disk), `logs/` and `*.log` ignored; no credentials in them |
+| 19 | 2 | Review 3: restarting the app added a duplicate `regime_log` entry | Fixed 2026-11-11: compared with the last stored entry for the session |
+| 20 | 2 | Review 3: finding 4 was a placeholder in the request | Waiting for user: paste the text |
+
 ## Decisions log
 
 | Date | Decision |
@@ -144,5 +166,5 @@ Findings 4-6 arrived as unfilled placeholders, so nothing was done for them.
 | 2026-11-11 | Manual CSV imports are all-or-nothing; FII/DII merges by date, events and holidays replace the list |
 | 2026-11-11 | History tables carry a `source` column; sim history is never used in breeze mode |
 | 2026-11-11 | Separate SQLite files per feed mode; the live file refuses sim rows (review finding 3) |
-| 2026-11-11 | An invalid CSV file keeps the last good copy and makes the regime UNKNOWN; an FII/DII paste is refused while fii_dii.csv itself is invalid (fix the file) |
+| 2026-11-11 | An invalid CSV file keeps the last good copy and makes the regime UNKNOWN; an FII/DII paste is refused while fii_dii.csv itself is invalid (fix the file). Kept on purpose after review 3 |
 | 2026-11-11 | Write requests need local Host/Origin and JSON; GET and HEAD are unaffected |

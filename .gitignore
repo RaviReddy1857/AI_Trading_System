@@ -3,3 +3,7 @@ data/*.db
 data/*.tmp
 __pycache__/
 .pytest_cache/
+
+# breeze-connect writes apiLogs.log and websocketLogs.log into ./logs/ (path is fixed in the SDK)
+logs/
+*.log

@@ -219,3 +219,11 @@ class Store:
                 " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         keys = ["at_utc", "session_date", "regime", "bias", "reasons", "rules_version", "basis"]
         return [dict(zip(keys, (*r[:4], json.loads(r[4]), *r[5:]))) for r in rows]
+
+    def last_regime(self, session_date: date) -> dict | None:
+        """Newest stored regime entry for one session, or None. Survives restarts."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT regime,bias,basis,rules_version FROM regime_log WHERE session_date=?"
+                " ORDER BY id DESC LIMIT 1", (session_date.isoformat(),)).fetchone()
+        return dict(zip(["regime", "bias", "basis", "rules_version"], r)) if r else None
