@@ -29,10 +29,45 @@ watchlist:
   - {symbol: ICICIBANK, breeze_code: ICIBAN, kind: stock}
   - {symbol: INFY,      breeze_code: INFTEC, kind: stock}
   - {symbol: TCS,       breeze_code: TCS,    kind: stock}
+  # India VIX: code UNVERIFIED. Check with: python scripts/lookup_code.py INDIAVIX
+  - {symbol: INDIAVIX,  breeze_code: INDVIX, kind: index}
+
+# ---- Market-regime rules (phase 2). Result: TRENDING_UP / TRENDING_DOWN / RANGE /
+# VOLATILE / EVENT, or UNKNOWN when any input is missing or stale. ----
+regime:
+  index_symbol: NIFTY
+  vix_symbol: INDIAVIX
+  sma_fast_days: 20              # trend needs NIFTY above/below both averages
+  sma_slow_days: 50
+  atr_days: 14
+  volatile_range_atr_mult: 1.5   # VOLATILE if today's NIFTY high-low range > 1.5 x ATR
+  vix_lookback_days: 252         # about one year of trading days
+  vix_percentile: 80             # VOLATILE if VIX is above this percentile of the lookback
+  vix_min_history_days: 200      # fewer VIX days than this => UNKNOWN
+  breadth_sma_days: 20           # breadth = % of watchlist stocks above their 20-day average
+  breadth_up_pct: 60             # TRENDING_UP needs breadth >= this
+  breadth_down_pct: 40           # TRENDING_DOWN needs breadth <= this
+  breadth_min_coverage_pct: 80   # share of watchlist stocks with usable data, else UNKNOWN
+  event_types: [EXPIRY, RBI_POLICY, BUDGET, MARKET_EVENT]   # market-wide events that force EVENT
+  recompute_seconds: 60
+
+bias:
+  streak_days: 3                 # BEARISH after 3 straight days of FII net selling, BULLISH after 3 of buying
+
+history:
+  daily_days: 400                # daily bars to download (calendar days)
+  intraday_days: 10              # 5-minute bars to download (calendar days)
+  sim_seed_on_start: true        # sim mode only: generate fake history so the badge works
+
+calendar:                        # CSV files you maintain (see README)
+  events_csv: data/events.csv
+  holidays_csv: data/holidays.csv
+  fii_dii_csv: data/fii_dii.csv
 
 server:
   host: 127.0.0.1              # local only; do not change to 0.0.0.0
   port: 8000
 
-storage:
-  db_path: data/market.db
+storage:                       # one file per feed mode; chosen from feed.mode
+  db_path_sim: data/market_sim.db     # feed.mode: sim
+  db_path_live: data/market_live.db   # feed.mode: breeze (never receives sim rows)

@@ -1,4 +1,5 @@
 .env
 data/*.db
+data/*.tmp
 __pycache__/
 .pytest_cache/

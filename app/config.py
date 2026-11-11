@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,7 +51,67 @@ class Server(BaseModel):
 
 
 class Storage(BaseModel):
-    db_path: str = "data/market.db"
+    """One SQLite file per feed mode, so simulated data can never mix with live data."""
+    db_path_sim: str = "data/market_sim.db"
+    db_path_live: str = "data/market_live.db"
+
+    @model_validator(mode="after")
+    def different_files(self) -> "Storage":
+        if Path(self.db_path_sim).resolve() == Path(self.db_path_live).resolve():
+            raise ValueError("storage.db_path_sim and storage.db_path_live must be different files")
+        return self
+
+
+EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT")
+
+
+class Regime(BaseModel):
+    """Thresholds for the market-regime rules (app/regime.py)."""
+    index_symbol: str = "NIFTY"
+    vix_symbol: str = "INDIAVIX"
+    sma_fast_days: int = Field(20, ge=2, le=200)
+    sma_slow_days: int = Field(50, ge=3, le=400)
+    atr_days: int = Field(14, ge=2, le=100)
+    volatile_range_atr_mult: float = Field(1.5, gt=0, le=10)
+    vix_lookback_days: int = Field(252, ge=20, le=1000)
+    vix_percentile: float = Field(80, gt=0, lt=100)
+    vix_min_history_days: int = Field(200, ge=20, le=1000)
+    breadth_sma_days: int = Field(20, ge=2, le=200)
+    breadth_up_pct: float = Field(60, ge=0, le=100)
+    breadth_down_pct: float = Field(40, ge=0, le=100)
+    breadth_min_coverage_pct: float = Field(80, gt=0, le=100)
+    event_types: list[str] = ["EXPIRY", "RBI_POLICY", "BUDGET", "MARKET_EVENT"]
+    recompute_seconds: int = Field(60, ge=5, le=3600)
+
+    @model_validator(mode="after")
+    def consistent(self) -> "Regime":
+        if self.sma_fast_days >= self.sma_slow_days:
+            raise ValueError("regime.sma_fast_days must be below sma_slow_days")
+        if self.breadth_down_pct >= self.breadth_up_pct:
+            raise ValueError("regime.breadth_down_pct must be below breadth_up_pct")
+        if self.vix_min_history_days > self.vix_lookback_days:
+            raise ValueError("regime.vix_min_history_days cannot exceed vix_lookback_days")
+        bad = [t for t in self.event_types if t not in EVENT_TYPES]
+        if bad:
+            raise ValueError(f"regime.event_types has unknown types {bad}; allowed {list(EVENT_TYPES)}")
+        return self
+
+
+class Bias(BaseModel):
+    """FII/DII next-day bias: N straight days of FII net buying/selling."""
+    streak_days: int = Field(3, ge=1, le=10)
+
+
+class History(BaseModel):
+    daily_days: int = Field(400, ge=60, le=2000)       # calendar days of daily bars to keep
+    intraday_days: int = Field(10, ge=1, le=60)        # calendar days of 5-minute bars
+    sim_seed_on_start: bool = True                     # sim mode: generate fake history
+
+
+class Calendar(BaseModel):
+    events_csv: str = "data/events.csv"
+    holidays_csv: str = "data/holidays.csv"
+    fii_dii_csv: str = "data/fii_dii.csv"
 
 
 class Settings(BaseModel):
@@ -61,6 +121,31 @@ class Settings(BaseModel):
     watchlist: list[Instrument]
     server: Server = Server()
     storage: Storage = Storage()
+    regime: Regime = Regime()
+    bias: Bias = Bias()
+    history: History = History()
+    calendar: Calendar = Calendar()
+
+    @model_validator(mode="after")
+    def regime_symbols_in_watchlist(self) -> "Settings":
+        symbols = {i.symbol for i in self.watchlist}
+        for name in ("index_symbol", "vix_symbol"):
+            sym = getattr(self.regime, name)
+            if sym not in symbols:
+                raise ValueError(f"regime.{name} '{sym}' is not in the watchlist")
+        return self
+
+    @property
+    def is_live_feed(self) -> bool:
+        return self.feed.mode == "breeze"
+
+    def db_path(self) -> Path:
+        """The SQLite file for the configured feed mode."""
+        return self.path(self.storage.db_path_live if self.is_live_feed else self.storage.db_path_sim)
+
+    def path(self, rel: str) -> Path:
+        p = Path(rel)
+        return p if p.is_absolute() else ROOT / p
 
     def rupees(self, pct: float) -> float:
         """Convert a percentage limit into rupees at the current capital."""

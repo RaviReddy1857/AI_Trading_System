@@ -16,11 +16,35 @@ PAGE_HTML = """<!doctype html>
  th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
  .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)}
  .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
+ .badges{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+ .badge{font-weight:700;font-size:16px;border-radius:6px;padding:6px 12px;border:2px solid currentColor}
+ .TRENDING_UP,.BULLISH{color:var(--ok)} .TRENDING_DOWN,.BEARISH{color:var(--bad)} .VOLATILE,.EVENT{color:var(--warn)}
+ .RANGE,.NEUTRAL{color:var(--ink)} .UNKNOWN{color:var(--mute)}
+ ul{margin:4px 0 0;padding-left:20px} li{margin:2px 0} .mute{color:var(--mute);font-size:13px}
+ textarea{width:100%;box-sizing:border-box;min-height:90px;font:13px ui-monospace,Consolas,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px}
+ select,button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+ details summary{cursor:pointer;color:var(--mute);font-size:13px;font-weight:600}
 </style></head><body>
 <header><h1>Trading Research System</h1>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
 <main>
+ <div class="card" id="regime-card"><h2>Today's market type</h2>
+  <div class="badges"><span class="badge UNKNOWN" id="regime">UNKNOWN</span>
+   <span class="badge UNKNOWN" id="bias">FII bias: UNKNOWN</span>
+   <span class="mute" id="rmeta"></span></div>
+  <ul id="rreasons"></ul><ul id="breasons"></ul><div class="mute" id="rwarn"></div>
+  <details style="margin-top:8px"><summary>Regime history</summary>
+   <table style="margin-top:6px"><thead><tr><th>Time (IST)</th><th>Session</th><th>Regime</th><th>FII bias</th><th>Basis</th><th>Rules</th></tr></thead>
+   <tbody id="rhist"></tbody></table></details>
+  <details style="margin-top:8px"><summary>Paste FII/DII figures, events or holidays (CSV)</summary>
+   <p class="mute">FII/DII: <code>date,fii_net_cr,dii_net_cr</code> or the NSE table (Category, Date, Buy, Sell, Net). New days are added.<br>
+   Events: <code>date,type,note,symbol</code>, type one of EXPIRY, RBI_POLICY, BUDGET, RESULTS, MARKET_EVENT. Replaces the list.<br>
+   Holidays: <code>date,note</code>. Replaces the list.</p>
+   <select id="ikind"><option value="fii_dii">FII/DII</option><option value="events">Events</option><option value="holidays">Holidays</option></select>
+   <textarea id="itext" placeholder="paste CSV here, including the header row"></textarea>
+   <button id="ibtn" type="button">Import</button> <span class="mute" id="iresult"></span></details>
+ </div>
  <div class="card"><h2>Live prices</h2>
   <table><thead><tr><th>Symbol</th><th>Last</th><th>Change %</th><th>Bid</th><th>Ask</th><th>Age (s)</th><th>Status</th></tr></thead>
   <tbody id="rows"></tbody></table></div>
@@ -53,6 +77,27 @@ async function cfg(){const c=await j("/api/config");const l=c.limits_inr;
  <span>Max loss per trade: <b>&#8377;${f(l.max_loss_per_trade,0)}</b></span><span>Per option position: <b>&#8377;${f(l.max_loss_per_option,0)}</b></span>
  <span>Daily stop: <b>&#8377;${f(l.daily_loss_stop,0)}</b></span><span>Monthly pause: <b>&#8377;${f(l.monthly_loss_pause,0)}</b></span>
  <span>Cash kept free: <b>&#8377;${f(l.uncommitted_cash,0)}</b></span>`}
-cfg();tick();setInterval(tick,2000);
+const ist=s=>new Date(s).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false,day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
+async function regime(){
+ try{
+  const r=await j("/api/regime");
+  const rg=document.getElementById("regime");rg.textContent=r.regime.replace("_"," ");rg.className="badge "+r.regime;
+  const b=document.getElementById("bias");b.textContent="FII bias: "+r.bias;b.className="badge "+r.bias;
+  document.getElementById("rmeta").textContent=`Session ${r.session_date} | basis ${r.basis}${r.basis_date&&r.basis!=="LIVE"?" "+r.basis_date:""} | ${r.rules_version} | updated ${ist(r.as_of_utc)}${r.holiday?" | Holiday: "+r.holiday:""}`;
+  document.getElementById("rreasons").innerHTML=r.reasons.map(x=>`<li>${esc(x)}</li>`).join("");
+  document.getElementById("breasons").innerHTML=r.bias_reasons.map(x=>`<li class="mute">${esc(x)}</li>`).join("");
+  const w=Object.entries(r.data_warnings||{});
+  document.getElementById("rwarn").innerHTML=w.map(([k,v])=>`<div class="down">${esc(k)}.csv not loaded: ${esc(v.join("; "))}</div>`).join("");
+  document.getElementById("rhist").innerHTML=r.history.map(h=>`<tr><td>${ist(h.at_utc)}</td><td>${esc(h.session_date)}</td><td class="${h.regime}">${h.regime}</td><td class="${h.bias}">${h.bias}</td><td>${esc(h.basis)}</td><td>${esc(h.rules_version)}</td></tr>`).join("");
+ }catch(e){document.getElementById("rmeta").textContent="Regime not available"}
+}
+document.getElementById("ibtn").onclick=async()=>{
+ const kind=document.getElementById("ikind").value,out=document.getElementById("iresult");
+ try{const r=await fetch("/data/import/"+kind,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:document.getElementById("itext").value})});
+  const x=await r.json();out.textContent=x.ok?`Saved ${x.rows_saved} row(s)`:("Not saved: "+(x.errors||[x.detail]).join("; "));
+  out.className=x.ok?"up":"down";if(x.ok)regime();
+ }catch(e){out.textContent="Import failed";out.className="down"}
+};
+cfg();tick();regime();setInterval(tick,2000);setInterval(regime,15000);
 </script></body></html>
 """

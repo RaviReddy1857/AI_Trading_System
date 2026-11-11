@@ -8,6 +8,7 @@ tests/test_safety.py fails the build if such a call is ever added.
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 from ..config import Instrument
@@ -18,11 +19,12 @@ log = logging.getLogger("breeze_feed")
 
 
 def _num(value) -> float | None:
-    """Parse a number; unknown stays None (never silently zero)."""
+    """Parse a number; unknown stays None (never silently zero). NaN/inf count as unknown."""
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        x = float(value)
+        return x if math.isfinite(x) else None
     except (TypeError, ValueError):
         return None
 
@@ -39,6 +41,7 @@ def tick_from_breeze(raw: dict, symbol: str, kind: str) -> Tick | None:
         symbol=symbol, last=last, bid=bid, ask=ask,
         cum_volume=_num(raw.get("ttq")) if kind == "stock" else None,
         prev_close=_num(raw.get("close")), source="breeze",
+        day_high=_num(raw.get("high")), day_low=_num(raw.get("low")),
     )
 
 
@@ -66,8 +69,13 @@ class BreezeFeed:
         sdk.generate_session(api_secret=secret, session_token=token)
         return sdk
 
+    def connect(self) -> None:
+        """Log in for data calls only (used by the history downloader)."""
+        if self._sdk is None:
+            self._sdk = self._login()
+
     def start(self, on_tick: TickHandler) -> None:
-        self._sdk = self._login()
+        self.connect()
         self._sdk.ws_connect()
 
         def handle(raw: dict) -> None:
@@ -104,6 +112,7 @@ class BreezeFeed:
     # ---- read-only helpers used by later steps ----
     def historical(self, inst: Instrument, interval: str, from_iso: str, to_iso: str) -> list[dict]:
         """interval: 1second | 1minute | 5minute | 30minute | 1day"""
+        self.connect()
         resp = self._sdk.get_historical_data_v2(
             interval=interval, from_date=from_iso, to_date=to_iso,
             stock_code=inst.breeze_code, exchange_code="NSE", product_type="cash",

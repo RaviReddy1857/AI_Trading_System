@@ -1,9 +1,11 @@
-"""SQLite storage for 1-minute bars and quality events."""
+"""SQLite storage: 1-minute bars and quality events (phase 1); daily and 5-minute
+history, regime log and manual data (phase 2)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .models import Bar
@@ -19,18 +21,56 @@ CREATE TABLE IF NOT EXISTS quality_events (
     at_utc TEXT NOT NULL, symbol TEXT NOT NULL, reason TEXT NOT NULL,
     last REAL, bid REAL, ask REAL, source TEXT
 );
+CREATE TABLE IF NOT EXISTS bars_1d (
+    symbol TEXT NOT NULL, source TEXT NOT NULL, start_utc TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL,
+    PRIMARY KEY (symbol, source, start_utc)
+);
+CREATE TABLE IF NOT EXISTS bars_5m (
+    symbol TEXT NOT NULL, source TEXT NOT NULL, start_utc TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL,
+    PRIMARY KEY (symbol, source, start_utc)
+);
+CREATE TABLE IF NOT EXISTS regime_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_utc TEXT NOT NULL, session_date TEXT, regime TEXT NOT NULL, bias TEXT NOT NULL,
+    reasons_json TEXT NOT NULL, rules_version TEXT NOT NULL, basis TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+    date TEXT NOT NULL, type TEXT NOT NULL, symbol TEXT NOT NULL DEFAULT '', note TEXT
+);
+CREATE TABLE IF NOT EXISTS holidays (date TEXT PRIMARY KEY, note TEXT);
+CREATE TABLE IF NOT EXISTS fii_dii (date TEXT PRIMARY KEY, fii_net_cr REAL NOT NULL, dii_net_cr REAL);
 """
+
+HISTORY_TABLES = ("bars_1d", "bars_5m")
+
+
+def _ts(v: str) -> datetime:
+    return datetime.fromisoformat(v)
+
+
+class SimDataInLiveStore(ValueError):
+    pass
 
 
 class Store:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, live: bool = False):
+        """live=True marks the live-data file: any write whose source is 'sim'
+        (or 'sim:...') is refused, so simulated rows can never land in it."""
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.live = live
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(db_path), check_same_thread=False)
         self._db.executescript(SCHEMA)
 
+    def _guard(self, source) -> None:
+        if self.live and str(source).strip().lower().startswith("sim"):
+            raise SimDataInLiveStore(f"refusing to write source '{source}' into the live database")
+
     def save_bar(self, bar: Bar, source: str) -> None:
+        self._guard(source)
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO bars_1m VALUES (?,?,?,?,?,?,?,?,?)",
@@ -41,6 +81,7 @@ class Store:
 
     def save_quality_event(self, at: datetime, symbol: str, reason: str,
                            last, bid, ask, source: str) -> None:
+        self._guard(source)
         with self._lock:
             self._db.execute(
                 "INSERT INTO quality_events (at_utc,symbol,reason,last,bid,ask,source)"
@@ -70,3 +111,111 @@ class Store:
     def quality_event_count(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM quality_events").fetchone()[0]
+
+    # ---------------- history (bars_1d, bars_5m) ----------------
+    def save_history_bars(self, table: str, bars: list[Bar], source: str) -> int:
+        if table not in HISTORY_TABLES:
+            raise ValueError(f"unknown history table {table}")
+        self._guard(source)
+        with self._lock:
+            self._db.executemany(
+                f"INSERT OR REPLACE INTO {table} VALUES (?,?,?,?,?,?,?,?)",
+                [(b.symbol, source, b.start.isoformat(), b.open, b.high, b.low, b.close, b.volume)
+                 for b in bars],
+            )
+            self._db.commit()
+        return len(bars)
+
+    def history_bars(self, table: str, symbol: str, source: str, *,
+                     since: datetime | None = None, before: datetime | None = None,
+                     limit: int | None = None) -> list[Bar]:
+        """Bars in ascending time order. `limit` keeps the most recent ones."""
+        if table not in HISTORY_TABLES:
+            raise ValueError(f"unknown history table {table}")
+        sql = f"SELECT symbol,start_utc,open,high,low,close,volume FROM {table} WHERE symbol=? AND source=?"
+        args: list = [symbol, source]
+        if since is not None:
+            sql += " AND start_utc >= ?"
+            args.append(since.isoformat())
+        if before is not None:
+            sql += " AND start_utc < ?"
+            args.append(before.isoformat())
+        sql += " ORDER BY start_utc DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        with self._lock:
+            rows = self._db.execute(sql, args).fetchall()
+        return [Bar(r[0], _ts(r[1]), r[2], r[3], r[4], r[5], r[6]) for r in reversed(rows)]
+
+    def last_history_start(self, table: str, symbol: str, source: str) -> datetime | None:
+        bars = self.history_bars(table, symbol, source, limit=1)
+        return bars[0].start if bars else None
+
+    def history_counts(self, source: str) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        with self._lock:
+            for table in HISTORY_TABLES:
+                for sym, n in self._db.execute(
+                        f"SELECT symbol, COUNT(*) FROM {table} WHERE source=? GROUP BY symbol", (source,)):
+                    out.setdefault(sym, {})[table] = n
+        return out
+
+    # ---------------- manual data ----------------
+    def replace_events(self, rows: list[tuple[str, str, str, str]]) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM events")
+            self._db.executemany("INSERT INTO events (date,type,symbol,note) VALUES (?,?,?,?)", rows)
+            self._db.commit()
+
+    def events_on(self, d: date) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT date,type,symbol,note FROM events WHERE date=? ORDER BY type,symbol,note",
+                (d.isoformat(),)).fetchall()
+        return [dict(zip(["date", "type", "symbol", "note"], r)) for r in rows]
+
+    def replace_holidays(self, rows: list[tuple[str, str]]) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM holidays")
+            self._db.executemany("INSERT INTO holidays (date,note) VALUES (?,?)", rows)
+            self._db.commit()
+
+    def holidays(self) -> dict[date, str]:
+        """Last successfully loaded holiday list."""
+        with self._lock:
+            rows = self._db.execute("SELECT date,note FROM holidays ORDER BY date").fetchall()
+        return {date.fromisoformat(d): n for d, n in rows}
+
+    def replace_fii_dii(self, rows: list[tuple[str, float, float | None]]) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM fii_dii")
+            self._db.executemany("INSERT INTO fii_dii (date,fii_net_cr,dii_net_cr) VALUES (?,?,?)", rows)
+            self._db.commit()
+
+    def fii_dii_before(self, d: date, limit: int) -> list[dict]:
+        """Most recent first, strictly before date d."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT date,fii_net_cr,dii_net_cr FROM fii_dii WHERE date < ? ORDER BY date DESC LIMIT ?",
+                (d.isoformat(), limit)).fetchall()
+        return [{"date": date.fromisoformat(r[0]), "fii_net_cr": r[1], "dii_net_cr": r[2]} for r in rows]
+
+    # ---------------- regime log ----------------
+    def save_regime(self, at: datetime, session_date: date, regime: str, bias: str,
+                    reasons: dict, rules_version: str, basis: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO regime_log (at_utc,session_date,regime,bias,reasons_json,rules_version,basis)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (at.isoformat(), session_date.isoformat(), regime, bias,
+                 json.dumps(reasons, sort_keys=True), rules_version, basis))
+            self._db.commit()
+
+    def regime_history(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT at_utc,session_date,regime,bias,reasons_json,rules_version,basis FROM regime_log"
+                " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        keys = ["at_utc", "session_date", "regime", "bias", "reasons", "rules_version", "basis"]
+        return [dict(zip(keys, (*r[:4], json.loads(r[4]), *r[5:]))) for r in rows]

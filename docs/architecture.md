@@ -67,7 +67,7 @@ Anything unknown at any step (stale price, missing lot size, unknown margin) pro
 | Language | Python 3.11+ | User's main stack |
 | Web/API | FastAPI + uvicorn, bound to 127.0.0.1 | Small, testable, local only |
 | UI | Server-rendered HTML + small vanilla JS, polling JSON routes | No build step; one user |
-| Storage | SQLite (one file under `data/`) | Zero operations; enough for one user |
+| Storage | SQLite (one file per feed mode under `data/`) | Zero operations; enough for one user |
 | Config | `config.yaml` validated by pydantic | Every limit a % of capital |
 | Secrets | `.env` loaded at start, never committed | Breeze and Telegram tokens |
 | Broker data | `breeze-connect` SDK, imported only in `app/feeds/breeze_feed.py` | Single choke point |
@@ -91,7 +91,7 @@ trading_system/
     models.py               # Tick, Bar (phase 1); Signal, RiskDecision added later
     quality.py  bars.py  store.py  hub.py
     feeds/      base.py  sim.py  breeze_feed.py
-    history.py  indicators.py  regime.py  calendar.py        # phase 2
+    history.py  indicators.py  regime.py  calendar.py  manual_data.py   # phase 2
     strategies/ base.py  orb.py  vwap_pullback.py  range_reversion.py
                 swing_pullback.py  swing_breakout.py         # phase 3
     costs.py  backtest.py                                    # phase 3
@@ -118,11 +118,12 @@ class Tick:            # exists
     symbol: str; last: float; bid: float | None; ask: float | None
     cum_volume: float | None; prev_close: float | None
     source: str; received_at: datetime          # UTC
+    day_high: float | None; day_low: float | None   # phase 2: session high/low from the feed, if sent
 
 @dataclass
 class Bar:             # exists
     symbol: str; start: datetime; open: float; high: float; low: float; close: float
-    volume: float; ticks: int
+    volume: float | None; ticks: int             # None = unknown (index history)
 
 @dataclass
 class Signal:          # phase 3
@@ -179,9 +180,9 @@ A strategy must be a pure function of its context: same input, same output, no n
 |---|---|---|
 | `bars_1m` | 1 | symbol, start_utc, o/h/l/c, volume, ticks, source |
 | `quality_events` | 1 | at_utc, symbol, reason, last, bid, ask |
-| `bars_5m`, `bars_1d` | 2 | symbol, start_utc, o/h/l/c, volume |
-| `regime_log` | 2 | at_utc, regime, bias, reasons_json, rules_version |
-| `events`, `holidays`, `fii_dii` | 2 | loaded from CSV files the user maintains |
+| `bars_5m`, `bars_1d` | 2 | symbol, source (`sim`/`breeze`), start_utc, o/h/l/c, volume. Daily bars keyed at 09:15 IST |
+| `regime_log` | 2 | at_utc, session_date, regime, bias, reasons_json, rules_version, basis (LIVE/LAST_CLOSE) |
+| `events`, `holidays`, `fii_dii` | 2 | loaded from CSV files the user maintains (events: date, type, symbol, note; fii_dii: date, fii_net_cr, dii_net_cr) |
 | `backtest_runs`, `backtest_trades` | 3 | run_id, strategy_id, version, params_json, per-trade results |
 | `option_chain` | 4 | as_of_utc, underlying, expiry, strike, right, bid, ask, last, oi |
 | `instruments` | 4 | underlying, lot_size, expiry list, as_of (read from broker list) |
@@ -193,12 +194,15 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `strategy_state` | 7 | strategy_id, regime, enabled, size_factor, changed_at, changed_by |
 | `llm_calls` | 8 | at_utc, task, tokens/cost if known, ok, latency |
 
+There is one SQLite file per feed mode, `data/market_sim.db` and `data/market_live.db` (`storage.db_path_sim` / `db_path_live`, chosen from `feed.mode`).
+The live file refuses any row whose source is `sim`.
 All timestamps are stored in UTC and shown in IST. Signals and their evidence are never edited after creation.
 
 ## 8. Configuration
 
-`config.yaml` holds everything tunable. Existing sections: `account`, `risk`, `feed`, `watchlist`, `server`, `storage`.
-Later phases add: `regime`, `strategies.<id>`, `costs`, `options`, `position_cap_pct` (default 25),
+`config.yaml` holds everything tunable. Existing sections: `account`, `risk`, `feed`, `watchlist`, `server`, `storage`,
+`regime`, `bias`, `history`, `calendar` (phase 2).
+Later phases add: `strategies.<id>`, `costs`, `options`, `position_cap_pct` (default 25),
 `scoring`, `alerts`, `cutback`, `ladder`, `llm`, `stock_option_selling`, `go_live_gate`.
 
 Rules:
@@ -233,6 +237,9 @@ Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `PO
 `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries, `POST /capital/log`.
 
 Forbidden in any path: `order`, `execute`, `square`, `submit`, `trade/`. The safety test checks every route.
+
+Every non-GET/HEAD request must have Host `127.0.0.1:<port>` or `localhost:<port>`, a matching Origin if one is sent,
+and Content-Type `application/json` (403 / 415 otherwise). `POST /data/import/{kind}` takes `{"text": "<csv>"}`.
 
 Phase 1's safety test allows no write routes at all. From phase 2, replace that single check with an allowlist: write routes may exist only under `/journal/`, `/data/import/` and `/capital/`. This is the one permitted change to `tests/test_safety.py`; every other safety check stays as it is or gets stricter.
 

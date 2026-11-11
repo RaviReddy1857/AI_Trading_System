@@ -18,6 +18,8 @@ class Tick:
     prev_close: float | None = None
     source: str = "sim"
     received_at: datetime = field(default_factory=utcnow)
+    day_high: float | None = None    # session high/low as reported by the feed, if any
+    day_low: float | None = None
 
 
 @dataclass
@@ -28,5 +30,5 @@ class Bar:
     high: float
     low: float
     close: float
-    volume: float = 0.0
+    volume: float | None = 0.0   # None = unknown (index history carries no volume)
     ticks: int = 0

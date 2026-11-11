@@ -3,7 +3,9 @@ bars or (later) strategies. Unknown values stay unknown; they are never
 converted to zero."""
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+import math
+from collections.abc import Collection
+from datetime import date, datetime, time, timedelta, timezone
 
 from .models import Tick
 
@@ -17,20 +19,33 @@ PRICE_JUMP = "PRICE_JUMP"
 VOLUME_WENT_BACK = "VOLUME_WENT_BACK"
 
 
-def is_market_hours(now_utc: datetime) -> bool:
-    """Weekday 09:15-15:30 IST. Exchange holidays are added in a later step."""
+def is_market_hours(now_utc: datetime, holidays: Collection[date] = ()) -> bool:
+    """Weekday 09:15-15:30 IST, excluding NSE trading holidays (data/holidays.csv)."""
     now = now_utc.astimezone(IST)
-    return now.weekday() < 5 and MARKET_OPEN <= now.time() <= MARKET_CLOSE
+    if now.weekday() >= 5 or now.date() in holidays:
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 JUMP_WINDOW_S = 120  # only compare against a recent tick, so an overnight gap
                      # or a long pause cannot block a symbol forever
 
 
+def is_finite(x) -> bool:
+    """True only for a real, finite number (rejects None, NaN, +inf, -inf, non-numbers)."""
+    try:
+        return x is not None and math.isfinite(x)
+    except TypeError:
+        return False
+
+
 def check_tick(tick: Tick, prev_good: Tick | None, max_jump_pct: float) -> list[str]:
     """Return a list of reason codes. Empty list = tick is good."""
     reasons: list[str] = []
-    if tick.last is None or tick.last != tick.last or tick.last <= 0:
+    if not is_finite(tick.last) or tick.last <= 0:
+        return [BAD_PRICE]
+    # A quote that is present must be a finite number; None means "not provided".
+    if any(q is not None and not is_finite(q) for q in (tick.bid, tick.ask)):
         return [BAD_PRICE]
     if tick.bid is not None and tick.ask is not None and tick.bid > 0 and tick.ask > 0:
         if tick.bid > tick.ask:
@@ -52,9 +67,9 @@ def check_tick(tick: Tick, prev_good: Tick | None, max_jump_pct: float) -> list[
 
 
 def freshness(last_good_at: datetime | None, now_utc: datetime, stale_after_s: int,
-              enforce_hours: bool = True) -> str:
+              enforce_hours: bool = True, holidays: Collection[date] = ()) -> str:
     """LIVE, STALE, CLOSED or NO_DATA for one symbol."""
-    if enforce_hours and not is_market_hours(now_utc):
+    if enforce_hours and not is_market_hours(now_utc, holidays):
         return "CLOSED"
     if last_good_at is None:
         return "NO_DATA"
