@@ -268,6 +268,45 @@ The point-in-time regime was UNKNOWN on 7 of 131 sessions (6 after market holida
 - The app on port 8000 was running the old code during this work; restart it to get the new routes and the data-break rule in the live regime.
 - Sim mode startup is slower (fake 190-day 5-minute history for 53 symbols: over 2 minutes the first time).
 
+## Phase 3 diagnosis (2026-11-12)
+
+Question: all five strategies had profit factor 0.25-0.41. Is that a bug? Development period only; holdout not opened;
+no parameters changed. Tools: `python scripts/diagnostics/diag.py` (random baseline, sample trades, exit reasons,
+R-multiples, MFE/MAE, mechanical checks) and `python scripts/diagnostics/fwd.py` (raw forward returns, no engine).
+Output goes to `data/diagnostics/` (not tracked).
+
+**Verdict: no bug found.** The engine reran all five backtests with identical trades and net P&L.
+
+Profit factor by cost treatment, real vs random entries (20 seeds; same symbols, sessions, direction, stop and target
+distances, exit rules; swing: random TRENDING_UP days):
+
+| Strategy | No costs | Slippage only | Charges only | Both | Random, no costs (min-max) |
+|---|---|---|---|---|---|
+| orb | 0.70 | 0.52 | 0.54 | 0.41 | 0.99 (0.80-1.17) |
+| vwap_pullback | 0.92 | 0.51 | 0.55 | 0.31 | 1.24 (1.08-1.33) |
+| range_reversion | 1.00 | 0.48 | 0.52 | 0.25 | 0.57 (0.50-0.65) |
+| swing_pullback | 0.58 | 0.53 | 0.31 | 0.29 | 0.75 (0.53-0.91) |
+| swing_breakout | 0.60 | 0.57 | 0.38 | 0.36 | 0.71 (0.46-1.06) |
+
+- **Worse than every random seed: orb and vwap_pullback.** Checked without the engine (`fwd.py`): 30-60 minutes after
+  their entries the price has moved against the trade (orb -2 bp, vwap -1.2 bp) while any bar of the same session in the
+  same direction moves with it (+5 to +8 bp). The signals pick short reversals; the engine is not the cause.
+- range_reversion beats random clearly before costs, but its stops (median 0.20% of price) are smaller than costs can
+  carry: costs take 0.93 of the risk per trade (vwap_pullback 0.65, orb 0.21, swings about 0.3).
+- Both swing strategies are within the random range; random long entries on TRENDING_UP days also lost in this period.
+- Mechanical checks on every real and random trade (about 100,000), 0 failures: stop and target on the correct sides
+  of the signal close and the raw entry; no entry beyond its stop; entry on the bar after the signal; slippage applied
+  once per side, always adverse, at the configured rate; stop exits never better than the stop (gaps fill at the open);
+  target exits exactly at the target; no bar between entry and exit touched the stop or target before the exit bar.
+- Exits on the entry bar: orb 0, vwap_pullback 127, range_reversion 161, swings 3 each (random entries: about the same).
+- Exit reasons: orb 59% end of day, 36% stop, 5% target; vwap 56/32/12 (stop/target/EOD); range 60/32/8;
+  swing_pullback 53/11/37 (stop/target/time); swing_breakout 58/17/25.
+- Mean R before costs: orb -0.15, vwap -0.05, range -0.02, swing_pullback -0.23, swing_breakout -0.29.
+  MFE/MAE (R): orb 0.66/0.70, vwap 0.97/0.94, range 1.15/1.03, swing_pullback 0.84/0.94, swing_breakout 0.91/1.10.
+- Data finding (does not affect backtests): Breeze's 15:20 five-minute bar is unreliable (zero volume in about half
+  of sessions, open more than 0.5% from the previous close in about 2,000 sessions); the 15:15 bar is missing in about
+  47% of sessions. Trades exit at the 15:10 bar's close and enter no later than 14:45, so they never use these bars.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -299,6 +338,7 @@ The point-in-time regime was UNKNOWN on 7 of 131 sessions (6 after market holida
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
+| 28 | 3 | Breeze's 15:20 five-minute bar is unreliable and the 15:15 bar is often missing | Open: not used by backtests; live regime filter planned in phase 3b |
 
 ## Decisions log
 
