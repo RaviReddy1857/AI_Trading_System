@@ -82,7 +82,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
 
     def history_job() -> None:
         try:
-            summary = HistoryLoader(settings, store, BreezeHistorySource(feed), calendar).update()
+            summary = HistoryLoader(settings, store, BreezeHistorySource(feed, settings.history.request_timeout_seconds), calendar).update()
             failed = [k for k, v in summary.items() if "error" in v]
             log.info("history updated; %d failed: %s", len(failed), failed)
         except Exception:

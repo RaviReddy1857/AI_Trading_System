@@ -14,7 +14,8 @@ Rules (CLAUDE.md, architecture.md section 14):
   capital in position value. One open trade per symbol per strategy; portfolio limits are phase 5.
 
 Walk-forward: rules are fixed (nothing is fitted). Sessions are split into a development part and a
-final holdout (backtest.holdout_pct). The development part is replayed once and reported overall and
+final holdout: sessions from backtest.holdout_start[interval] on (fixed dates, phase 3b), or else the
+last backtest.holdout_pct of sessions. The development part is replayed once and reported overall and
 in rolling windows of window_sessions. The holdout is not simulated at all unless --holdout is given.
 
 Run:  python -m app.backtest [--strategy orb ...] [--symbols RELIANCE TCS] [--source breeze|sim] [--holdout]
@@ -22,6 +23,7 @@ Run:  python -m app.backtest [--strategy orb ...] [--symbols RELIANCE TCS] [--so
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import logging
 import math
@@ -95,7 +97,9 @@ class Engine:
         self.regime = regime or PointInTimeRegime(settings, store, self.calendar, source)
         self.cfg = settings.backtest
         self._five: dict[str, dict[date, list[Bar]]] = {}
+        self._five_days: dict[str, list[date]] = {}
         self._daily: dict[str, list[Bar]] = {}
+        self._daily_dates: dict[str, list[date]] = {}
 
     # ---- data ----
     def five(self, sym: str) -> dict[date, list[Bar]]:
@@ -110,6 +114,25 @@ class Engine:
         if sym not in self._daily:
             self._daily[sym] = self.store.history_bars("bars_1d", sym, self.source)
         return self._daily[sym]
+
+    def prior_sessions(self, sym: str, d: date, n: int) -> tuple[tuple[Bar, ...], ...]:
+        """The last n stored sessions of 5-minute bars before session d (oldest first)."""
+        if n <= 0:
+            return ()
+        data = self.five(sym)
+        if sym not in self._five_days:
+            self._five_days[sym] = sorted(data)
+        days = self._five_days[sym]
+        i = bisect.bisect_left(days, d)
+        return tuple(tuple(data[x]) for x in days[max(0, i - n):i])
+
+    def index_daily(self, d: date) -> tuple[Bar, ...]:
+        """The index's daily bars up to and including session d."""
+        sym = self.s.regime.index_symbol
+        bars = self.daily(sym)
+        if sym not in self._daily_dates:
+            self._daily_dates[sym] = [bar_date(b) for b in bars]
+        return tuple(bars[:bisect.bisect_right(self._daily_dates[sym], d)])
 
     def breaks(self, sym: str) -> list[int]:
         """Indexes of daily bars that opened beyond history.max_overnight_gap_pct from the previous
@@ -191,6 +214,7 @@ class Engine:
         data = self.five(sym)
         for d in sessions:
             bars = data.get(d, [])
+            prior = self.prior_sessions(sym, d, strategy.prior_sessions_needed) if bars else ()
             pos = None   # (signal, entry fill, qty, entry time, entry index)
             for i, bar in enumerate(bars):
                 end = bar.start + FIVE_MIN
@@ -212,7 +236,8 @@ class Engine:
                 if pos is not None or end_t >= exit_at:
                     continue
                 # bar i has closed: the strategy sees bars[0..i] and the regime known at `end`
-                ctx = MarketContext(sym, kind, end, self.regime.at_bar(end).regime, intraday=tuple(bars[:i + 1]))
+                ctx = MarketContext(sym, kind, end, self.regime.at_bar(end).regime, intraday=tuple(bars[:i + 1]),
+                                    prior_sessions=prior)
                 for sig in strategy.evaluate(ctx):
                     nxt = bars[i + 1] if i + 1 < len(bars) else None
                     if nxt is None or nxt.start != end or nxt.start >= sig.valid_until:
@@ -267,7 +292,8 @@ class Engine:
                     pos = None
             if pos is not None or d not in allowed or d == last_allowed:
                 continue
-            ctx = MarketContext(sym, kind, close_t, self.regime.at_close(d).regime, daily=tuple(bars[start:i + 1]))
+            ctx = MarketContext(sym, kind, close_t, self.regime.at_close(d).regime, daily=tuple(bars[start:i + 1]),
+                                index_daily=self.index_daily(d) if strategy.needs_index_daily else ())
             for sig in strategy.evaluate(ctx):
                 nxt = bars[i + 1] if i + 1 < len(bars) else None
                 if nxt is None or nxt.start >= sig.valid_until:
@@ -346,12 +372,26 @@ def exposure(trades: list[Trade], capital: float) -> dict:
             "max_position_value_pct_of_capital": round(peak_v / capital * 100, 1) if capital else None}
 
 
-def split_sessions(sessions: list[date], holdout_pct: float) -> tuple[list[date], list[date]]:
-    """(development, holdout): the holdout is the final holdout_pct of sessions, at least one."""
+def split_sessions(sessions: list[date], holdout_pct: float,
+                   holdout_start: date | None = None) -> tuple[list[date], list[date]]:
+    """(development, holdout). With holdout_start, the holdout is every session on or after it;
+    otherwise the final holdout_pct of sessions, at least one."""
     if not sessions:
         return [], []
+    if holdout_start is not None:
+        return [d for d in sessions if d < holdout_start], [d for d in sessions if d >= holdout_start]
     h = max(1, math.ceil(len(sessions) * holdout_pct / 100))
     return sessions[:-h], sessions[-h:]
+
+
+def dev_holdout(settings: Settings, sessions: list[date], interval: str) -> tuple[list[date], list[date]]:
+    """(development, holdout) sessions for a bar interval: sessions before backtest.test_start are not
+    tested, and the holdout follows backtest.holdout_start (or holdout_pct)."""
+    cfg = settings.backtest
+    start = cfg.test_start.get(interval)
+    if start is not None:
+        sessions = [d for d in sessions if d >= start]
+    return split_sessions(sessions, cfg.holdout_pct, cfg.holdout_start.get(interval))
 
 
 def windows(sessions: list[date], size: int, step: int) -> list[list[date]]:
@@ -366,7 +406,8 @@ def windows(sessions: list[date], size: int, step: int) -> list[list[date]]:
 
 def build_report(strategy: Strategy, settings: Settings, costs: CostModel, source: str,
                  dev: list[date], hold: list[date], dev_trades: list[Trade], skipped: Counter,
-                 hold_trades: list[Trade] | None, hold_skipped: Counter | None, symbols: int) -> dict:
+                 hold_trades: list[Trade] | None, hold_skipped: Counter | None, symbols: int,
+                 filtered: dict | None = None) -> dict:
     cfg = settings.backtest
     cap = settings.account.capital_inr
     by_regime: dict[str, list[Trade]] = defaultdict(list)
@@ -408,6 +449,8 @@ def build_report(strategy: Strategy, settings: Settings, costs: CostModel, sourc
             "skipped_signals": dict(hold_skipped) if hold_skipped is not None else None,
         },
         "skipped_signals": dict(skipped),
+        "filtered_signals": dict(filtered or {}),
+        "round_trip_cost_pct": strategy.round_trip_cost_pct,
         "notes": [
             "Entries fill at the next bar's open plus slippage; the signal bar's close is never a fill.",
             "If a bar touches both stop and target, the stop is assumed hit first.",
@@ -430,13 +473,15 @@ def run_backtest(settings: Settings, store: Store, source: str, strategy: Strate
     stocks = [(i.symbol, i.kind) for i in settings.watchlist
               if i.kind == "stock" and (symbols is None or i.symbol in symbols)]
     sessions = eng.sessions(strategy)
-    dev, hold = split_sessions(sessions, settings.backtest.holdout_pct)
+    dev, hold = dev_holdout(settings, sessions, strategy.interval)
+    strategy.rejections.clear()
     trades, skipped = eng.run(strategy, dev, stocks)
+    filtered = dict(strategy.rejections)
     hold_trades = hold_skipped = None
     if include_holdout and hold:
         hold_trades, hold_skipped = eng.run(strategy, hold, stocks)
     rep = build_report(strategy, settings, eng.costs, source, dev, hold, trades, skipped,
-                       hold_trades, hold_skipped, len(stocks))
+                       hold_trades, hold_skipped, len(stocks), filtered)
     rep["data_breaks"] = {
         sym: [bar_date(eng.daily(sym)[i]).isoformat() for i in eng.breaks(sym)] for sym, _ in stocks if eng.breaks(sym)}
     rep["notes"].append(f"Stock daily history is not adjusted for splits, bonuses or demergers. An overnight gap above "
@@ -456,10 +501,22 @@ def run_backtest(settings: Settings, store: Store, source: str, strategy: Strate
     return {"report": rep, "trades": all_trades}
 
 
+def load_calendar(settings: Settings, store: Store) -> MarketCalendar:
+    """Load holidays, events and FII/DII from the CSV files into the store (as the app does at start-up),
+    so a backtest run sees the same holidays as the app. An invalid file keeps the last good copy."""
+    from .manual_data import ManualData
+    cal = MarketCalendar(store.holidays())
+    manual = ManualData(settings, store, cal)
+    manual.load_all()
+    for line in manual.problems():
+        log.warning(line)
+    return MarketCalendar(store.holidays())
+
+
 def main(argv: list[str] | None = None) -> int:
     from .config import load_settings
     ap = argparse.ArgumentParser(description="Cost-inclusive backtests with walk-forward windows")
-    ap.add_argument("--strategy", nargs="*", help="strategy ids (default: all)")
+    ap.add_argument("--strategy", nargs="*", help="strategy ids (default: all not in strategies.inactive)")
     ap.add_argument("--symbols", nargs="*", help="stock symbols (default: every watchlist stock)")
     ap.add_argument("--source", choices=["breeze", "sim"], default="breeze")
     ap.add_argument("--holdout", action="store_true", help="also evaluate the untouched holdout period")
@@ -468,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     path = settings.path(settings.storage.db_path_live if args.source == "breeze" else settings.storage.db_path_sim)
     store = Store(path, live=args.source == "breeze")
-    eng = Engine(settings, store, args.source)
+    eng = Engine(settings, store, args.source, calendar=load_calendar(settings, store))
     for strat in build_strategies(settings, args.strategy):
         res = run_backtest(settings, store, args.source, strat, args.symbols, args.holdout, engine=eng)
         r = res["report"]
@@ -480,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  trades {o['trades']}  win rate {o['win_rate_pct']}%  net Rs {o['net_pnl_inr']:,.2f} "
               f"(costs Rs {o['costs_inr']:,.2f})  max DD Rs {o['max_drawdown_inr']:,.2f}  PF {o['profit_factor']}"
               f"  {o['sample_note']}")
+        if r["filtered_signals"]:
+            print(f"  filtered signals {r['filtered_signals']}")
         print(f"  saved {r['run_id']}")
     return 0
 

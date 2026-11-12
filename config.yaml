@@ -100,17 +100,19 @@ regime:
   breadth_min_coverage_pct: 80   # share of watchlist stocks with usable data, else UNKNOWN
   event_types: [EXPIRY, RBI_POLICY, BUDGET, MARKET_EVENT]   # market-wide events that force EVENT
   recompute_seconds: 60
+  ignore_5m_bar_starts: ["15:15", "15:20"]   # unreliable Breeze history bars; ignored by the backtest regime, kept in storage
 
 bias:
   streak_days: 3                 # BEARISH after 3 straight days of FII net selling, BULLISH after 3 of buying
 
 history:
-  daily_days: 800                # daily bars to download (calendar days); the regime needs ~250 sessions of VIX before each backtest day
+  daily_days: 4400               # daily bars to download (calendar days, ~12 years); Breeze's own limit applies (a floor is recorded); the regime needs ~250 sessions of VIX before each backtest day
   intraday_days: 190             # 5-minute bars to download (calendar days); 6+ months for phase 3 backtests
   sim_seed_on_start: true        # sim mode only: generate fake history so the badge works
   request_pause_seconds: 0.7     # breeze: pause between history requests (Breeze allows ~100/minute)
   empty_retries: 2               # breeze: ask again this many times when a reply is empty
   retry_pause_seconds: 3.0       # breeze: wait before each retry
+  request_timeout_seconds: 60    # breeze: give up on a request with no reply (that symbol is reported failed; rerun to resume)
   max_overnight_gap_pct: 25      # stocks: a bigger overnight jump (unadjusted split/bonus/demerger) breaks the history
 
 calendar:                        # CSV files you maintain (see README)
@@ -171,6 +173,7 @@ costs:
 
 # ---- Phase 3: strategy thresholds (each strategy has an id and version in its own file) ----
 strategies:
+  inactive: [vwap_pullback]     # retired from cash trading (phase 3b); code kept, run only by name
   orb:                          # opening-range breakout, intraday
     range_minutes: 15           # opening range = 09:15-09:30
     breakout_buffer_pct: 0.05   # close must clear the range by this %
@@ -207,6 +210,40 @@ strategies:
     stop_atr_mult: 1.5
     reward_risk: 2.0
     max_hold_days: 10
+  # ---- Phase 3b versions (v1 above kept unchanged for comparison) ----
+  orb_v2:
+    range_minutes: 30           # opening range 09:15-09:45
+    min_volume_mult: 1.5        # breakout bar volume > this x the same time-of-day bar's average ...
+    volume_lookback_sessions: 20  # ... over the previous 20 sessions
+    min_volume_sessions: 15     # at least this many of them must have that bar
+    reward_risk: 2.0
+    last_signal_time: "11:30"
+    min_stop_cost_mult: 5       # skip if stop distance < 5x estimated round-trip cost (charges + slippage)
+  range_reversion_v2:
+    band_bars: 20
+    band_sd: 2.0
+    stop_buffer_pct: 0.10
+    first_signal_time: "09:45"
+    last_signal_time: "14:30"
+    min_stop_cost_mult: 5       # stop = further of the 3-bar extreme and 5x round-trip cost
+    min_target_cost_mult: 2     # skip if the band average is closer than 2x round-trip cost
+  swing_pullback_v2:
+    fast_sma: 20
+    slow_sma: 50
+    pullback_pct: 1.0
+    atr_days: 14
+    stop_atr_mult: 1.5
+    reward_risk: 2.0
+    max_hold_days: 10
+    index_sma_days: 50          # longs only while NIFTY closes above its 50-day average
+  swing_breakout_v2:
+    lookback_days: 20
+    volume_mult: 1.5
+    atr_days: 14
+    stop_atr_mult: 1.5
+    reward_risk: 2.0
+    max_hold_days: 10
+    index_sma_days: 50
 
 # ---- Phase 3: backtest and walk-forward ----
 backtest:
@@ -218,3 +255,8 @@ backtest:
   step_sessions: 21
   min_trades: 30                # fewer trades => LOW SAMPLE
   reports_dir: data/backtests
+  holdout_start:                # fixed holdout (phase 3b): sessions on/after these dates are never used in development
+    5minute: 2026-10-05
+    1day: 2026-06-08
+  test_start:                   # first session tested (older bars still feed averages); see STATUS phase 3b
+    1day: 2019-01-22            # Breeze daily history before this has wrong-scale days (stocks) and x100 VIX values

@@ -251,10 +251,18 @@ class ScriptedSource:
         return self.sim.fetch(inst, interval, start, end)
 
 
-def one_symbol_settings(symbol="RELIANCE"):
+def one_chunk_settings(symbol=None):
+    """Daily history that fits in one request (these tests count requests and retries, not chunks);
+    optionally one stock plus the indices."""
     raw = load_settings().model_dump()
-    raw["watchlist"] = [i for i in raw["watchlist"] if i["kind"] == "index" or i["symbol"] == symbol]
+    raw["history"]["daily_days"] = 800
+    if symbol:
+        raw["watchlist"] = [i for i in raw["watchlist"] if i["kind"] == "index" or i["symbol"] == symbol]
     return Settings.model_validate(raw)
+
+
+def one_symbol_settings(symbol="RELIANCE"):
+    return one_chunk_settings(symbol)
 
 
 def test_breeze_source_is_remote_and_sim_is_not():
@@ -262,7 +270,7 @@ def test_breeze_source_is_remote_and_sim_is_not():
 
 
 def test_remote_requests_are_paced():
-    s = load_settings()
+    s = one_chunk_settings()
     sleeps = []
     src = ScriptedSource()
     HistoryLoader(s, Store(":memory:"), src, sleep=sleeps.append).update(T0)
@@ -316,7 +324,7 @@ def test_new_symbol_is_downloaded_while_stored_ones_are_skipped():
     store = Store(":memory:")
     HistoryLoader(one_symbol_settings("TCS"), store, ScriptedSource(), sleep=lambda x: None).update(AFTER_CLOSE)
     src = ScriptedSource()
-    HistoryLoader(load_settings(), store, src, sleep=lambda x: None).update(AFTER_CLOSE)
+    HistoryLoader(one_chunk_settings(), store, src, sleep=lambda x: None).update(AFTER_CLOSE)
     fetched = {c[0] for c in src.calls}
     assert "TCS" not in fetched and "NIFTY" not in fetched
     assert {"RELIANCE", "HDFCBANK", "ICICIBANK", "INFY"} <= fetched

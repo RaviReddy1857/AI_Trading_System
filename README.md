@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 259 passed
+python -m pytest -q          # should say 294 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -157,6 +157,34 @@ on 2024-10-28, its 1:1 bonus). An overnight gap of more than 25% (`history.max_o
 averages, ATR, breakouts and the regime's breadth only use bars after it, and a swing trade open across one is dropped.
 `python -m app.history` lists the breaks it finds; each report lists them under `data_breaks`.
 
+## Phase 3b: strategy revision (v2 versions)
+v1 strategies are kept unchanged for comparison; the new versions have their own ids. Results and the comparison with
+random entries are in `docs/STATUS.md` (phase 3b). In short: **no version is profitable after costs yet, and none beats
+random entries**; nothing has been tested on the holdout.
+
+| Strategy | What changed from v1 |
+|---|---|
+| `orb_v2` | 30-minute opening range; volume above 1.5x the same time-of-day bar's 20-session average; stop at the other side of the range; skipped if the stop is closer than 5x the round-trip cost |
+| `range_reversion_v2` | Same entry; stop at the 3-bar extreme or 5x round-trip cost, whichever is further; target the band average; skipped if the average is closer than 2x the round-trip cost |
+| `swing_pullback_v2`, `swing_breakout_v2` | Only while NIFTY closes above its 50-day average (nearly always true already in a TRENDING_UP regime) |
+| `vwap_pullback` | Retired from cash trading: listed in `strategies.inactive`, so not run by default (`--strategy vwap_pullback` still works) |
+
+- **Round-trip cost estimate** (rule 1): charges for an intraday round trip at the position cap plus slippage on both sides,
+  computed from `config.yaml` costs (0.187% of price at current rates). It is part of each v2 version, so changing a rate
+  changes the version.
+- **Fixed holdout**: `backtest.holdout_start` - 5-minute strategies from 2026-10-05, daily strategies from 2026-06-08.
+  Downloading more history never moves the holdout back over data already used.
+- **Swing test period starts 2019-01-22** (`backtest.test_start`): Breeze's daily history goes back to 2014, but before
+  2019-01-22 it has days at the wrong price scale and VIX values about 100x off. The older bars stay stored.
+- Backtests load `holidays.csv`, `events.csv` and `fii_dii.csv` before running, as the app does.
+- History requests time out after 60 s (`history.request_timeout_seconds`); the symbol is reported failed and a rerun resumes.
+- **Diagnostics** (rerun after any strategy change; development period only):
+  ```
+  python scripts/diagnostics/diag.py --strategy orb_v2 range_reversion_v2   # random baseline, 10 sample trades, checks
+  python scripts/diagnostics/fwd.py --strategy orb_v2                       # raw forward returns vs a baseline
+  ```
+  Output goes to `data/diagnostics/`.
+
 ## Status values
 | Status | Meaning |
 |---|---|
@@ -187,6 +215,10 @@ averages, ATR, breakouts and the regime's breadth only use bars after it, and a 
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **No strategy has an edge yet.** Every v1 and v2 version loses after costs on the development period and none is
+  better than random entries (docs/STATUS.md, phase 3b). The holdout has not been opened.
+- Breeze daily history before 2019-01-22 has price errors; swing tests skip it. Holidays before 2026 are not in
+  `holidays.csv`, so sessions after those holidays get an UNKNOWN regime in swing tests.
 - **Costs against a real contract note.** The rates are published standard rates, not checked against your fills.
   Which legs ICICI charges Prime brokerage on (assumed: both legs, intraday and options) is not stated on its page.
 - Corporate actions: no adjustment factors are applied; history across a big overnight gap is simply not used.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import threading
 import time as _time
 import zlib
 from collections.abc import Callable
@@ -116,17 +117,42 @@ def is_complete(bar: Bar, interval: str, now_utc: datetime) -> bool:
 
 
 # ---------------- sources ----------------
+def call_with_timeout(fn, timeout: float | None):
+    """Run fn() and return its result; raise TimeoutError if it takes longer than `timeout` seconds.
+    The SDK's HTTP calls have no timeout of their own: one request once hung for over 30 minutes and
+    stalled the whole download. The abandoned call keeps running in a daemon thread."""
+    if not timeout:
+        return fn()
+    box: dict = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as e:          # re-raised in the caller's thread
+            box["error"] = e
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError(f"no reply within {timeout:g} s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 class BreezeHistorySource:
     name = "breeze"
     remote = True         # real API calls: paced, and empty replies are retried
 
-    def __init__(self, feed):
+    def __init__(self, feed, timeout_seconds: float | None = 60.0):
         self._feed = feed     # BreezeFeed; the SDK stays inside breeze_feed.py
+        self.timeout_seconds = timeout_seconds
 
     def fetch(self, inst: Instrument, interval: str, start: datetime, end: datetime) -> list[dict]:
         fmt = "%Y-%m-%dT%H:%M:%S.000Z"
-        return self._feed.historical(inst, interval, start.astimezone(timezone.utc).strftime(fmt),
-                                     end.astimezone(timezone.utc).strftime(fmt))
+        a, b = start.astimezone(timezone.utc).strftime(fmt), end.astimezone(timezone.utc).strftime(fmt)
+        return call_with_timeout(lambda: self._feed.historical(inst, interval, a, b), self.timeout_seconds)
 
 
 class SimHistorySource:
@@ -305,6 +331,7 @@ class HistoryLoader:
         return out
 
     def update_symbol(self, inst: Instrument, interval: str, now: datetime) -> dict:
+        initial = self.store.first_history_start(TABLE[interval], inst.symbol, self.source.name) is None
         ranges = self._ranges(inst, interval, now)
         if not ranges:
             return {"saved": 0, "rejected": 0, "skipped": "already stored"}
@@ -316,6 +343,8 @@ class HistoryLoader:
             a = start
             while a < end:
                 b = min(a + chunk, end)
+                if end - b <= timedelta(days=1):
+                    b = end      # fold a tail of a day or less into this chunk (a sliver alone is always empty)
                 rows = self._fetch(inst, interval, a, b)
                 requests += 1
                 got_any = got_any or bool(rows)
@@ -326,8 +355,9 @@ class HistoryLoader:
                 # do not ask again for the same empty range.
                 self.store.set_history_floor(TABLE[interval], inst.symbol, self.source.name, end)
         bars, bad = parse_rows(raw, inst.symbol, inst.kind, interval)
-        if any(k == "backfill" for k, _, _ in ranges) and bars:
+        if (initial or any(k == "backfill" for k, _, _ in ranges)) and bars:
             # Data starts later than requested (listing date or API limit): floor at the first bar.
+            # Also on the very first download, so later runs do not ask again for the empty years.
             first_req = min(s for k, s, _ in ranges)
             if bars[0].start - first_req > timedelta(days=CHUNK_DAYS[interval]):
                 self.store.set_history_floor(TABLE[interval], inst.symbol, self.source.name,
@@ -438,7 +468,8 @@ def main(argv: list[str] | None = None) -> None:
     calendar = MarketCalendar()
     ManualData(settings, store, calendar).load_all()
     feed = BreezeFeed(settings.watchlist)
-    summary = HistoryLoader(settings, store, BreezeHistorySource(feed), calendar).update(symbols=wanted)
+    summary = HistoryLoader(settings, store, BreezeHistorySource(feed, settings.history.request_timeout_seconds),
+                            calendar).update(symbols=wanted)
     for key, res in summary.items():
         print(f"{key:28s} {res}")
     print(summarize(summary))

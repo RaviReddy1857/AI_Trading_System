@@ -1,7 +1,7 @@
 """Loads and validates config.yaml. All risk limits are percentages of capital."""
 from __future__ import annotations
 
-from datetime import time as _dtime
+from datetime import date as _date, time as _dtime
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -93,6 +93,16 @@ class Regime(StrictModel):
     breadth_min_coverage_pct: float = Field(80, gt=0, le=100)
     event_types: list[str] = ["EXPIRY", "RBI_POLICY", "BUDGET", "MARKET_EVENT"]
     recompute_seconds: int = Field(60, ge=5, le=3600)
+    # Stored 5-minute bars starting at these IST times are unreliable in Breeze history (phase 3 diagnosis)
+    # and are ignored by the point-in-time regime. They stay stored.
+    ignore_5m_bar_starts: list[str] = ["15:15", "15:20"]
+
+    @field_validator("ignore_5m_bar_starts")
+    @classmethod
+    def valid_times(cls, v: list[str]) -> list[str]:
+        for x in v:
+            _hhmm(x)
+        return v
 
     @model_validator(mode="after")
     def consistent(self) -> "Regime":
@@ -114,7 +124,7 @@ class Bias(StrictModel):
 
 
 class History(StrictModel):
-    daily_days: int = Field(400, ge=60, le=2000)       # calendar days of daily bars to keep
+    daily_days: int = Field(400, ge=60, le=6000)       # calendar days of daily bars to keep (Breeze's own limit applies)
     intraday_days: int = Field(190, ge=1, le=1000)     # calendar days of 5-minute bars (>= 6 months for backtests)
     sim_seed_on_start: bool = True                     # sim mode: generate fake history
     # Breeze only (Breeze allows about 100 calls a minute): pause between history requests,
@@ -122,6 +132,7 @@ class History(StrictModel):
     request_pause_seconds: float = Field(0.7, ge=0, le=10)
     empty_retries: int = Field(2, ge=0, le=5)
     retry_pause_seconds: float = Field(3.0, ge=0, le=60)
+    request_timeout_seconds: float = Field(60.0, gt=0, le=600)   # a request with no reply by then fails that symbol
     # Stock daily history is not adjusted for splits/bonuses/demergers: an overnight gap above this
     # is treated as a break, and no average, ATR, breakout or breadth value may span it.
     max_overnight_gap_pct: float = Field(25.0, gt=0, le=100)
@@ -256,12 +267,63 @@ class SwingBreakoutParams(StrictModel):
     max_hold_days: int = Field(10, ge=1, le=60)
 
 
+class OrbV2Params(StrictModel):
+    """Phase 3b. Opening range of range_minutes; a close beyond it on volume above min_volume_mult x the
+    same time-of-day bar's average over the previous volume_lookback_sessions sessions."""
+    range_minutes: int = Field(30, ge=5, le=90)
+    min_volume_mult: float = Field(1.5, gt=0, le=10)
+    volume_lookback_sessions: int = Field(20, ge=5, le=60)
+    min_volume_sessions: int = Field(15, ge=1, le=60)    # sessions that must have the same time-of-day bar
+    reward_risk: float = Field(2.0, gt=0, le=10)
+    last_signal_time: HHMM = "11:30"
+    min_stop_cost_mult: float = Field(5.0, ge=0, le=50)   # stop distance >= this x round-trip cost
+
+    @model_validator(mode="after")
+    def enough(self) -> "OrbV2Params":
+        if self.min_volume_sessions > self.volume_lookback_sessions:
+            raise ValueError("orb_v2.min_volume_sessions cannot exceed volume_lookback_sessions")
+        return self
+
+
+class RangeV2Params(StrictModel):
+    """Phase 3b. v1 entry; stop = further of the 3-bar extreme (+buffer) and min_stop_cost_mult x round-trip
+    cost; target = band average; skipped if the target is closer than min_target_cost_mult x round-trip cost."""
+    band_bars: int = Field(20, ge=5, le=100)
+    band_sd: float = Field(2.0, gt=0, le=5)
+    stop_buffer_pct: float = Field(0.10, ge=0, le=2)
+    first_signal_time: HHMM = "09:45"
+    last_signal_time: HHMM = "14:30"
+    min_stop_cost_mult: float = Field(5.0, ge=0, le=50)
+    min_target_cost_mult: float = Field(2.0, ge=0, le=50)
+
+
+class SwingPullbackV2Params(SwingPullbackParams):
+    index_sma_days: int = Field(50, ge=2, le=400)        # longs only while NIFTY closes above this average
+
+
+class SwingBreakoutV2Params(SwingBreakoutParams):
+    index_sma_days: int = Field(50, ge=2, le=400)
+
+
 class Strategies(StrictModel):
+    inactive: list[str] = []          # strategy ids kept in code but not run by default (retired)
     orb: OrbParams = OrbParams()
     vwap_pullback: VwapParams = VwapParams()
     range_reversion: RangeParams = RangeParams()
     swing_pullback: SwingPullbackParams = SwingPullbackParams()
     swing_breakout: SwingBreakoutParams = SwingBreakoutParams()
+    orb_v2: OrbV2Params = OrbV2Params()
+    range_reversion_v2: RangeV2Params = RangeV2Params()
+    swing_pullback_v2: SwingPullbackV2Params = SwingPullbackV2Params()
+    swing_breakout_v2: SwingBreakoutV2Params = SwingBreakoutV2Params()
+
+    @model_validator(mode="after")
+    def known_inactive(self) -> "Strategies":
+        known = set(type(self).model_fields) - {"inactive"}
+        bad = [x for x in self.inactive if x not in known]
+        if bad:
+            raise ValueError(f"strategies.inactive has unknown ids {bad}")
+        return self
 
 
 class Backtest(StrictModel):
@@ -273,6 +335,13 @@ class Backtest(StrictModel):
     step_sessions: int = Field(21, ge=1, le=250)
     min_trades: int = Field(30, ge=1, le=1000)            # below this a result is LOW SAMPLE
     reports_dir: str = "data/backtests"
+    # Fixed holdout start per bar interval (phase 3b). Sessions on or after it are the holdout; empty = the
+    # last holdout_pct of sessions. Fixed so that adding older history never moves the holdout back over
+    # data that strategies were already developed on.
+    holdout_start: dict[Literal["5minute", "1day"], _date] = {}
+    # First session a backtest may test, per bar interval (earlier bars still feed indicators). Phase 3b:
+    # Breeze daily history before 2019-01-22 has days at the wrong price scale (see docs/STATUS.md).
+    test_start: dict[Literal["5minute", "1day"], _date] = {}
 
 
 class Settings(StrictModel):

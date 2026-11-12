@@ -343,16 +343,46 @@ def crafted_breakout_context():
     return MarketContext("TCS", "stock", bars[-1].start, "TRENDING_UP", daily=tuple(bars))
 
 
+def rising_index(until, n=60):
+    """n daily NIFTY bars ending on `until`'s session, closing above their 50-day average."""
+    cal, d, bars = MarketCalendar(), until, []
+    while len(bars) < n:
+        if cal.is_trading_day(d):
+            bars.append(d)
+        d -= timedelta(days=1)
+    return tuple(Bar("NIFTY", daily_start(x), 20000 + 10 * i, 20010 + 10 * i, 19990 + 10 * i, 20005 + 10 * i, None)
+                 for i, x in enumerate(reversed(bars)))
+
+
+def crafted_orb_v2_context():
+    """20 prior sessions of flat volume, a 1% opening range 09:15-09:45, then a close above it on 2x volume."""
+    cal, d, prior = MarketCalendar(), DAY - timedelta(days=1), []
+    while len(prior) < 20:
+        if cal.is_trading_day(d):
+            prior.append(tuple(five("TCS", [(1000, 1002, 998, 1001, 1000.0)] * 75, d=d)))
+        d -= timedelta(days=1)
+    today = five("TCS", [(1000, 1010, 1000, 1005, 1000.0)] * 6 + [(1006, 1012, 1005, 1011, 2000.0)])
+    return MarketContext("TCS", "stock", today[-1].start + timedelta(minutes=5), "TRENDING_UP",
+                         intraday=tuple(today), prior_sessions=tuple(reversed(prior)))
+
+
 def first_signal_context(strategy, s, store):
     """Deterministically search simulated data for a context where the strategy fires."""
     if strategy.id == "swing_breakout":
         return crafted_breakout_context()
+    if strategy.id == "swing_breakout_v2":
+        ctx = crafted_breakout_context()
+        return replace(ctx, index_daily=rising_index(ctx.daily[-1].start.astimezone(IST).date()))
+    if strategy.id == "orb_v2":
+        return crafted_orb_v2_context()
     for inst in [i for i in s.watchlist if i.kind == "stock"]:
         if strategy.interval == "1day":
             d = store.history_bars("bars_1d", inst.symbol, "sim")
             for i in range(60, len(d)):
                 for reg in sorted(strategy.allowed_regimes):
-                    ctx = MarketContext(inst.symbol, "stock", d[i].start, reg, daily=tuple(d[:i + 1]))
+                    idx = rising_index(d[i].start.astimezone(IST).date()) if strategy.needs_index_daily else ()
+                    ctx = MarketContext(inst.symbol, "stock", d[i].start, reg, daily=tuple(d[:i + 1]),
+                                        index_daily=idx)
                     if strategy.evaluate(ctx):
                         return ctx
         else:
@@ -570,7 +600,7 @@ def test_backfill_fetches_only_older_chunks_then_remembers_floor():
     HistoryLoader(one(), store, src, sleep=lambda x: None).update(AFTER, {"TCS"})
     five_calls = [c for c in src.calls if c[1] == INTRADAY]
     assert five_calls and all(c[3] <= first_before for c in five_calls)            # nothing re-fetched
-    assert all(c[3] - c[2] <= timedelta(days=10) for c in five_calls)               # date-range chunks
+    assert all(c[3] - c[2] <= timedelta(days=11) for c in five_calls)               # 10-day chunks (+ a folded tail)
     assert store.first_history_start("bars_5m", "TCS", "breeze").astimezone(IST).date() == date(2026, 7, 1)
     assert store.history_floor("bars_5m", "TCS", "breeze") is not None
     src2 = Rec(floor=date(2026, 7, 1))

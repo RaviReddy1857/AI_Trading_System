@@ -95,6 +95,8 @@ trading_system/
     watchlist.py                                             # Nifty 50 file -> watchlist block
     strategies/ base.py  orb.py  vwap_pullback.py  range_reversion.py
                 swing_pullback.py  swing_breakout.py         # phase 3
+                orb_v2.py  range_reversion_v2.py             # phase 3b (v1 kept for comparison)
+                swing_pullback_v2.py  swing_breakout_v2.py
     costs.py  backtest.py                                    # phase 3 (PointInTimeRegime in regime.py)
     options/    chain.py  payoff.py  analytics.py
                 long_option.py  credit_spread.py  iron_condor.py
@@ -159,14 +161,21 @@ class Strategy(ABC):               # phase 3 (app/strategies/base.py)
     id: str; version: str          # version = base version + hash of its config thresholds
     horizon: str; interval: str    # INTRADAY on 5minute bars | SWING on 1day bars
     allowed_regimes: frozenset[str]
+    prior_sessions_needed: int     # phase 3b: previous sessions of 5-minute bars wanted in the context
+    needs_index_daily: bool        # phase 3b: whether the context carries the index's daily bars
+    uses_cost_estimate: bool       # phase 3b: built with round_trip_cost_pct (part of the version hash)
     def evaluate(self, ctx: MarketContext) -> list[Signal]: ...   # [] if regime not allowed, status not LIVE, or an index
 
 class ResearchModel(Protocol):     # phase 8
     def complete(self, task: str, payload: dict, schema: dict) -> dict: ...
 ```
 
-`MarketContext` (phase 3: symbol, kind, asof, regime, intraday 5-minute bars of the session, daily bars, price status) carries
-what a strategy may see for one symbol at one moment; later phases add bias, events and option analytics.
+`MarketContext` (phase 3: symbol, kind, asof, regime, intraday 5-minute bars of the session, daily bars, price status;
+phase 3b: `prior_sessions`, the previous sessions' 5-minute bars, and `index_daily`, the index's daily bars up to the signal
+day) carries what a strategy may see for one symbol at one moment; later phases add bias, events and option analytics.
+Data after `asof` in any field raises `LookAheadError`.
+Version-2 strategies have their own ids (`orb_v2`, ...); v1 stays unchanged. Ids in `strategies.inactive` are kept in code
+but not run by default (phase 3b: `vwap_pullback`, retired from cash trading).
 A strategy must be a pure function of its context: same input, same output, no network, no clock reads.
 
 ### Enumerations
@@ -212,6 +221,8 @@ All timestamps are stored in UTC and shown in IST. Signals and their evidence ar
 `scripts/update_watchlist.py`, and breadth uses every stock entry. `feed.subscribe_pause_seconds` and `history.request_pause_seconds` /
 `empty_retries` / `retry_pause_seconds` pace the Breeze calls.
 Phase 3 adds `costs` (every rate with source and effective date; empty = backtests refuse to run), `strategies.<id>` and `backtest`.
+Phase 3b adds `strategies.inactive`, the v2 strategy blocks, `backtest.holdout_start` (fixed holdout dates per bar interval)
+and `regime.ignore_5m_bar_starts` (stored 5-minute bars the backtest regime skips: Breeze's 15:15 and 15:20 bars).
 Later phases add: `options`, `position_cap_pct` (default 25),
 `scoring`, `alerts`, `cutback`, `ladder`, `llm`, `stock_option_selling`, `go_live_gate`.
 

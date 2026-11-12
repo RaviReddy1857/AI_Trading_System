@@ -20,7 +20,7 @@ import logging
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from .calendar import MarketCalendar
 from .config import Regime as RegimeParams
@@ -389,6 +389,8 @@ class PointInTimeRegime:
 
     It never reads the live hub, the clock or today's regime. A price older than `max_age`
     counts as missing, so gaps give UNKNOWN exactly as live data would.
+    Stored 5-minute bars starting at `regime.ignore_5m_bar_starts` (Breeze's unreliable 15:15 and 15:20
+    bars) are skipped, as if they did not exist; they stay in storage.
     """
 
     def __init__(self, settings: Settings, store: Store, calendar: MarketCalendar, source: str,
@@ -400,6 +402,7 @@ class PointInTimeRegime:
         self.max_age = max_age
         self.stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
         self.max_gap = settings.history.max_overnight_gap_pct
+        self.ignore_starts = {time.fromisoformat(x) for x in settings.regime.ignore_5m_bar_starts}
         self._daily: dict[str, list[Bar]] = {}
         self._five: dict[str, dict[date, list[Bar]]] = {}
         self._cache: dict = {}
@@ -416,6 +419,8 @@ class PointInTimeRegime:
         if sym not in self._five:
             by_day: dict[date, list[Bar]] = {}
             for b in self.store.history_bars("bars_5m", sym, self.source):
+                if b.start.astimezone(IST).time() in self.ignore_starts:
+                    continue
                 by_day.setdefault(bar_date(b), []).append(b)
             self._five[sym] = by_day
         return self._five[sym].get(session, [])

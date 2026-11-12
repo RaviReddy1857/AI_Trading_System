@@ -10,6 +10,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes, review 2 findings 1-3 and review 3 findings 1-2 applied; live history works (user); live subscriptions confirmed in the SDK log, live ticks not yet seen | 184 passing (whole suite) | 2026-11-11 |
 | - | Nifty 50 watchlist (task before phase 3) | Built; 50 of 50 mapped; live history downloaded; 53 live subscriptions not yet seen | 212 passing (whole suite) | 2026-11-12 |
 | 3 | Intraday and swing strategies with backtests | Built and tested; backtests run on real Breeze data (all five lose after costs); costs not yet verified against a contract note | 259 passing (whole suite) | 2026-11-12 |
+| 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; all v2 versions still lose after costs and none beats random entries; holdout not opened | 294 passing (whole suite) | 2026-11-12 |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -280,6 +281,9 @@ Output goes to `data/diagnostics/` (not tracked).
 Profit factor by cost treatment, real vs random entries (20 seeds; same symbols, sessions, direction, stop and target
 distances, exit rules; swing: random TRENDING_UP days):
 
+(The intraday "Random" figures in this table came from a biased baseline and are superseded; see the withdrawn line
+below and the phase 3b results.)
+
 | Strategy | No costs | Slippage only | Charges only | Both | Random, no costs (min-max) |
 |---|---|---|---|---|---|
 | orb | 0.70 | 0.52 | 0.54 | 0.41 | 0.99 (0.80-1.17) |
@@ -288,9 +292,12 @@ distances, exit rules; swing: random TRENDING_UP days):
 | swing_pullback | 0.58 | 0.53 | 0.31 | 0.29 | 0.75 (0.53-0.91) |
 | swing_breakout | 0.60 | 0.57 | 0.38 | 0.36 | 0.71 (0.46-1.06) |
 
-- **Worse than every random seed: orb and vwap_pullback.** Checked without the engine (`fwd.py`): 30-60 minutes after
-  their entries the price has moved against the trade (orb -2 bp, vwap -1.2 bp) while any bar of the same session in the
-  same direction moves with it (+5 to +8 bp). The signals pick short reversals; the engine is not the cause.
+- ~~Worse than every random seed: orb and vwap_pullback.~~ **Withdrawn 2026-11-12 (phase 3b):** the intraday random
+  baseline used here reused each real trade's own session and direction. For a breakout strategy that leaks the future
+  (the session was picked because price later broke out that way), which flattered the random entries; `fwd.py`'s
+  baseline had the same flaw. With baselines that use only information available at the time (phase 3b results),
+  orb, vwap_pullback and range_reversion are all **inside** the random range: no worse and no better than random entries.
+  The "no bug" verdict and the mechanical checks are unaffected.
 - range_reversion beats random clearly before costs, but its stops (median 0.20% of price) are smaller than costs can
   carry: costs take 0.93 of the risk per trade (vwap_pullback 0.65, orb 0.21, swings about 0.3).
 - Both swing strategies are within the random range; random long entries on TRENDING_UP days also lost in this period.
@@ -306,6 +313,115 @@ distances, exit rules; swing: random TRENDING_UP days):
 - Data finding (does not affect backtests): Breeze's 15:20 five-minute bar is unreliable (zero volume in about half
   of sessions, open more than 0.5% from the previous close in about 2,000 sessions); the 15:15 bar is missing in about
   47% of sessions. Trades exit at the 15:10 bar's close and enter no later than 14:45, so they never use these bars.
+
+## Phase 3b: strategy revision - plan (recorded 2026-11-12, before any phase 3b backtest was run)
+
+v1 strategies stay unchanged (same ids and versions) for comparison. New versions are new strategy ids with
+base version 2. Nothing below was chosen by looking at backtest results; no parameter is fitted.
+
+**Round-trip cost estimate (rule 1).** Charges for one intraday round trip on a position at the position cap
+(25% of capital = Rs 50,000; with a stop of about 1% the cap always binds, so this is the actual trade size), as a
+% of price, plus slippage on both sides. Computed by `app/costs.py` from config.yaml at start-up, not hard-coded.
+At current rates: charges 0.0874% + slippage 0.10% = **0.187%**. 5x = 0.94% of price; 2x = 0.37%.
+
+1. **Cost-aware stops (all intraday v2):** a signal whose stop distance is below
+   `min_stop_cost_mult` (5) x the round-trip cost estimate is skipped. Sizing is unchanged (1% risk at the stop,
+   25% position cap).
+2. **range_reversion_v2:** v1 entry logic (previous close outside the 20-bar 2-sd band, latest close back inside).
+   Stop = whichever is further from entry: the v1 stop (3-bar extreme plus 0.10%) or 5x round-trip cost.
+   Target = the band average (as v1). A signal whose target is less than `min_target_cost_mult` (2) x round-trip
+   cost from entry is skipped. v1's reward/risk minimum is dropped (user decision, option 2 plus the target rule).
+   RANGE regime only. Counts of signals removed by each filter are reported.
+3. **vwap_pullback:** retired from cash trading. Code kept; listed in `strategies.inactive`, so it is not run by
+   default (it can still be run by name).
+4. **orb_v2:** 30-minute opening range (09:15-09:45). Signal on a 5-minute close beyond the range whose volume is
+   above 1.5x the average volume of the same time-of-day bar over the previous 20 sessions (no signal until 20 prior
+   sessions exist); the first such bar of the day only. Stop at the opposite side of the range; subject to rule 1.
+   Carried over from v1 unchanged: long only on TRENDING_UP, short only on TRENDING_DOWN; target 2x risk; no signal
+   after 11:30. Not carried over: v1's 0.05% breakout buffer and its 1.5% maximum range width (the request defines
+   the entry as any close beyond the range, and the width cap would conflict with the 0.94% minimum stop).
+5. **Swing:** download daily history as far back as Breeze provides (`history.daily_days` raised; a recorded floor
+   stops repeat requests). **swing_pullback_v2 / swing_breakout_v2** = v1 plus a filter: NIFTY's close on the signal
+   day above its 50-day average. v1 and v2 are both rerun on the longer history.
+6. **15:15 and 15:20 five-minute bars** are ignored by the regime calculation (kept in storage). Note: the live
+   regime (`RegimeEngine`) never reads stored 5-minute bars (it uses live ticks and daily bars); the only regime code
+   that reads them is the backtest's `PointInTimeRegime.at_bar`, which now skips bars starting at the times in
+   `regime.ignore_5m_bar_starts`. Trades already never used them, so backtest results do not change because of this.
+
+**Holdout kept fixed.** With longer swing history, "the last 20% of sessions" would move the swing holdout back
+over 2024-2026, which v1 was already developed on. So the holdout starts are frozen at today's values:
+5-minute strategies from **2026-10-05**, daily strategies from **2026-06-08** (`backtest.holdout_start`). The
+development period extends backward only. The holdout is still not simulated.
+
+**Swing test period starts 2019-01-22 (added after the download, still before any phase 3b backtest).** Breeze's daily
+history now reaches 2014-10-27 (4,400 calendar days requested; later listings start at their listing date). Checking it
+before use found price errors:
+- On 2015-10-01, 2015-11-11, 2016-01-19, 2016-12-20, 2017-07-10 and 2019-01-21 many stocks have one day at a different
+  price scale that reverts the next day (e.g. TCS 1,292 -> 2,599 -> 1,350 around 2015-10-01). Most jumps are over 25% and
+  become data breaks, but on 2017-07-10 a dozen are 4-10% (ASIANPAINT +9%, SHRIRAMFIN +10%, SBIN +7%), which the break
+  rule cannot see and which would look like breakouts.
+- INDIAVIX is about 100x off on 2015-11-11, 2015-11-13, 2016-02-25 and 2017-01-03.
+- NIFTY shows no such errors (its large 2016 and 2020 moves are real).
+So daily strategies are tested from 2019-01-22 (`backtest.test_start`), the day after the last bad date: about 7.4 years
+of development period. Earlier bars stay stored and still feed the averages of early-2019 signals (the break rule
+applies). Breaks found after 2019 are real corporate actions or single-stock errors (listed by `python -m app.history`).
+History requests now time out after 60 s (`history.request_timeout_seconds`): one request hung for over 30 minutes.
+
+**Same data for v1 and v2.** Holidays from `data/holidays.csv` (filled by the user; 2026 only) are loaded before
+each backtest run, so v1 is rerun too. Older years have no holiday rows, so sessions after a 2015-2025 holiday still
+get an UNKNOWN regime (no trades those days).
+
+**Evaluation:** development-period backtests of v1 and v2, plus the 20-seed random baseline for every v2
+(`scripts/diagnostics/diag.py`). For swing v2 the random days also satisfy the NIFTY filter.
+
+## Phase 3b: results (2026-11-12; development period only, holdout not opened)
+
+**Correction found while running this:** the random baseline of the phase 3 diagnosis was biased for intraday strategies
+(see the withdrawn line there). Fixed before the table below: a random intraday entry is now a random stock, session and
+bar in the signal window where the regime at that bar allows the strategy, in the regime's direction (RANGE: the real
+long/short mix), with a real trade's stop and target distances. v1 intraday baselines were rerun. Swing baselines were not
+affected (random allowed-regime days of the same stock, long only).
+
+Round-trip cost estimate 0.187% of price (5x = 0.94%, 2x = 0.37%). Intraday period 2026-05-06..2026-10-01 (104 sessions).
+Swing period 2019-01-22..2026-06-05 (1,817 sessions). v1 rerun on the same data (2026 holidays loaded; longer daily history).
+
+| Strategy | Version | Trades | Win % | Gross incl. slippage (Rs) | Charges (Rs) | Net (Rs) | Max DD (Rs) | PF net | PF no costs | Random PF no costs, mean (min-max of 20) | Random PF net, mean (min-max) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| orb | 1/db0cb746 | 242 | 31.0 | -25,780 | 10,316 | -36,096 | 36,316 | 0.41 | 0.71 | 0.96 (0.68-1.16) | 0.54 (0.37-0.66) |
+| orb_v2 | 2/5fda4369 | 449 | 42.5 | -15,640 | 19,108 | -34,748 | 39,603 | 0.67 | 1.07 | 0.93 (0.75-1.25) | 0.54 (0.44-0.72) |
+| range_reversion | 1/bcf1f9a1 | 1,799 | 32.1 | -89,104 | 76,625 | -165,729 | 166,288 | 0.25 | 0.99 | 1.00 (0.91-1.11) | 0.25 (0.22-0.27) |
+| range_reversion_v2 | 2/4aa26e3b | 803 | 45.2 | -46,760 | 34,236 | -80,997 | 81,206 | 0.40 | 0.92 | 0.98 (0.79-1.16) | 0.41 (0.33-0.49) |
+| vwap_pullback (retired, rerun by name in the diagnosis only) | 1 | 2,852 | | | | | | 0.31 | 0.93 | 0.99 (0.92-1.14) | 0.32 (0.29-0.36) |
+| swing_pullback | 1/70681558 | 1,316 | 40.2 | +149,645 | 451,724 | -302,079 | 319,544 | 0.75 | 1.22 | 1.18 (1.02-1.28) | 0.73 (0.63-0.80) |
+| swing_pullback_v2 | 2/a9ac026c | 1,311 | 40.0 | +138,399 | 450,079 | -311,680 | 329,145 | 0.75 | 1.21 | 1.21 (1.09-1.35) | 0.75 (0.67-0.85) |
+| swing_breakout | 1/dfa9ac55 | 999 | 39.2 | +13,797 | 330,611 | -316,814 | 316,814 | 0.70 | 1.07 | 1.22 (1.08-1.35) | 0.77 (0.68-0.86) |
+| swing_breakout_v2 | 2/682e0a81 | 998 | 38.5 | -10,545 | 330,516 | -341,061 | 341,061 | 0.68 | 1.04 | 1.23 (1.08-1.39) | 0.77 (0.67-0.86) |
+
+"PF no costs" = no slippage and no charges. Every trade, real and random, passed the mechanical checks (sides, slippage,
+exits, next-bar entry).
+
+**Signals removed by each filter (development period):**
+- orb_v2, rule 1 (stop < 5x cost): **252 removed**; 449 traded. Median stop 1.41% (v1 0.90%); costs 0.13R per trade (v1 0.21R).
+- range_reversion_v2, target rule (average closer than 2x cost): **2,146 removed**; 803 traded. Rule 1 removes none here
+  because the stop is widened instead: 797 of the 803 trades had their stop widened to 5x cost. Costs 0.20R per trade
+  (v1 0.93R).
+- swing_pullback_v2 and swing_breakout_v2, NIFTY above its 50-day average: **8 removed each**. The TRENDING_UP regime both
+  swing strategies require already needs NIFTY above its 20- and 50-day averages (regime rule 4), so the filter is almost
+  entirely redundant; the 8 come from a one-day difference in the averaging window.
+
+**What it shows:**
+- Rule 1 cut costs as intended (orb 0.21R -> 0.13R per trade; range 0.93R -> 0.20R). Range reversion's loss roughly
+  halved and orb's profit factor rose from 0.41 to 0.67. **No version is profitable after costs, and none is outside the
+  random range before costs**: orb_v2's 1.07 is inside random's 0.75-1.25.
+- range_reversion_v2 exits 45% at end of day, 38% at target, 18% at stop: the wider stop is rarely hit and the average
+  often not reached.
+- Swing over 7.4 years: both make money **before** costs (PF 1.04-1.22), but so do random long entries on the same regime
+  days (1.18-1.23): the gain is the market's drift in TRENDING_UP periods, not the entry rule. swing_breakout v1 is below
+  every random seed before costs (1.07 vs 1.08-1.35). Delivery costs (about 0.77% of price per round trip with slippage,
+  about 0.23R per trade) make every swing variant lose.
+- Exposure is still uncapped (phase 5): peak open positions reach 2.7-6.9x capital, so rupee totals overstate one account.
+- Walk-forward windows: no intraday version had a profitable window; swing 18-20 of 60-62 windows profitable.
+- Diagnosis output: `data/diagnostics/` (not tracked); rerun with `scripts/diagnostics/diag.py` and `fwd.py`.
 
 ## Open issues
 
@@ -338,7 +454,12 @@ distances, exit rules; swing: random TRENDING_UP days):
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
-| 28 | 3 | Breeze's 15:20 five-minute bar is unreliable and the 15:15 bar is often missing | Open: not used by backtests; live regime filter planned in phase 3b |
+| 28 | 3 | Breeze's 15:20 five-minute bar is unreliable and the 15:15 bar is often missing | Fixed in 3b: the backtest regime ignores them (`regime.ignore_5m_bar_starts`); trades never used them; the live regime uses ticks, not these bars |
+| 29 | 3 | The phase 3 diagnosis's intraday random baseline reused each real trade's session and direction (leaks the future for breakouts) | Fixed 2026-11-12: corrected baseline; "orb and vwap worse than random" withdrawn |
+| 30 | 3b | Breeze daily history before 2019-01-22 has wrong-scale days (stocks, several dates) and ~100x VIX values | Open: swing tests start 2019-01-22 (`backtest.test_start`); older bars kept |
+| 31 | 3b | A Breeze history request once hung for over 30 minutes (no SDK timeout) | Fixed: 60 s timeout per request; that symbol fails and a rerun resumes |
+| 32 | 3b | No v2 strategy is profitable after costs or better than random entries | Waiting for user |
+| 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
 ## Decisions log
 
@@ -363,3 +484,10 @@ distances, exit rules; swing: random TRENDING_UP days):
 | 2026-11-12 | Stock overnight gaps above 25% are data breaks (no adjustment factors guessed), also in the live regime's breadth |
 | 2026-11-12 | Pre-open and post-close 5-minute bars are not part of the session and are not stored |
 | 2026-11-12 | The holdout is not simulated unless --holdout is given |
+| 2026-11-12 | Phase 3b: v2 strategies are new ids; v1 unchanged. vwap_pullback retired (`strategies.inactive`) |
+| 2026-11-12 | Rule 1: intraday stop >= 5x estimated round-trip cost (charges at the position cap + slippage both sides) |
+| 2026-11-12 | range_reversion_v2: stop = further of 3-bar extreme and 5x cost; target = band average; skip if target < 2x cost (user) |
+| 2026-11-12 | Holdout starts frozen: 5-minute 2026-10-05, daily 2026-06-08 (adding older history never moves the holdout) |
+| 2026-11-12 | Swing backtests start 2019-01-22 because of price errors in older Breeze daily history |
+| 2026-11-12 | Backtests load the CSV files (holidays, events, FII/DII) first, as the app does |
+| 2026-11-12 | Random baseline uses only information available at the random entry's time |

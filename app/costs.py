@@ -107,6 +107,15 @@ class CostModel:
         p = Decimal(str(price))
         return money(p * (1 + s) if side == "BUY" else p * (1 - s))
 
+    def round_trip_pct(self, segment: str, position_value: float) -> float:
+        """Estimated cost of one equity round trip as a % of price: charges on buying and selling
+        `position_value` at the same price, plus adverse slippage on both sides."""
+        if not (position_value > 0):
+            raise ValueError("position_value must be positive")
+        v = money(position_value)
+        charges = self.equity(segment, v, v).total
+        return float(charges / v * HUNDRED + 2 * self.slip_pct(segment) * HUNDRED)
+
     # ---- charges ----
     def _gst(self, b: CostBreakdown) -> Decimal:
         base = Decimal(0)

@@ -2,9 +2,16 @@
 mechanical checks (stop/target sides, slippage once per side and adverse, no earlier stop/target
 touch, entry on the bar after the signal). Development period only; the holdout is never simulated.
 
-Random baseline: each real trade is replaced by a random entry with the same symbol, the same
-session (intraday) or a random allowed-regime day (swing), the same direction and the same stop
-and target distances; the engine's exit rules and costs are unchanged.
+Random baseline: each real trade is paired with one random entry that has the same stop and target
+distances; the engine's exit rules and costs are unchanged. Where the random entry goes uses only
+information available at that moment:
+- intraday: a random stock, development session and bar in the strategy's signal window, kept only
+  if the regime at that bar is one the strategy trades. Direction = the regime's (TRENDING_UP long,
+  TRENDING_DOWN short); in RANGE, drawn from the real trades' long/short mix.
+  (Until 2026-11-12 the random entry reused the real trade's own session and direction. For a breakout
+  strategy that leaks the future: the session was chosen because price later broke out that way.)
+- swing: the real trade's stock on a random development day whose close-of-day regime (and, for v2,
+  the NIFTY filter) allows the strategy; long only, like the strategies.
 
 Run:  python scripts/diagnostics/diag.py [--strategy orb range_reversion ...] [--seeds 20]
 Output: a summary table on screen and data/diagnostics/diag_<ids>.json (full detail, 10 sample trades each).
@@ -19,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from app.config import load_settings, hhmm
 from app.store import Store
-from app.backtest import Engine, split_sessions
+from app.backtest import Engine, dev_holdout, load_calendar
 from app.costs import money
 from app.history import bar_date
 from app.quality import IST
@@ -204,7 +211,7 @@ def hist(rs):
     return {k: c[k] for k in names if c[k]}
 
 
-def schedule_for(eng, strat, trades, dev, rng):
+def schedule_for(eng, strat, trades, dev, rng, stocks):
     sched = {}
     if strat.interval == "5minute":
         p = strat.params
@@ -213,18 +220,32 @@ def schedule_for(eng, strat, trades, dev, rng):
         else:   # opening-range strategies: the first bar after the range
             lo = (datetime(2000, 1, 1, 9, 15) + timedelta(minutes=p.range_minutes + 5)).time()
         hi = hhmm(p.last_signal_time)
+        long_share = sum(1 for t in trades if t.direction == "LONG") / len(trades) if trades else 0.5
         for t in trades:
-            d = datetime.fromisoformat(t.entry_time).astimezone(IST).date()
-            bars = eng.five(t.symbol).get(d, [])
-            cands = [b.start + FIVE for b in bars if lo <= (b.start + FIVE).astimezone(IST).time() <= hi]
-            if not cands:
-                continue
-            asof = rng.choice(cands)
             sp = abs(t.signal_close - t.stop) / t.signal_close
             tp = abs(t.target - t.signal_close) / t.signal_close
-            sched[(t.symbol, asof)] = (t.direction, sp, tp)
+            for _ in range(500):
+                sym = rng.choice(stocks)
+                bars = eng.five(sym).get(rng.choice(dev), [])
+                cands = [b.start + FIVE for b in bars if lo <= (b.start + FIVE).astimezone(IST).time() <= hi]
+                if not cands:
+                    continue
+                asof = rng.choice(cands)
+                reg = eng.regime.at_bar(asof).regime
+                if reg not in strat.allowed_regimes or (sym, asof) in sched:
+                    continue
+                if reg == "TRENDING_UP":
+                    direction = "LONG"
+                elif reg == "TRENDING_DOWN":
+                    direction = "SHORT"
+                else:
+                    direction = "LONG" if rng.random() < long_share else "SHORT"
+                sched[(sym, asof)] = (direction, sp, tp)
+                break
     else:
         ok_days = [d for d in dev[:-1] if eng.regime.at_close(d).regime in strat.allowed_regimes]
+        if hasattr(strat, "index_ok"):     # v2 market filter: random days must pass it too
+            ok_days = [d for d in ok_days if strat.index_ok(eng.index_daily(d))]
         for t in trades:
             days = {bar_date(b) for b in eng.daily(t.symbol)}
             cands = [d for d in ok_days if d in days]
@@ -283,6 +304,8 @@ def print_summary(result):
             if xs:
                 print(f"  PF {k:13s} real {r['pf'][k]}  random mean {stx.mean(xs):.3f} (min {xs[0]}, max {xs[-1]})"
                       f"{'  REAL BELOW EVERY SEED' if r['pf'][k] is not None and r['pf'][k] < xs[0] else ''}")
+        if r.get("filtered"):
+            print(f"  filtered signals {r['filtered']}")
         print(f"  mean R (no costs) {r['R_gross_mean']}  net {r['R_net_mean']}  | win% (no costs) {r['win_rate_none']}")
         print(f"  exits {r['exit_reasons_pct']}  | entry-bar exits {r['entry_bar_exits']} {r['entry_bar_exit_reasons']}")
         print(f"  MFE {r['MFE_R_mean']}R  MAE {r['MAE_R_mean']}R  | R histogram {r['R_hist']}")
@@ -296,11 +319,12 @@ def main():
     ap.add_argument("--seeds", type=int, default=20)
     args = ap.parse_args()
     SEEDS = args.seeds
-    eng = DiagEngine(s, store, "breeze")
+    eng = DiagEngine(s, store, "breeze", calendar=load_calendar(s, store))
     stocks = [(i.symbol, i.kind) for i in s.watchlist if i.kind == "stock"]
     result = {}
     for strat in build_strategies(s, args.strategy):
-        dev, hold = split_sessions(eng.sessions(strat), s.backtest.holdout_pct)
+        dev, hold = dev_holdout(s, eng.sessions(strat), strat.interval)
+        strat.rejections.clear()
         trades, skipped = eng.run(strat, dev, stocks)
         real = summarize(eng, trades, strat.interval, "real")
         real["checks"] = dict(checks(eng, trades, strat.interval))
@@ -309,7 +333,7 @@ def main():
         rand = []
         for seed in range(SEEDS if trades else 0):
             rng = random.Random(seed)
-            rs = RandomEntry(strat, schedule_for(eng, strat, trades, dev, rng))
+            rs = RandomEntry(strat, schedule_for(eng, strat, trades, dev, rng, [x for x, _ in stocks]))
             rt, rsk = eng.run(rs, dev, stocks)
             r = summarize(eng, rt, strat.interval, f"seed{seed}")
             r["checks"] = dict(checks(eng, rt, strat.interval))

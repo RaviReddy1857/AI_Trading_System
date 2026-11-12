@@ -16,6 +16,7 @@ import json
 import math
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -39,6 +40,10 @@ class MarketContext:
     intraday: tuple[Bar, ...] = ()  # this session's completed 5-minute bars, oldest first
     daily: tuple[Bar, ...] = ()     # completed daily bars, oldest first (swing: last one is the signal day)
     status: str = "LIVE"            # price status from the quality gate; only LIVE is usable
+    # phase 3b: previous sessions' 5-minute bars (oldest session first), for time-of-day volume averages
+    prior_sessions: tuple[tuple[Bar, ...], ...] = ()
+    # phase 3b: the index's completed daily bars up to the signal day (market filter for swing longs)
+    index_daily: tuple[Bar, ...] = ()
 
 
 class LookAheadError(RuntimeError):
@@ -51,12 +56,25 @@ class Strategy(ABC):
     horizon: str = "INTRADAY"            # INTRADAY | SWING
     interval: str = "5minute"            # bars the strategy runs on: 5minute | 1day
     allowed_regimes: frozenset[str] = frozenset()
+    prior_sessions_needed: int = 0       # previous sessions of 5-minute bars the strategy wants in its context
+    needs_index_daily: bool = False      # whether the context should carry the index's daily bars
+    uses_cost_estimate: bool = False     # whether the strategy needs round_trip_cost_pct
 
-    def __init__(self, params: BaseModel):
+    def __init__(self, params: BaseModel, round_trip_cost_pct: float | None = None):
         self.params = params
-        blob = json.dumps(params.model_dump(), sort_keys=True).encode()
-        # The version changes whenever a threshold changes, like the regime rules version.
+        if self.uses_cost_estimate and not (isinstance(round_trip_cost_pct, (int, float))
+                                            and math.isfinite(round_trip_cost_pct) and round_trip_cost_pct > 0):
+            raise ValueError(f"{self.id}: needs a positive round_trip_cost_pct (estimated from config costs)")
+        # Estimated intraday round-trip cost (charges + slippage, % of price), from config.yaml costs.
+        self.round_trip_cost_pct = round_trip_cost_pct if self.uses_cost_estimate else None
+        dump = params.model_dump()
+        if self.round_trip_cost_pct is not None:
+            dump["_round_trip_cost_pct"] = round(self.round_trip_cost_pct, 6)
+        blob = json.dumps(dump, sort_keys=True).encode()
+        # The version changes whenever a threshold (or, for cost-aware versions, the cost estimate) changes.
         self.version = f"{self.base_version}/{hashlib.sha256(blob).hexdigest()[:8]}"
+        # Counts of candidate signals a filter removed (reporting only; never affects output).
+        self.rejections: Counter = Counter()
 
     def evaluate(self, ctx: MarketContext) -> list[Signal]:
         if ctx.status != "LIVE" or ctx.regime not in self.allowed_regimes or ctx.kind != "stock":
@@ -67,6 +85,10 @@ class Strategy(ABC):
         newest = bars[-1].start + (FIVE_MIN if self.interval == "5minute" else timedelta(0))
         if self.interval == "5minute" and newest > ctx.asof:
             raise LookAheadError(f"{self.id}: bar ending {newest} is after asof {ctx.asof}")
+        if ctx.prior_sessions and any(s and s[-1].start + FIVE_MIN > bars[0].start for s in ctx.prior_sessions):
+            raise LookAheadError(f"{self.id}: a prior session ends after this session starts")
+        if ctx.index_daily and ctx.index_daily[-1].start > bars[-1].start:
+            raise LookAheadError(f"{self.id}: index bar {ctx.index_daily[-1].start} is after the signal bar")
         out = self._evaluate(ctx)
         for s in out:
             if s.data_as_of > ctx.asof:
