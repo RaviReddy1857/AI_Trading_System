@@ -3,7 +3,7 @@ get_stock_token_value(): it reads self.interval (only set by subscribe_feeds) an
 on any error, returns the exception object instead of raising."""
 import logging
 
-from app.config import load_settings
+from tests.fixture_settings import load_settings
 from app.feeds.breeze_feed import BreezeFeed
 
 TOKENS = {"NIFTY": "11", "CNXBAN": "12", "RELIND": "2885", "HDFBAN": "1333", "ICIBAN": "4963",

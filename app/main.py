@@ -29,7 +29,7 @@ log = logging.getLogger("main")
 def build_feed(settings: Settings):
     if settings.feed.mode == "breeze":
         from .feeds.breeze_feed import BreezeFeed
-        return BreezeFeed(settings.watchlist)
+        return BreezeFeed(settings.watchlist, settings.feed.subscribe_pause_seconds)
     from .feeds.sim import SimFeed
     return SimFeed(settings.watchlist)
 

@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from app.calendar import MarketCalendar
 from app.config import Regime as RegimeParams
-from app.config import Settings, load_settings
+from app.config import Settings
+from tests.fixture_settings import load_settings
 from app.feeds.breeze_feed import tick_from_breeze
 from app.history import INTRADAY, parse_rows
 from app.hub import MarketHub

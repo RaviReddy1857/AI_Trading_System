@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 133 passed
+python -m pytest -q          # should say 212 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -77,11 +77,36 @@ NEUTRAL. It is UNKNOWN if any of the last 3 sessions' figures are missing.
 
 Outside 09:15-15:30 IST on weekdays, and on holidays in `holidays.csv`, symbols show `CLOSED`.
 
-## Watchlist codes
-ICICI uses its own short codes (`RELIND` for Reliance, `CNXBAN` for Bank Nifty).
-The codes in `config.yaml` are from memory and **not yet verified against your account**. This includes
-India VIX (`INDVIX`). Check each one once: `python scripts/lookup_code.py INDIAVIX`. Unknown codes are skipped
-with an error in the console. Without a live VIX price, the regime stays UNKNOWN.
+## Watchlist: NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (53 symbols)
+ICICI uses its own short codes (`RELIND` for Reliance, `CNXBAN` for Bank Nifty). The three index codes were
+verified by you on 2026-11-11. The 50 stock lines in `config.yaml` (between the `nifty50` marker comments)
+are generated from `data/nifty50.csv`. Each one has a `sector` taken from the file's Industry column.
+
+**Refresh after an index change.** Download the new constituents file from niftyindices.com, save it as
+`data/nifty50.csv`, then run:
+```
+python scripts/update_watchlist.py --dry-run   # shows mapped / not mapped / added / removed, writes nothing
+python scripts/update_watchlist.py             # rewrites only the nifty50 block in config.yaml
+python -m app.history                          # downloads history for new symbols; stored ones are skipped
+```
+The script maps each NSE symbol to its Breeze code with ICICI's own instrument list (the SecurityMaster file
+that breeze-connect downloads; no login needed). It needs the series-EQ row for that symbol, and the ISIN must match the file.
+Symbols that cannot be mapped are listed and left out; codes are never guessed. If a symbol you already had gets a different
+code, it prints a WARNING. The new config is validated before it is written. The index lines are not touched.
+Check a single code by hand with `python scripts/lookup_code.py RELIANCE` (needs your login).
+
+**Market breadth** in the regime uses every stock in the watchlist, so all 50 now. The thresholds are unchanged:
+60% or more above their 20-day average for TRENDING_UP, 40% or less for TRENDING_DOWN, and usable data for at least 80% of the
+stocks (40 of 50), otherwise UNKNOWN.
+
+**Live feed start.** In breeze mode the app subscribes the 53 symbols one by one, pausing `feed.subscribe_pause_seconds`
+(0.25 s) between them. It then logs `Breeze live feed: subscribed N of 53 symbols` and, if any failed, a line naming each
+one and its code. A failed symbol shows `NO_DATA`; the others carry on.
+
+**History download pacing** (`config.yaml` -> `history`): a pause of `request_pause_seconds` (0.7 s) between Breeze requests,
+up to `empty_retries` (2) more tries `retry_pause_seconds` (3 s) apart when a reply is empty, and no request at all for a symbol
+whose newest complete bar is already stored. `python -m app.history` ends with a summary
+(bars saved, skipped, failed, empty). `python -m app.history RELIANCE TCS` downloads only those symbols.
 
 ## Status values
 | Status | Meaning |
@@ -96,7 +121,9 @@ with an error in the console. Without a live VIX price, the regime stays UNKNOWN
 - `app/quality.py` - quality rules and market hours
 - `app/hub.py` - tick -> quality gate -> bars -> price table
 - `app/calendar.py` - trading days and holidays
-- `app/history.py` - daily and 5-minute history download (Breeze or sim)
+- `app/history.py` - daily and 5-minute history download (Breeze or sim), paced, retries empty replies, skips stored data
+- `app/watchlist.py` - Nifty 50 file -> Breeze codes and sectors -> the `nifty50` block of config.yaml (pure functions)
+- `scripts/update_watchlist.py` - refresh the Nifty 50 watchlist from a new `data/nifty50.csv`
 - `app/indicators.py` - SMA, EMA, ATR, daily return, percentile, breadth (pure functions)
 - `app/regime.py` - regime rules, FII bias, and the service that feeds them
 - `app/manual_data.py` - events, holidays and FII/DII CSV loading and import
@@ -107,6 +134,8 @@ with an error in the console. Without a live VIX price, the regime stays UNKNOWN
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
-The Breeze live connection, live history download and India VIX subscription were written from the SDK
-source but could not be run without your login. The Breeze history row format (`datetime` as IST
-`YYYY-MM-DD HH:MM:SS`) and the tick's day `high`/`low` fields are assumed. Expect small fixes on the first live run.
+- **Live subscriptions for all 53 symbols.** The paced subscription and the startup summary are tested against a fake SDK only.
+  When the 50 stocks were added, an app was already running on port 8000, so a second live Breeze connection was not opened.
+  On your next start in breeze mode, look for `subscribed 53 of 53 symbols` in the console.
+- The tick's day `high`/`low` fields are assumed. Live history works: the 50 new stocks were downloaded on 2026-11-12,
+  with no failures and no empty replies.

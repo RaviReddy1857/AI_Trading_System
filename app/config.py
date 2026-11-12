@@ -37,12 +37,15 @@ class Feed(StrictModel):
     mode: Literal["sim", "breeze"] = "sim"
     stale_after_seconds: int = Field(gt=0)
     max_jump_pct: float = Field(gt=0)
+    # Breeze live feed: pause between symbol subscriptions so ~50 requests are not fired at once.
+    subscribe_pause_seconds: float = Field(0.25, ge=0, le=5)
 
 
 class Instrument(StrictModel):
-    symbol: str
-    breeze_code: str
+    symbol: str = Field(min_length=1)
+    breeze_code: str = Field(min_length=1)
     kind: Literal["index", "stock"]
+    sector: str | None = None        # stocks: the Industry column of the Nifty 50 file
 
 
 class Server(StrictModel):
@@ -113,6 +116,11 @@ class History(StrictModel):
     daily_days: int = Field(400, ge=60, le=2000)       # calendar days of daily bars to keep
     intraday_days: int = Field(10, ge=1, le=60)        # calendar days of 5-minute bars
     sim_seed_on_start: bool = True                     # sim mode: generate fake history
+    # Breeze only (Breeze allows about 100 calls a minute): pause between history requests,
+    # and how often to ask again when a reply comes back empty.
+    request_pause_seconds: float = Field(0.7, ge=0, le=10)
+    empty_retries: int = Field(2, ge=0, le=5)
+    retry_pause_seconds: float = Field(3.0, ge=0, le=60)
 
 
 class Calendar(StrictModel):
@@ -135,6 +143,11 @@ class Settings(StrictModel):
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":
+        for attr in ("symbol", "breeze_code"):
+            seen: set[str] = set()
+            dupes = sorted({v for v in (getattr(i, attr) for i in self.watchlist) if v in seen or seen.add(v)})
+            if dupes:
+                raise ValueError(f"watchlist has duplicate {attr} values: {dupes}")
         symbols = {i.symbol for i in self.watchlist}
         for name in ("index_symbol", "vix_symbol"):
             sym = getattr(self.regime, name)

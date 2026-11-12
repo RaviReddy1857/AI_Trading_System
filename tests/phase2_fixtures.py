@@ -5,7 +5,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.calendar import MarketCalendar
-from app.config import Settings, load_settings
+from app.config import Settings
+from tests.fixture_settings import load_settings
 from app.history import daily_start
 from app.models import Bar, Tick
 from app.regime import DailyBar, RegimeInputs

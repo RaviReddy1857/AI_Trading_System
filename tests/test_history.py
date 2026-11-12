@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 
 from app.calendar import MarketCalendar
-from app.config import load_settings
+from tests.fixture_settings import load_settings
 from app.history import (BAD_BAR, DAILY, INTRADAY, BreezeHistorySource, HistoryLoader,
                          SimHistorySource, bar_date, is_complete, parse_rows, seed_sim_history)
 from app.models import Bar

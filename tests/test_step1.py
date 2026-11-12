@@ -5,7 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.bars import BarBuilder
-from app.config import load_settings, Settings
+from app.config import Settings
+from tests.fixture_settings import load_settings
 from app.feeds.breeze_feed import tick_from_breeze
 from app.hub import MarketHub
 from app.main import create_app

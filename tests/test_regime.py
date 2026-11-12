@@ -7,7 +7,8 @@ import pytest
 
 from app.calendar import MarketCalendar
 from app.config import Regime as RegimeParams
-from app.config import Settings, load_settings
+from app.config import Settings
+from tests.fixture_settings import load_settings
 from app.hub import MarketHub
 from app.manual_data import ManualData
 from app.regime import RegimeService, classify, fii_bias, rules_version

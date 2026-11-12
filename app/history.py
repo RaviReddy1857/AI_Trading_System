@@ -17,7 +17,9 @@ from __future__ import annotations
 import logging
 import math
 import random
+import time as _time
 import zlib
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 
 from .calendar import MarketCalendar
@@ -107,6 +109,7 @@ def is_complete(bar: Bar, interval: str, now_utc: datetime) -> bool:
 # ---------------- sources ----------------
 class BreezeHistorySource:
     name = "breeze"
+    remote = True         # real API calls: paced, and empty replies are retried
 
     def __init__(self, feed):
         self._feed = feed     # BreezeFeed; the SDK stays inside breeze_feed.py
@@ -121,6 +124,7 @@ class SimHistorySource:
     """Deterministic fake history. The bars for a given symbol and date are always
     the same, whatever range is requested. NOT real market data."""
     name = "sim"
+    remote = False
     ANCHOR = date(2024, 1, 1)
     START = {"NIFTY": 21700.0, "BANKNIFTY": 48000.0, "INDIAVIX": 14.0}
     STEPS = 75                                   # 5-minute bars per session
@@ -204,11 +208,15 @@ class SimHistorySource:
 
 # ---------------- loader ----------------
 class HistoryLoader:
-    def __init__(self, settings: Settings, store: Store, source, calendar: MarketCalendar | None = None):
+    def __init__(self, settings: Settings, store: Store, source, calendar: MarketCalendar | None = None,
+                 sleep: Callable[[float], None] = _time.sleep):
         self.settings = settings
         self.store = store
         self.source = source
         self.calendar = calendar or MarketCalendar()
+        self._sleep = sleep
+        self._remote = bool(getattr(source, "remote", False))
+        self._requests = 0
 
     def _window(self, inst: Instrument, interval: str, now: datetime) -> tuple[datetime, datetime]:
         days = self.settings.history.daily_days if interval == DAILY else self.settings.history.intraday_days
@@ -219,14 +227,59 @@ class HistoryLoader:
             start = datetime.combine(last.astimezone(IST).date(), time(0, 0), IST).astimezone(timezone.utc)
         return start, now
 
+    def last_complete_bar_start(self, interval: str, now: datetime) -> datetime | None:
+        """Start of the newest bar that should already be complete. None for 5-minute bars
+        while the market is open (a newer bar is always forming then)."""
+        now_ist = now.astimezone(IST)
+        today = now_ist.date()
+        if self.calendar.is_trading_day(today) and now_ist.time() >= MARKET_CLOSE:
+            session = today
+        else:
+            session = self.calendar.previous_trading_day(today)
+        if interval == DAILY:
+            return daily_start(session)
+        if self.calendar.is_open(now):
+            return None
+        return datetime.combine(session, MARKET_CLOSE, IST).astimezone(timezone.utc) - FIVE_MIN
+
+    def is_up_to_date(self, inst: Instrument, interval: str, now: datetime) -> bool:
+        """True when the store already holds the newest complete bar, so no request is needed."""
+        need = self.last_complete_bar_start(interval, now)
+        last = self.store.last_history_start(TABLE[interval], inst.symbol, self.source.name)
+        return need is not None and last is not None and last >= need
+
+    def _fetch(self, inst: Instrument, interval: str, a: datetime, b: datetime) -> list[dict]:
+        """One request. For a remote source: pause between requests (rate limit) and ask
+        again when a reply is empty. An empty reply after the retries is accepted (the
+        range may hold no trading day) and reported."""
+        h = self.settings.history
+        tries = 1 + (h.empty_retries if self._remote else 0)
+        rows: list[dict] = []
+        for attempt in range(tries):
+            if self._remote:
+                if attempt:
+                    self._sleep(h.retry_pause_seconds)
+                elif self._requests and h.request_pause_seconds:
+                    self._sleep(h.request_pause_seconds)
+            self._requests += 1
+            rows = self.source.fetch(inst, interval, a, b)
+            if rows:
+                return rows
+            if attempt + 1 < tries:
+                log.info("empty reply for %s %s %s..%s; retry %d of %d", inst.symbol, interval,
+                         a.isoformat(), b.isoformat(), attempt + 1, tries - 1)
+        return rows
+
     def update_symbol(self, inst: Instrument, interval: str, now: datetime) -> dict:
+        if self.is_up_to_date(inst, interval, now):
+            return {"saved": 0, "rejected": 0, "skipped": "already stored"}
         start, end = self._window(inst, interval, now)
         raw: list[dict] = []
         chunk = timedelta(days=CHUNK_DAYS[interval])
         a = start
         while a < end:
             b = min(a + chunk, end)
-            raw += self.source.fetch(inst, interval, a, b)
+            raw += self._fetch(inst, interval, a, b)
             a = b
         bars, bad = parse_rows(raw, inst.symbol, inst.kind, interval)
         for reason, row in bad:
@@ -235,14 +288,20 @@ class HistoryLoader:
         complete = [b for b in bars if is_complete(b, interval, now)
                     and self.calendar.is_trading_day(bar_date(b))]
         saved = self.store.save_history_bars(TABLE[interval], complete, self.source.name)
-        return {"saved": saved, "rejected": len(bad)}
+        out = {"saved": saved, "rejected": len(bad)}
+        if not raw:
+            out["empty"] = True
+        return out
 
-    def update(self, now: datetime | None = None) -> dict:
-        """Download/refresh history for every watchlist symbol. One symbol failing
+    def update(self, now: datetime | None = None, symbols: set[str] | None = None) -> dict:
+        """Download/refresh history for every watchlist symbol (or only `symbols`).
+        Symbols already up to date are skipped without a request. One symbol failing
         does not stop the others; failures are reported."""
         now = now or utcnow()
         summary: dict = {}
         for inst in self.settings.watchlist:
+            if symbols is not None and inst.symbol not in symbols:
+                continue
             for interval in (DAILY, INTRADAY):
                 key = f"{inst.symbol}:{interval}"
                 try:
@@ -261,25 +320,46 @@ def seed_sim_history(settings: Settings, store: Store, calendar: MarketCalendar,
     return HistoryLoader(settings, store, SimHistorySource(), calendar).update(today_open)
 
 
-def main() -> None:
-    """Manual live download: python -m app.history"""
+def summarize(summary: dict) -> str:
+    """Result of a download: counts plus every failed or empty symbol."""
+    skipped = [k for k, v in summary.items() if v.get("skipped")]
+    errors = {k: v["error"] for k, v in summary.items() if "error" in v}
+    empty = [k for k, v in summary.items() if v.get("empty")]
+    saved = sum(v.get("saved", 0) for v in summary.values())
+    lines = [f"{len(summary)} downloads: {saved} bars saved, {len(skipped)} already stored (skipped), "
+             f"{len(errors)} failed, {len(empty)} empty after retries"]
+    lines += [f"  FAILED {k}: {e}" for k, e in errors.items()]
+    lines += [f"  EMPTY  {k}" for k in empty]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Manual live download: python -m app.history [SYMBOL ...]"""
+    import sys
+
     from dotenv import load_dotenv
 
     from .config import ROOT, load_settings
     from .feeds.breeze_feed import BreezeFeed
     from .manual_data import ManualData
 
+    args = sys.argv[1:] if argv is None else argv
     load_dotenv(ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = load_settings()
+    wanted = {a.upper() for a in args} or None
+    unknown = sorted((wanted or set()) - {i.symbol for i in settings.watchlist})
+    if unknown:
+        raise SystemExit(f"not in the watchlist: {unknown}")
     # Breeze data always goes to the live file, whatever feed.mode says.
     store = Store(settings.path(settings.storage.db_path_live), live=True)
     calendar = MarketCalendar()
     ManualData(settings, store, calendar).load_all()
     feed = BreezeFeed(settings.watchlist)
-    summary = HistoryLoader(settings, store, BreezeHistorySource(feed), calendar).update()
+    summary = HistoryLoader(settings, store, BreezeHistorySource(feed), calendar).update(symbols=wanted)
     for key, res in summary.items():
         print(f"{key:28s} {res}")
+    print(summarize(summary))
 
 
 if __name__ == "__main__":

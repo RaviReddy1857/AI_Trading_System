@@ -5,7 +5,8 @@ from datetime import date, timedelta
 import pytest
 
 from app.calendar import MarketCalendar
-from app.config import Settings, load_settings
+from app.config import Settings
+from tests.fixture_settings import load_settings
 from app.feeds.breeze_feed import tick_from_breeze
 from app.hub import MarketHub
 from app.manual_data import ManualData
