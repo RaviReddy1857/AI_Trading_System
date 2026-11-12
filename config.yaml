@@ -105,12 +105,13 @@ bias:
   streak_days: 3                 # BEARISH after 3 straight days of FII net selling, BULLISH after 3 of buying
 
 history:
-  daily_days: 400                # daily bars to download (calendar days)
-  intraday_days: 10              # 5-minute bars to download (calendar days)
+  daily_days: 800                # daily bars to download (calendar days); the regime needs ~250 sessions of VIX before each backtest day
+  intraday_days: 190             # 5-minute bars to download (calendar days); 6+ months for phase 3 backtests
   sim_seed_on_start: true        # sim mode only: generate fake history so the badge works
   request_pause_seconds: 0.7     # breeze: pause between history requests (Breeze allows ~100/minute)
   empty_retries: 2               # breeze: ask again this many times when a reply is empty
   retry_pause_seconds: 3.0       # breeze: wait before each retry
+  max_overnight_gap_pct: 25      # stocks: a bigger overnight jump (unadjusted split/bonus/demerger) breaks the history
 
 calendar:                        # CSV files you maintain (see README)
   events_csv: data/events.csv
@@ -124,3 +125,96 @@ server:
 storage:                       # one file per feed mode; chosen from feed.mode
   db_path_sim: data/market_sim.db     # feed.mode: sim
   db_path_live: data/market_live.db   # feed.mode: breeze (never receives sim rows)
+
+# ---- Phase 3: trading costs (ICICI Direct) ----
+# STANDARD RATES, NOT YET VERIFIED AGAINST A CONTRACT NOTE. Every backtest report shows `label`.
+# Compare one real contract note line by line, then set verified_against_contract_note: true.
+# A rate with value: null has not been sourced; any backtest that needs it stops and names it.
+# Percentages are % of turnover (equity) or of premium (options).
+costs:
+  label: "standard rates, not yet verified against a contract note"
+  verified_against_contract_note: false
+  plan: "ICICI Direct Prime 999 (resident, one-time plan)"
+  compiled_on: "2026-11-12"
+  gst_pct: {value: 18, source: "zerodha.com/charges; angelone.in/exchange-transaction-charges; icicidirect.com (GST 18% on brokerage)", effective: "in force on 2026-11-12 (start date not stated on source)"}
+  # Zerodha and Angel One differ on whether GST applies to the tiny IPFT charge; both include brokerage, NSE and SEBI.
+  gst_on: [brokerage, exchange_txn, sebi_fee, ipft, dp_charge]
+  intraday_equity:
+    brokerage_pct:      {value: 0.022, source: "icicidirect.com/brokerage and secure.icicidirect.com/customer/brokerageplans: Prime 999 'Intraday / Futures' 0.022%; applied to each leg (side not stated)", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    stt_buy_pct:        {value: 0, source: "zerodha.com/charges; angelone.in; navia.co.in STT table (sell side only)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in)"}
+    stt_sell_pct:       {value: 0.025, source: "zerodha.com/charges; angelone.in; navia.co.in (dated 2026-11-11)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; cash rates unchanged)"}
+    exchange_txn_pct:   {value: 0.00307, source: "zerodha.com/charges 'NSE: 0.00307%'; angelone.in 0.0030699%. NSE page did not load. ICICI page shows an older 0.00297%", effective: "in force on 2026-11-12 (start date not stated)"}
+    sebi_fee_pct:       {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
+    stamp_duty_buy_pct: {value: 0.003, source: "zerodha.com/charges '0.003% or Rs 300/crore on buy side'; angelone.in 0.003%", effective: "in force on 2026-11-12 (start date not stated)"}
+    ipft_pct:           {value: 0.0000001, source: "zerodha.com/charges 'Rs 0.01 per crore'; angelone.in 0.0000001%", effective: "in force on 2026-11-12 (start date not stated)"}
+  delivery_equity:
+    brokerage_pct:      {value: 0.22, source: "icicidirect.com/brokerage and secure.icicidirect.com/customer/brokerageplans: Prime 999 delivery 0.22%, 'No minimum brokerage'", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    stt_buy_pct:        {value: 0.1, source: "zerodha.com/charges; angelone.in; navia.co.in", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; unchanged)"}
+    stt_sell_pct:       {value: 0.1, source: "zerodha.com/charges; angelone.in; navia.co.in", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; unchanged)"}
+    exchange_txn_pct:   {value: 0.00307, source: "zerodha.com/charges 'NSE: 0.00307%'; angelone.in 0.0030699%. NSE page did not load", effective: "in force on 2026-11-12 (start date not stated)"}
+    sebi_fee_pct:       {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
+    stamp_duty_buy_pct: {value: 0.015, source: "zerodha.com/charges '0.015% or Rs 1500/crore on buy side'; angelone.in 0.015%", effective: "in force on 2026-11-12 (start date not stated)"}
+    ipft_pct:           {value: 0.0000001, source: "zerodha.com/charges 'Rs 0.01 per crore'; angelone.in 0.0000001%", effective: "in force on 2026-11-12 (start date not stated)"}
+    dp_charge_per_sell_inr: {value: 20, source: "icicidirect.com/brokerage: NSDL/CDSL Rs 20 + GST per scrip on the first debit of the day", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+  options:
+    brokerage_per_lot_inr:    {value: 49, source: "icicidirect.com/brokerage: Prime 999 options Rs 49 per lot; applied to each leg (side not stated)", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    stt_sell_premium_pct:     {value: 0.15, source: "zerodha.com/charges; angelone.in; navia.co.in (0.10% -> 0.15%)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in)"}
+    exchange_txn_premium_pct: {value: 0.03553, source: "zerodha.com/charges 'NSE: 0.03553% (on premium)'; angelone.in 0.0355299%", effective: "in force on 2026-11-12 (start date not stated)"}
+    sebi_fee_pct:             {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
+    stamp_duty_buy_pct:       {value: 0.003, source: "zerodha.com/charges; angelone.in: 0.003% on buy side", effective: "in force on 2026-11-12 (start date not stated)"}
+    # Left empty on purpose: sources disagree (Zerodha Rs 0.01/crore; Angel One lists both 0.0000001% and 0.002%).
+    ipft_pct:                 {value: null, source: "NOT SOURCED - conflicting figures; fill from your contract note", effective: ""}
+  slippage_pct:                # a setting, not a published rate: adverse move per side, % of price
+    intraday_equity: 0.05
+    delivery_equity: 0.05
+    options: 0.5
+
+# ---- Phase 3: strategy thresholds (each strategy has an id and version in its own file) ----
+strategies:
+  orb:                          # opening-range breakout, intraday
+    range_minutes: 15           # opening range = 09:15-09:30
+    breakout_buffer_pct: 0.05   # close must clear the range by this %
+    max_range_pct: 1.5          # skip the day if the range is wider than this % of price
+    min_volume_mult: 1.2        # breakout bar volume >= this x average opening-range bar volume (stocks)
+    reward_risk: 2.0
+    last_signal_time: "11:30"
+  vwap_pullback:                # intraday, with the trend
+    touch_pct: 0.15
+    min_bars_on_side: 6
+    stop_buffer_pct: 0.10
+    reward_risk: 1.5
+    first_signal_time: "09:45"
+    last_signal_time: "14:30"
+  range_reversion:              # intraday, RANGE days only
+    band_bars: 20
+    band_sd: 2.0
+    stop_buffer_pct: 0.10
+    min_reward_risk: 1.0
+    first_signal_time: "09:45"
+    last_signal_time: "14:30"
+  swing_pullback:               # daily bars, long only (delivery)
+    fast_sma: 20
+    slow_sma: 50
+    pullback_pct: 1.0
+    atr_days: 14
+    stop_atr_mult: 1.5
+    reward_risk: 2.0
+    max_hold_days: 10
+  swing_breakout:               # daily bars, long only (delivery)
+    lookback_days: 20
+    volume_mult: 1.5
+    atr_days: 14
+    stop_atr_mult: 1.5
+    reward_risk: 2.0
+    max_hold_days: 10
+
+# ---- Phase 3: backtest and walk-forward ----
+backtest:
+  intraday_exit_time: "15:15"   # open intraday trades are closed at the close of the bar ending 15:15 IST
+  last_entry_time: "14:45"
+  position_cap_pct: 25          # position value <= 25% of capital (sizing: risk.max_loss_per_trade_pct)
+  holdout_pct: 20               # last 20% of sessions untouched unless you run with --holdout
+  window_sessions: 21           # walk-forward test windows of ~1 month
+  step_sessions: 21
+  min_trades: 30                # fewer trades => LOW SAMPLE
+  reports_dir: data/backtests

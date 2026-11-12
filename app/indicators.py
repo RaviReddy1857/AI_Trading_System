@@ -136,3 +136,23 @@ def breadth(stocks: Mapping[str, tuple[Sequence[float], float | None]], n: int) 
     counted = len(above) + len(below)
     pct = (len(above) / counted * 100.0) if counted else None
     return Breadth(pct, above, below, missing)
+
+
+def gap_breaks(opens: Sequence[float], closes: Sequence[float], max_gap_pct: float) -> list[int]:
+    """Indexes i where bar i opened more than max_gap_pct away from bar i-1's close.
+
+    Broker history is not adjusted for splits, bonuses or demergers, so such a jump usually
+    means the prices before and after it are in different units. Calculations must not span it."""
+    out = []
+    for i in range(1, len(closes)):
+        a, b = closes[i - 1], opens[i]
+        if _ok(a) and _ok(b) and a > 0 and abs(b / a - 1) * 100 > max_gap_pct:
+            out.append(i)
+    return out
+
+
+def after_last_break(bars: Sequence, max_gap_pct: float) -> list:
+    """The bars after the last overnight gap above max_gap_pct (all bars if there is none).
+    `bars` are objects with .open and .close, oldest first."""
+    br = gap_breaks([b.open for b in bars], [b.close for b in bars], max_gap_pct)
+    return list(bars[br[-1]:]) if br else list(bars)

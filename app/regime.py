@@ -27,7 +27,7 @@ from .config import Regime as RegimeParams
 from .config import Settings
 from .history import bar_date, daily_start
 from .hub import MarketHub
-from .indicators import atr, breadth, last, percentile, sma
+from .indicators import after_last_break, atr, breadth, last, percentile, sma
 from .manual_data import ManualData
 from .models import Bar, utcnow
 from .quality import IST, is_finite
@@ -324,7 +324,9 @@ class RegimeService:
             vix_now = current[p.vix_symbol][0]
             stock_data = {}
             for sym in stocks:
-                sb = hist(sym, cutoff, p.breadth_sma_days)
+                # +1 bar so a break on the oldest day is seen; never average across a break
+                sb = after_last_break(hist(sym, cutoff, p.breadth_sma_days + 1),
+                                      s.history.max_overnight_gap_pct)[-p.breadth_sma_days:]
                 fresh = bool(sb) and bar_date(sb[-1]) == need_last
                 stock_data[sym] = ([b.close for b in sb], current[sym][0] if fresh else None)
 
@@ -375,3 +377,136 @@ class RegimeService:
             self._latest = out
         return out
 
+
+
+# ---------------- point-in-time regime (backtests) ----------------
+class PointInTimeRegime:
+    """The regime as it would have been known at a past moment, from stored bars only.
+
+    at_bar(t):   during a session, at the close time t of a 5-minute bar. Uses daily bars of
+                 sessions before t's session, and only 5-minute bars that ended at or before t.
+    at_close(d): after session d closed (swing signals). Uses daily bars up to and including d.
+
+    It never reads the live hub, the clock or today's regime. A price older than `max_age`
+    counts as missing, so gaps give UNKNOWN exactly as live data would.
+    """
+
+    def __init__(self, settings: Settings, store: Store, calendar: MarketCalendar, source: str,
+                 max_age: timedelta = timedelta(minutes=10)):
+        self.p = settings.regime
+        self.store = store
+        self.calendar = calendar
+        self.source = source
+        self.max_age = max_age
+        self.stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
+        self.max_gap = settings.history.max_overnight_gap_pct
+        self._daily: dict[str, list[Bar]] = {}
+        self._five: dict[str, dict[date, list[Bar]]] = {}
+        self._cache: dict = {}
+        self._idx: dict = {}
+        self._starts: dict = {}
+        self._hist: dict = {}
+
+    def _d(self, sym: str) -> list[Bar]:
+        if sym not in self._daily:
+            self._daily[sym] = self.store.history_bars("bars_1d", sym, self.source)
+        return self._daily[sym]
+
+    def _f(self, sym: str, session: date) -> list[Bar]:
+        if sym not in self._five:
+            by_day: dict[date, list[Bar]] = {}
+            for b in self.store.history_bars("bars_5m", sym, self.source):
+                by_day.setdefault(bar_date(b), []).append(b)
+            self._five[sym] = by_day
+        return self._five[sym].get(session, [])
+
+    def _before(self, sym: str, cutoff: datetime, n: int) -> list[Bar]:
+        import bisect
+        bars = self._d(sym)
+        if sym not in self._starts:
+            self._starts[sym] = [b.start for b in bars]
+        i = bisect.bisect_left(self._starts[sym], cutoff)
+        return bars[max(0, i - n):i]
+
+    def _lookback(self) -> int:
+        p = self.p
+        return max(p.sma_slow_days, p.atr_days, p.vix_lookback_days, p.breadth_sma_days) + 5
+
+    def _history(self, session: date):
+        """Daily history for a session: identical for every bar of that session, so cached."""
+        if session not in self._hist:
+            p = self.p
+            cutoff = daily_start(session)
+            need_last = self.calendar.previous_trading_day(session)
+            lookback = self._lookback()
+            idx_bars = self._before(p.index_symbol, cutoff, lookback)
+            vix_bars = self._before(p.vix_symbol, cutoff, lookback)
+            problems = [f"{sym} daily history ends {bar_date(bars[-1])}, expected {need_last}"
+                        for sym, bars in ((p.index_symbol, idx_bars), (p.vix_symbol, vix_bars))
+                        if bars and bar_date(bars[-1]) != need_last]
+            stocks = {}
+            for sym in self.stocks:
+                sb = after_last_break(self._before(sym, cutoff, p.breadth_sma_days + 1),
+                                      self.max_gap)[-p.breadth_sma_days:]
+                stocks[sym] = ([b.close for b in sb], bool(sb) and bar_date(sb[-1]) == need_last)
+            self._hist[session] = (_daily(idx_bars), [b.close for b in vix_bars], stocks, problems,
+                                   self.store.events_on(session))
+        return self._hist[session]
+
+    def _inputs(self, session: date, current: dict, notes: list[str]) -> RegimeInputs:
+        """current: sym -> (price, high, low) as known at that moment."""
+        p = self.p
+        idx_hist, vix_hist, stocks, problems, events = self._history(session)
+        stock_data = {sym: (closes, current.get(sym, (None,))[0] if fresh else None)
+                      for sym, (closes, fresh) in stocks.items()}
+        price, hi, lo = current.get(p.index_symbol, (None, None, None))
+        return RegimeInputs(
+            session_date=session, index_symbol=p.index_symbol, index_history=idx_hist,
+            index_price=price, index_day_high=hi, index_day_low=lo,
+            vix_history=vix_hist, vix_now=current.get(p.vix_symbol, (None,))[0],
+            stocks=stock_data, events=events, data_problems=list(problems), notes=notes)
+
+    def _session_index(self, sym: str, session: date):
+        key = (sym, session)
+        if key not in self._idx:
+            bars = self._f(sym, session)
+            ends, hi, lo = [], [], []
+            for b in bars:
+                ends.append(b.start + timedelta(minutes=5))
+                hi.append(max(hi[-1], b.high) if hi else b.high)
+                lo.append(min(lo[-1], b.low) if lo else b.low)
+            self._idx[key] = (ends, [b.close for b in bars], hi, lo)
+        return self._idx[key]
+
+    def _so_far(self, sym: str, session: date, t: datetime) -> tuple[float | None, float | None, float | None]:
+        """Last close and the session high/low from 5-minute bars that ENDED at or before t."""
+        import bisect
+        ends, closes, hi, lo = self._session_index(sym, session)
+        i = bisect.bisect_right(ends, t) - 1
+        if i < 0 or t - ends[i] > self.max_age:
+            return (None, None, None)
+        return (closes[i], hi[i], lo[i])
+
+    def at_bar(self, t: datetime) -> RegimeResult:
+        """Regime known at time t (UTC), the close of a 5-minute bar."""
+        key = ("bar", t)
+        if key not in self._cache:
+            session = t.astimezone(IST).date()
+            syms = [self.p.index_symbol, self.p.vix_symbol, *self.stocks]
+            current = {s: self._so_far(s, session, t) for s in syms}
+            inp = self._inputs(session, current, [])
+            self._cache[key] = classify(inp, self.p)
+        return self._cache[key]
+
+    def at_close(self, d: date) -> RegimeResult:
+        """Regime known after session d closed, from daily bars up to and including d."""
+        key = ("close", d)
+        if key not in self._cache:
+            current = {}
+            for s in [self.p.index_symbol, self.p.vix_symbol, *self.stocks]:
+                b = [x for x in self._before(s, daily_start(d) + _ONE_MIN, 1) if bar_date(x) == d]
+                current[s] = (b[0].close, b[0].high, b[0].low) if b else (None, None, None)
+            # history = sessions before d; d's own bar supplies the "current" values
+            inp = self._inputs(d, current, [f"based on the {d} close"])
+            self._cache[key] = classify(inp, self.p)
+        return self._cache[key]

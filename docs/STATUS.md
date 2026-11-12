@@ -9,7 +9,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 1 | Data feed and quality gate | Built; live Breeze run pending | 18 passing | 2026-11-11 |
 | 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes, review 2 findings 1-3 and review 3 findings 1-2 applied; live history works (user); live subscriptions confirmed in the SDK log, live ticks not yet seen | 184 passing (whole suite) | 2026-11-11 |
 | - | Nifty 50 watchlist (task before phase 3) | Built; 50 of 50 mapped; live history downloaded; 53 live subscriptions not yet seen | 212 passing (whole suite) | 2026-11-12 |
-| 3 | Intraday and swing strategies with backtests | Not started | | |
+| 3 | Intraday and swing strategies with backtests | Built and tested; backtests run on real Breeze data (all five lose after costs); costs not yet verified against a contract note | 259 passing (whole suite) | 2026-11-12 |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -174,6 +174,100 @@ exactly 60% gives TRENDING_UP and at 50% gives RANGE.
   Check the console for `subscribed 53 of 53 symbols` on your next breeze-mode start.
 - Whether Breeze limits the number of symbols per websocket. 53 is assumed to be within its limit; any refusal will now show in the summary.
 
+## Phase 3 (2026-11-12)
+
+**Built:**
+- **History (step 0):** 5-minute bars for at least 6 months (`history.intraday_days: 190`) and daily bars for 800 calendar days,
+  in 10-day / 900-day chunks, with the same pause and retry rules. Stored data is one block per symbol, so only the part
+  older than the first stored bar (backfill) and from the last stored day onward are fetched. If the source has nothing older,
+  a `history_floor` row stops it being asked again. `python -m app.history` prints how far back each symbol goes and the data breaks.
+  Breeze returns pre-open (09:00-09:10) and post-close (15:30-15:35) 5-minute bars: they are now dropped, and 13,788 stored ones were purged.
+- **Data actually stored (live, 2026-11-12):** all 53 symbols have 5-minute bars from **2026-05-06 to 2026-11-12 (131 sessions)**
+  and daily bars from **2024-09-04 to 2026-11-11 (540 sessions)**. No symbol is shorter. 0 failed, 0 empty requests.
+- `app/models.py`: `Signal` (architecture contract plus `entry_zone`), validated on creation (`signal_problems`: enumerations,
+  aware datetimes, finite prices, stop/target on the right side, `data_as_of` not after `created_at`). Ids are deterministic (uuid5).
+- `app/strategies/base.py`: `Strategy` (id, version = base + hash of thresholds, horizon, interval, allowed_regimes) and
+  `MarketContext`. The base refuses a non-LIVE status, a regime outside `allowed_regimes`, an index, and raises on a bar after `asof`.
+- Strategies: `orb`, `vwap_pullback`, `range_reversion` (5-minute, intraday, long and short); `swing_pullback`,
+  `swing_breakout` (daily, long only, delivery). Thresholds in `config.yaml` -> `strategies`.
+- `app/costs.py` + `config.yaml` -> `costs`: Prime 999 brokerage and statutory charges for intraday equity, delivery equity
+  and options, with slippage. Each rate has a source and an effective date. Decimal arithmetic, each charge rounded to the paise
+  per leg. Empty rates raise `MissingCostRates`, naming them. The label "standard rates, not yet verified against a contract note"
+  is on every report and on the page.
+- `PointInTimeRegime` (`app/regime.py`): the regime at a bar's close from stored bars only (daily bars before the session,
+  5-minute bars that had ended); `at_close(d)` for swing signals.
+- `app/backtest.py`: next-bar-open entry, stop first, gaps through the stop fill at the open, 15:15 intraday exit, no entries
+  after 14:45, risk sizing (1% at the stop, 25% position cap), costs per trade, a swing trade exiting on its entry day charged as
+  intraday, walk-forward (fixed rules; last 20% of sessions an untouched holdout; ~1-month windows), reports to SQLite
+  (`backtest_runs`, `backtest_trades`) and `data/backtests/*.json`.
+- Report fields: period, trades, win rate, average win/loss, gross, costs, net P&L, max drawdown (Rs and % of capital), profit factor,
+  by regime, by window, holdout, skipped-signal counts, peak exposure, data breaks, LOW SAMPLE below 30 trades (overall, per regime, per window).
+- `GET /api/backtests`, `GET /api/backtests/{run_id}`, page `/backtests` (linked from the main page). All GET; the safety test passes.
+- **Unadjusted corporate actions:** Breeze daily history is not adjusted. An overnight stock gap above 25%
+  (`history.max_overnight_gap_pct`) is a break. Averages, ATR, breakouts and breadth (backtest **and the live regime**) use
+  only bars after it. A swing trade open across a break is dropped and counted.
+  Breaks found: RELIANCE and DRREDDY 2024-10-28, SHRIRAMFIN 2025-01-10, BSE 2025-05-23, BAJFINANCE 2025-06-16,
+  NESTLEIND 2025-08-08, HDFCBANK 2025-08-26, TMPV 2025-10-14 (demerger), KOTAKBANK 2026-01-14, TRENT 2026-06-04
+  (TRENT -34%: not confirmed as a corporate action; excluded anyway).
+- `Store` waits up to 30 s for a lock (the running app writes to the same file).
+
+**Cost rates used (Prime 999; checked 2026-11-12):**
+
+| Item | Intraday | Delivery | Options | Source |
+|---|---|---|---|---|
+| Brokerage | 0.022% each leg | 0.22% each leg, no minimum | Rs 49 per lot each leg | icicidirect.com/brokerage, secure.icicidirect.com/customer/brokerageplans |
+| STT | 0.025% sell | 0.1% buy and sell | 0.15% of premium, sell | Zerodha, Angel One, Navia (Finance Act 2026, from 2026-04-01) |
+| NSE transaction | 0.00307% | 0.00307% | 0.03553% of premium | Zerodha, Angel One (NSE page did not load; ICICI page shows an older 0.00297%) |
+| SEBI fee | Rs 10/crore | Rs 10/crore | Rs 10/crore | Zerodha, Angel One |
+| Stamp duty (buy) | 0.003% | 0.015% | 0.003% | Zerodha, Angel One |
+| IPFT | Rs 0.01/crore | Rs 0.01/crore | **empty** (sources disagree) | Zerodha, Angel One |
+| GST | 18% on brokerage, NSE, SEBI, IPFT, DP | | | Zerodha, Angel One |
+| DP charge | - | Rs 20 + GST per scrip sold | - | icicidirect.com/brokerage |
+| Slippage (setting) | 0.05% per side | 0.05% per side | 0.5% per side | not a published rate |
+
+ICICI's own statutory table is out of date (it still shows options STT 0.05% and futures 0.01%), so it was not used for statutory rates.
+
+**Backtest results on real data (development period only; holdout untouched):**
+
+| Strategy | Period | Trades | Win % | Net after costs (Rs) | Costs (Rs) | Max DD (Rs) | PF | Peak exposure |
+|---|---|---|---|---|---|---|---|---|
+| orb | 2026-05-06..2026-10-01 | 240 | 30.8 | -36,218 | 10,231 | 36,438 | 0.41 | 270% of capital |
+| vwap_pullback | same | 2,789 | 34.5 | -274,478 | 118,720 | 276,346 | 0.31 | 582% |
+| range_reversion | same | 1,666 | 32.1 | -152,623 | 70,960 | 153,182 | 0.25 | 663% |
+| swing_pullback | 2024-09-04..2026-06-05 | 133 | 24.8 | -97,671 | 49,261 | 100,333 | 0.29 | 516% |
+| swing_breakout | same | 76 | 23.7 | -58,967 | 27,747 | 58,967 | 0.36 | 370% |
+
+All five lose before and after costs. The intraday strategies have tight stops (median 0.3-0.9%), so every position hits the
+25% cap (Rs 50,000) and risks only about Rs 170, while charges (about Rs 43) and slippage (about Rs 50) take roughly half of that on every trade.
+The rupee totals are inflated by overlapping trades (no portfolio limit until phase 5). The runs are deterministic: the same command gave identical results.
+The point-in-time regime was UNKNOWN on 7 of 131 sessions (6 after market holidays missing from holidays.csv), so no trades on those days.
+
+**Tested (offline, `tests/test_phase3.py`, 47 tests):**
+- ACCEPTANCE: the signal bar's close is never the fill (fill = next open + slippage; no next bar or a gap = no trade; the strategy never
+  sees an unfinished bar; a future bar in the context raises).
+- ACCEPTANCE: a fixture trade reconciles to the paise (hand calculation in the test's docstring: net Rs 887.14).
+- ACCEPTANCE: every strategy is silent in every regime outside its list, when not LIVE, and for an index (contexts found in sim
+  data; a hand-built context for the volume breakout because simulated volume never spikes).
+- ACCEPTANCE: the backtest regime uses only past data (rewriting every later bar leaves it identical; changing an earlier bar changes it).
+- ACCEPTANCE: LOW SAMPLE below 30 trades; empty rates fail loudly and are named.
+- Also: Signal schema, delivery and option charges, sizing, stop-first, gap through stop, short trades, 15:15 exit, last entry time,
+  swing next-day entry and time exit, holdout untouched and saved reports, determinism, routes and page, backfill and floor,
+  coverage report, out-of-session bars, data breaks (breadth and swing), exposure.
+
+**Run here:** `python -m app.history` (live), `python -m app.backtest` (live data, twice: identical results; 30 s),
+`python -m app.backtest --source sim`, and the app in sim mode on port 8001 (`/backtests` 200, `/api/backtests` lists runs, main page links to it).
+
+**Not tested / known gaps:**
+- Costs not compared with a real contract note (tracker P3.2 "Costs match a real contract note" is not done).
+  Whether ICICI charges Prime intraday/option brokerage on both legs is assumed (the page does not say). Rounding per order vs per leg not checked.
+- Options IPFT rate empty (conflicting sources); option backtests will refuse to run until it is filled.
+- No corporate-action adjustment; history across a gap above 25% is not used. A real 25%+ move would also be excluded.
+- No portfolio limits in backtests (phase 5); rupee totals overstate what one account could do.
+- The holdout (2026-10-05..2026-11-12) has not been opened. It includes today's session, which was still partial when downloaded.
+- Holidays in `holidays.csv` are not filled, so sessions after a holiday have an UNKNOWN regime (no trades).
+- The app on port 8000 was running the old code during this work; restart it to get the new routes and the data-break rule in the live regime.
+- Sim mode startup is slower (fake 190-day 5-minute history for 53 symbols: over 2 minutes the first time).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -199,7 +293,12 @@ exactly 60% gives TRENDING_UP and at 50% gives RANGE.
 | 19 | 2 | Review 3: restarting the app added a duplicate `regime_log` entry | Fixed 2026-11-11: compared with the last stored entry for the session |
 | 20 | 2 | Review 3: finding 4 was a placeholder in the request | Waiting for user: paste the text |
 | 21 | - | Live start with 53 subscriptions not yet seen (port 8000 was busy during the change) | Waiting for user: restart the app in breeze mode and check the summary line |
-| 22 | 2 | Sim startup is slower with 53 symbols (about 23 s to generate fake history) | Open, low priority |
+| 22 | 2 | Sim startup is slower with 53 symbols (over 2 minutes the first time with 190 days of fake 5-minute history) | Open, low priority |
+| 23 | 3 | Cost rates are standard published rates, not verified against a contract note | Waiting for user: compare one contract note |
+| 24 | 3 | Options IPFT rate empty (sources disagree) | Waiting for user: fill from a contract note before phase 4 |
+| 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
+| 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
+| 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
 
 ## Decisions log
 
@@ -220,3 +319,7 @@ exactly 60% gives TRENDING_UP and at 50% gives RANGE.
 | 2026-11-11 | Write requests need local Host/Origin and JSON; GET and HEAD are unaffected |
 | 2026-11-12 | Watchlist = NIFTY, BANKNIFTY, INDIAVIX + Nifty 50 stocks mapped by NSE symbol and ISIN from ICICI's instrument list; unmappable symbols are left out, never guessed |
 | 2026-11-12 | Breadth uses every watchlist stock (now the Nifty 50); thresholds unchanged |
+| 2026-11-12 | Brokerage plan: ICICI Direct Prime 999 (user). Statutory rates from Zerodha/Angel One/Navia because ICICI's statutory table is outdated and NSE's page did not load |
+| 2026-11-12 | Stock overnight gaps above 25% are data breaks (no adjustment factors guessed), also in the live regime's breadth |
+| 2026-11-12 | Pre-open and post-close 5-minute bars are not part of the session and are not stored |
+| 2026-11-12 | The holdout is not simulated unless --holdout is given |

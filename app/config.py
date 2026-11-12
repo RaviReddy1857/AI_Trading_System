@@ -1,11 +1,12 @@
 """Loads and validates config.yaml. All risk limits are percentages of capital."""
 from __future__ import annotations
 
+from datetime import time as _dtime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -114,19 +115,164 @@ class Bias(StrictModel):
 
 class History(StrictModel):
     daily_days: int = Field(400, ge=60, le=2000)       # calendar days of daily bars to keep
-    intraday_days: int = Field(10, ge=1, le=60)        # calendar days of 5-minute bars
+    intraday_days: int = Field(190, ge=1, le=1000)     # calendar days of 5-minute bars (>= 6 months for backtests)
     sim_seed_on_start: bool = True                     # sim mode: generate fake history
     # Breeze only (Breeze allows about 100 calls a minute): pause between history requests,
     # and how often to ask again when a reply comes back empty.
     request_pause_seconds: float = Field(0.7, ge=0, le=10)
     empty_retries: int = Field(2, ge=0, le=5)
     retry_pause_seconds: float = Field(3.0, ge=0, le=60)
+    # Stock daily history is not adjusted for splits/bonuses/demergers: an overnight gap above this
+    # is treated as a break, and no average, ATR, breakout or breadth value may span it.
+    max_overnight_gap_pct: float = Field(25.0, gt=0, le=100)
 
 
 class Calendar(StrictModel):
     events_csv: str = "data/events.csv"
     holidays_csv: str = "data/holidays.csv"
     fii_dii_csv: str = "data/fii_dii.csv"
+
+
+# ---------------- phase 3: costs, strategies, backtest ----------------
+def _hhmm(v: str) -> str:
+    """An IST clock time 'HH:MM' inside the session 09:15-15:30."""
+    try:
+        t = _dtime.fromisoformat(v)
+    except ValueError:
+        raise ValueError(f"'{v}' is not a time like 14:30") from None
+    if not (_dtime(9, 15) <= t <= _dtime(15, 30)):
+        raise ValueError(f"{v} is outside market hours 09:15-15:30")
+    return v
+
+
+HHMM = Annotated[str, AfterValidator(_hhmm)]
+
+
+def hhmm(v: str) -> _dtime:
+    return _dtime.fromisoformat(v)
+
+
+class Rate(StrictModel):
+    """One published rate. value None = not sourced yet; any backtest needing it fails, naming it."""
+    value: float | None = Field(None, ge=0)
+    source: str = ""
+    effective: str = ""
+
+
+class EquityRates(StrictModel):
+    brokerage_pct: Rate          # % of each leg's turnover
+    stt_buy_pct: Rate
+    stt_sell_pct: Rate
+    exchange_txn_pct: Rate       # NSE transaction charge, both legs
+    sebi_fee_pct: Rate           # both legs
+    stamp_duty_buy_pct: Rate     # buy leg only
+    ipft_pct: Rate               # NSE investor protection fund trust charge, both legs
+    dp_charge_per_sell_inr: Rate | None = None   # delivery only: depository charge per scrip sold (before GST)
+
+
+class OptionRates(StrictModel):
+    brokerage_per_lot_inr: Rate  # per lot, each executed leg
+    stt_sell_premium_pct: Rate
+    exchange_txn_premium_pct: Rate
+    sebi_fee_pct: Rate
+    stamp_duty_buy_pct: Rate
+    ipft_pct: Rate
+
+
+class Slippage(StrictModel):
+    """Adverse slippage per side, % of price. A setting, not a published rate."""
+    intraday_equity: float = Field(0.05, ge=0, le=5)
+    delivery_equity: float = Field(0.05, ge=0, le=5)
+    options: float = Field(0.5, ge=0, le=20)
+
+
+GST_BASES = ("brokerage", "exchange_txn", "sebi_fee", "ipft", "dp_charge")
+
+
+class Costs(StrictModel):
+    label: str = "standard rates, not yet verified against a contract note"
+    verified_against_contract_note: bool = False
+    plan: str = ""
+    compiled_on: str = ""
+    gst_pct: Rate
+    gst_on: list[str] = list(GST_BASES)
+    intraday_equity: EquityRates
+    delivery_equity: EquityRates
+    options: OptionRates
+    slippage_pct: Slippage = Slippage()
+
+    @field_validator("gst_on")
+    @classmethod
+    def known_bases(cls, v: list[str]) -> list[str]:
+        bad = [x for x in v if x not in GST_BASES]
+        if bad:
+            raise ValueError(f"costs.gst_on has unknown items {bad}; allowed {list(GST_BASES)}")
+        return v
+
+
+class OrbParams(StrictModel):
+    range_minutes: int = Field(15, ge=5, le=60)
+    breakout_buffer_pct: float = Field(0.05, ge=0, le=2)
+    max_range_pct: float = Field(1.5, gt=0, le=10)       # skip days with a very wide opening range
+    min_volume_mult: float = Field(1.2, ge=0, le=10)     # breakout bar volume vs opening-range average
+    reward_risk: float = Field(2.0, gt=0, le=10)
+    last_signal_time: HHMM = "11:30"
+
+
+class VwapParams(StrictModel):
+    touch_pct: float = Field(0.15, ge=0, le=2)           # low within this % of VWAP counts as a touch
+    min_bars_on_side: int = Field(6, ge=1, le=60)         # bars that closed on the trend side of VWAP before the pullback
+    stop_buffer_pct: float = Field(0.10, ge=0, le=2)
+    reward_risk: float = Field(1.5, gt=0, le=10)
+    first_signal_time: HHMM = "09:45"
+    last_signal_time: HHMM = "14:30"
+
+
+class RangeParams(StrictModel):
+    band_bars: int = Field(20, ge=5, le=100)
+    band_sd: float = Field(2.0, gt=0, le=5)
+    stop_buffer_pct: float = Field(0.10, ge=0, le=2)
+    min_reward_risk: float = Field(1.0, gt=0, le=10)
+    first_signal_time: HHMM = "09:45"
+    last_signal_time: HHMM = "14:30"
+
+
+class SwingPullbackParams(StrictModel):
+    fast_sma: int = Field(20, ge=2, le=200)
+    slow_sma: int = Field(50, ge=3, le=400)
+    pullback_pct: float = Field(1.0, ge=0, le=10)         # low within this % of the fast average
+    atr_days: int = Field(14, ge=2, le=100)
+    stop_atr_mult: float = Field(1.5, gt=0, le=10)
+    reward_risk: float = Field(2.0, gt=0, le=10)
+    max_hold_days: int = Field(10, ge=1, le=60)
+
+
+class SwingBreakoutParams(StrictModel):
+    lookback_days: int = Field(20, ge=5, le=250)
+    volume_mult: float = Field(1.5, gt=0, le=20)
+    atr_days: int = Field(14, ge=2, le=100)
+    stop_atr_mult: float = Field(1.5, gt=0, le=10)
+    reward_risk: float = Field(2.0, gt=0, le=10)
+    max_hold_days: int = Field(10, ge=1, le=60)
+
+
+class Strategies(StrictModel):
+    orb: OrbParams = OrbParams()
+    vwap_pullback: VwapParams = VwapParams()
+    range_reversion: RangeParams = RangeParams()
+    swing_pullback: SwingPullbackParams = SwingPullbackParams()
+    swing_breakout: SwingBreakoutParams = SwingBreakoutParams()
+
+
+class Backtest(StrictModel):
+    intraday_exit_time: HHMM = "15:15"        # intraday trades are closed by this IST time
+    last_entry_time: HHMM = "14:45"           # no new intraday entries after this
+    position_cap_pct: float = Field(25.0, gt=0, le=100)   # position value cap, % of capital
+    holdout_pct: float = Field(20.0, ge=5, le=50)         # final untouched share of sessions
+    window_sessions: int = Field(21, ge=5, le=250)        # walk-forward test window
+    step_sessions: int = Field(21, ge=1, le=250)
+    min_trades: int = Field(30, ge=1, le=1000)            # below this a result is LOW SAMPLE
+    reports_dir: str = "data/backtests"
 
 
 class Settings(StrictModel):
@@ -140,6 +286,9 @@ class Settings(StrictModel):
     bias: Bias = Bias()
     history: History = History()
     calendar: Calendar = Calendar()
+    costs: Costs | None = None               # required by backtests (phase 3)
+    strategies: Strategies = Strategies()
+    backtest: Backtest = Backtest()
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":

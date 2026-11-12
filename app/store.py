@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE TABLE IF NOT EXISTS holidays (date TEXT PRIMARY KEY, note TEXT);
 CREATE TABLE IF NOT EXISTS fii_dii (date TEXT PRIMARY KEY, fii_net_cr REAL NOT NULL, dii_net_cr REAL);
+CREATE TABLE IF NOT EXISTS history_floor (
+    tbl TEXT NOT NULL, symbol TEXT NOT NULL, source TEXT NOT NULL, floor_utc TEXT NOT NULL,
+    PRIMARY KEY (tbl, symbol, source)
+);
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    run_id TEXT PRIMARY KEY, created_utc TEXT NOT NULL, strategy_id TEXT NOT NULL, version TEXT NOT NULL,
+    params_json TEXT NOT NULL, report_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    run_id TEXT NOT NULL, n INTEGER NOT NULL, trade_json TEXT NOT NULL, PRIMARY KEY (run_id, n)
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -62,7 +73,8 @@ class Store:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.live = live
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(str(db_path), check_same_thread=False)
+        # timeout: wait up to 30 s for another process (e.g. the running app) to finish a write
+        self._db = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
         self._db.executescript(SCHEMA)
 
     def _guard(self, source) -> None:
@@ -151,6 +163,81 @@ class Store:
     def last_history_start(self, table: str, symbol: str, source: str) -> datetime | None:
         bars = self.history_bars(table, symbol, source, limit=1)
         return bars[0].start if bars else None
+
+    def delete_bars_outside_session(self, source: str) -> int:
+        """Remove 5-minute bars that start before 09:15 or at/after 15:30 IST (03:45 / 10:00 UTC).
+        Timestamps are stored as UTC ISO strings, so the time is characters 12-16."""
+        self._guard(source)
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM bars_5m WHERE source=? AND (substr(start_utc,12,5) < '03:45' OR substr(start_utc,12,5) >= '10:00')",
+                (source,))
+            self._db.commit()
+        return cur.rowcount
+
+    def first_history_start(self, table: str, symbol: str, source: str) -> datetime | None:
+        if table not in HISTORY_TABLES:
+            raise ValueError(f"unknown history table {table}")
+        with self._lock:
+            r = self._db.execute(f"SELECT MIN(start_utc) FROM {table} WHERE symbol=? AND source=?",
+                                 (symbol, source)).fetchone()
+        return _ts(r[0]) if r and r[0] else None
+
+    def history_range(self, table: str, source: str) -> dict[str, dict]:
+        """symbol -> first and last stored bar start, bar count and number of distinct sessions."""
+        if table not in HISTORY_TABLES:
+            raise ValueError(f"unknown history table {table}")
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT symbol, MIN(start_utc), MAX(start_utc), COUNT(*), COUNT(DISTINCT substr(start_utc,1,10))"
+                f" FROM {table} WHERE source=? GROUP BY symbol", (source,)).fetchall()
+        return {r[0]: {"first": _ts(r[1]), "last": _ts(r[2]), "bars": r[3], "days": r[4]} for r in rows}
+
+    def history_floor(self, table: str, symbol: str, source: str) -> datetime | None:
+        """Earliest time the source has data for (nothing came back before it), if known."""
+        with self._lock:
+            r = self._db.execute("SELECT floor_utc FROM history_floor WHERE tbl=? AND symbol=? AND source=?",
+                                 (table, symbol, source)).fetchone()
+        return _ts(r[0]) if r else None
+
+    def set_history_floor(self, table: str, symbol: str, source: str, floor: datetime) -> None:
+        self._guard(source)
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO history_floor VALUES (?,?,?,?)",
+                             (table, symbol, source, floor.isoformat()))
+            self._db.commit()
+
+    # ---------------- backtests ----------------
+    def save_backtest(self, run_id: str, created: datetime, strategy_id: str, version: str,
+                      params: dict, report: dict, trades: list[dict]) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO backtest_runs VALUES (?,?,?,?,?,?)",
+                             (run_id, created.isoformat(), strategy_id, version,
+                              json.dumps(params, sort_keys=True, default=str),
+                              json.dumps(report, sort_keys=True, default=str)))
+            self._db.execute("DELETE FROM backtest_trades WHERE run_id=?", (run_id,))
+            self._db.executemany("INSERT INTO backtest_trades VALUES (?,?,?)",
+                                 [(run_id, i, json.dumps(t, sort_keys=True, default=str))
+                                  for i, t in enumerate(trades)])
+            self._db.commit()
+
+    def backtest_runs(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT run_id, created_utc, strategy_id, version, report_json"
+                                    " FROM backtest_runs ORDER BY created_utc DESC LIMIT ?", (limit,)).fetchall()
+        return [{"run_id": r[0], "created_utc": r[1], "strategy_id": r[2], "version": r[3],
+                 "report": json.loads(r[4])} for r in rows]
+
+    def backtest_run(self, run_id: str) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT run_id, created_utc, strategy_id, version, params_json, report_json"
+                                 " FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not r:
+                return None
+            trades = [json.loads(t[0]) for t in self._db.execute(
+                "SELECT trade_json FROM backtest_trades WHERE run_id=? ORDER BY n", (run_id,))]
+        return {"run_id": r[0], "created_utc": r[1], "strategy_id": r[2], "version": r[3],
+                "params": json.loads(r[4]), "report": json.loads(r[5]), "trades": trades}
 
     def history_counts(self, source: str) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}

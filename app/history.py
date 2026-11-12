@@ -94,8 +94,17 @@ def parse_rows(rows: list[dict], symbol: str, kind: str, interval: str) -> tuple
             start = daily_start(dt.astimezone(IST).date())
         else:
             start = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+            if not in_session(start):
+                continue          # pre-open (09:00-09:10) and post-close bars: not part of the session
         good[start] = Bar(symbol, start, o, h, l, c, vol)
     return [good[k] for k in sorted(good)], bad
+
+
+def in_session(start_utc: datetime) -> bool:
+    """A 5-minute bar belongs to the normal session if it starts 09:15 to 15:25 IST.
+    Breeze also returns pre-open (09:00-09:10) and post-close (15:30-15:35) bars; they are dropped."""
+    t = start_utc.astimezone(IST).time()
+    return MARKET_OPEN <= t < MARKET_CLOSE
 
 
 def is_complete(bar: Bar, interval: str, now_utc: datetime) -> bool:
@@ -270,25 +279,67 @@ class HistoryLoader:
                          a.isoformat(), b.isoformat(), attempt + 1, tries - 1)
         return rows
 
+    def _ranges(self, inst: Instrument, interval: str, now: datetime) -> list[tuple[str, datetime, datetime]]:
+        """Date ranges still to download. Stored data is one contiguous block, so only the part
+        older than the first stored bar (backfill, down to a known 'nothing earlier' floor) and the
+        part from the last stored day onward (forward) are fetched; chunks in between are skipped."""
+        table, src = TABLE[interval], self.source.name
+        days = self.settings.history.daily_days if interval == DAILY else self.settings.history.intraday_days
+        want = now - timedelta(days=days)
+        first = self.store.first_history_start(table, inst.symbol, src)
+        if first is None:
+            return [("forward", want, now)]
+        out = []
+        lo = max(want, self.store.history_floor(table, inst.symbol, src) or want)
+        first_date = first.astimezone(IST).date()
+        first_day = datetime.combine(first_date, time(0, 0), IST).astimezone(timezone.utc)
+        # earliest session that the wanted range still fully covers
+        lo_ist = lo.astimezone(IST)
+        cand = lo_ist.date() if lo_ist.time() <= MARKET_OPEN else lo_ist.date() + timedelta(days=1)
+        while not self.calendar.is_trading_day(cand):
+            cand += timedelta(days=1)
+        if cand < first_date:
+            out.append(("backfill", lo, first_day))
+        if not self.is_up_to_date(inst, interval, now):
+            out.append(("forward", *self._window(inst, interval, now)))
+        return out
+
     def update_symbol(self, inst: Instrument, interval: str, now: datetime) -> dict:
-        if self.is_up_to_date(inst, interval, now):
+        ranges = self._ranges(inst, interval, now)
+        if not ranges:
             return {"saved": 0, "rejected": 0, "skipped": "already stored"}
-        start, end = self._window(inst, interval, now)
         raw: list[dict] = []
         chunk = timedelta(days=CHUNK_DAYS[interval])
-        a = start
-        while a < end:
-            b = min(a + chunk, end)
-            raw += self._fetch(inst, interval, a, b)
-            a = b
+        requests = 0
+        for kind, start, end in ranges:
+            got_any = False
+            a = start
+            while a < end:
+                b = min(a + chunk, end)
+                rows = self._fetch(inst, interval, a, b)
+                requests += 1
+                got_any = got_any or bool(rows)
+                raw += rows
+                a = b
+            if kind == "backfill" and not got_any:
+                # The source has nothing before the stored data: remember it, so later runs
+                # do not ask again for the same empty range.
+                self.store.set_history_floor(TABLE[interval], inst.symbol, self.source.name, end)
         bars, bad = parse_rows(raw, inst.symbol, inst.kind, interval)
+        if any(k == "backfill" for k, _, _ in ranges) and bars:
+            # Data starts later than requested (listing date or API limit): floor at the first bar.
+            first_req = min(s for k, s, _ in ranges)
+            if bars[0].start - first_req > timedelta(days=CHUNK_DAYS[interval]):
+                self.store.set_history_floor(TABLE[interval], inst.symbol, self.source.name,
+                                             datetime.combine(bar_date(bars[0]), time(0, 0), IST)
+                                             .astimezone(timezone.utc))
         for reason, row in bad:
             self.store.save_quality_event(now, inst.symbol, BAD_BAR, _num(row.get("close")),
                                           None, None, f"{self.source.name}:{interval}:{reason}")
         complete = [b for b in bars if is_complete(b, interval, now)
                     and self.calendar.is_trading_day(bar_date(b))]
         saved = self.store.save_history_bars(TABLE[interval], complete, self.source.name)
-        out = {"saved": saved, "rejected": len(bad)}
+        out = {"saved": saved, "rejected": len(bad), "requests": requests}
         if not raw:
             out["empty"] = True
         return out
@@ -298,6 +349,9 @@ class HistoryLoader:
         Symbols already up to date are skipped without a request. One symbol failing
         does not stop the others; failures are reported."""
         now = now or utcnow()
+        purged = self.store.delete_bars_outside_session(self.source.name)
+        if purged:
+            log.info("removed %d stored 5-minute bars outside 09:15-15:30 IST", purged)
         summary: dict = {}
         for inst in self.settings.watchlist:
             if symbols is not None and inst.symbol not in symbols:
@@ -333,6 +387,34 @@ def summarize(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def coverage(store: Store, source: str, symbols: list[str], interval: str = INTRADAY) -> str:
+    """How far back the stored data actually goes, per symbol."""
+    rng = store.history_range(TABLE[interval], source)
+    lines = [f"{interval} history stored ({source}):  symbol  first day  last day  sessions  bars"]
+    for sym in symbols:
+        r = rng.get(sym)
+        if r is None:
+            lines.append(f"  {sym:12s} NONE")
+            continue
+        lines.append(f"  {sym:12s} {r['first'].astimezone(IST).date()}  {r['last'].astimezone(IST).date()}"
+                     f"  {r['days']:5d}  {r['bars']:7d}")
+    return "\n".join(lines)
+
+
+def breaks_report(store: Store, source: str, symbols: list[str], max_gap_pct: float) -> str:
+    """Overnight gaps above max_gap_pct in stored daily stock history (unadjusted corporate actions)."""
+    from .indicators import gap_breaks
+    lines = [f"Daily overnight gaps above {max_gap_pct:g}% (treated as data breaks; history is not adjusted):"]
+    for sym in symbols:
+        bars = store.history_bars("bars_1d", sym, source)
+        for i in gap_breaks([b.open for b in bars], [b.close for b in bars], max_gap_pct):
+            lines.append(f"  {sym:12s} {bar_date(bars[i - 1])} close {bars[i - 1].close:,.2f} -> "
+                         f"{bar_date(bars[i])} open {bars[i].open:,.2f} ({(bars[i].open / bars[i - 1].close - 1) * 100:+.0f}%)")
+    if len(lines) == 1:
+        lines.append("  none")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Manual live download: python -m app.history [SYMBOL ...]"""
     import sys
@@ -360,6 +442,11 @@ def main(argv: list[str] | None = None) -> None:
     for key, res in summary.items():
         print(f"{key:28s} {res}")
     print(summarize(summary))
+    syms = [i.symbol for i in settings.watchlist if wanted is None or i.symbol in wanted]
+    print(coverage(store, "breeze", syms, INTRADAY))
+    print(coverage(store, "breeze", syms, DAILY))
+    stocks = [i.symbol for i in settings.watchlist if i.kind == "stock" and i.symbol in syms]
+    print(breaks_report(store, "breeze", stocks, settings.history.max_overnight_gap_pct))
 
 
 if __name__ == "__main__":

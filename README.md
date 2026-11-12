@@ -1,4 +1,4 @@
-# Trading Research System - Phases 1 and 2: data feed, quality gate, market regime
+# Trading Research System - Phases 1-3: data feed, quality gate, market regime, strategies and backtests
 
 Research and suggestions only. **This app cannot place, change or close orders**,
 and a test fails the build if such code is ever added. You trade manually in ICICI Direct.
@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 212 passed
+python -m pytest -q          # should say 259 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -108,6 +108,55 @@ up to `empty_retries` (2) more tries `retry_pause_seconds` (3 s) apart when a re
 whose newest complete bar is already stored. `python -m app.history` ends with a summary
 (bars saved, skipped, failed, empty). `python -m app.history RELIANCE TCS` downloads only those symbols.
 
+## Phase 3: strategies and backtests
+Five rule-based strategies, each in `app/strategies/` with its thresholds in `config.yaml` -> `strategies`:
+
+| Strategy | Bars | Regimes | Idea |
+|---|---|---|---|
+| `orb` | 5-minute | TRENDING_UP (long), TRENDING_DOWN (short) | First close beyond the 09:15-09:30 range, with volume; stop at the other side |
+| `vwap_pullback` | 5-minute | TRENDING_UP (long), TRENDING_DOWN (short) | Pullback to VWAP after 6 bars on the trend side |
+| `range_reversion` | 5-minute | RANGE | Close back inside the 20-bar 2-sd band; target the average |
+| `swing_pullback` | daily | TRENDING_UP | Up day after a pullback to the 20-day average, above the 50-day; long only |
+| `swing_breakout` | daily | TRENDING_UP | Close above the 20-day high on 1.5x volume; long only |
+
+A strategy gives no signal outside its regimes, for an index, or when the price is not LIVE. Each has an id and a version;
+the version changes when you change any of its thresholds.
+
+**Run the backtests** (after `python -m app.history` has downloaded data):
+```
+python -m app.backtest                       # all five, on your real Breeze data (data/market_live.db)
+python -m app.backtest --strategy orb        # one strategy
+python -m app.backtest --symbols RELIANCE TCS
+python -m app.backtest --source sim          # on fake data (labelled SIMULATED)
+python -m app.backtest --holdout             # also opens the final holdout - see below
+```
+Then open http://127.0.0.1:8000/backtests (link "Backtest reports" at the top of the main page). Reports are also saved as
+JSON in `data/backtests/` (`<strategy>_latest.json` plus one file per run).
+
+How the backtest works:
+- Entry at the **next** bar's open after the signal bar closed, plus slippage. The signal bar's close is never a fill.
+- If one bar touches both stop and target, the **stop** is assumed hit first. A bar that opens beyond the stop fills at its open.
+- Intraday trades close at 15:15 IST; no new entries after 14:45. Swing trades exit at stop, target, or after 10 sessions.
+- Size: 1% of capital at risk to the stop, capped at 25% of capital per position. Each trade is sized on its own: there are
+  no portfolio limits yet (phase 5), so the report shows **peak exposure**, which can be several times your capital.
+- The market regime at each moment is recomputed from data available at that moment only.
+- **Walk-forward:** nothing is fitted. The last 20% of sessions is a **holdout** that is not simulated at all until you run
+  with `--holdout`. Do that once, when you have finished changing a strategy; after that the holdout is no longer untouched.
+  The rest is reported overall and in ~1-month windows.
+- Each report: period, trades, win rate, average win and loss, net P&L after costs, costs, max drawdown, profit factor,
+  results by regime and by window. Anything under 30 trades is marked **LOW SAMPLE**.
+
+**Costs** (`config.yaml` -> `costs`) are ICICI Direct **Prime 999** brokerage plus standard statutory charges, each with
+its source and effective date. They are **standard rates, not yet verified against a contract note**, and every report says so.
+To verify: take one real contract note and compare brokerage, STT, transaction charges, SEBI fee, stamp duty and GST line by line;
+fix any rate, then set `verified_against_contract_note: true`. One rate is left empty on purpose: the options IPFT charge
+(sources disagree). Option backtests (phase 4) will refuse to run until you fill it; equity backtests do not need it.
+
+**Unadjusted history.** Breeze daily history is not adjusted for splits, bonuses or demergers (for example RELIANCE "falls 50%"
+on 2024-10-28, its 1:1 bonus). An overnight gap of more than 25% (`history.max_overnight_gap_pct`) is treated as a break:
+averages, ATR, breakouts and the regime's breadth only use bars after it, and a swing trade open across one is dropped.
+`python -m app.history` lists the breaks it finds; each report lists them under `data_breaks`.
+
 ## Status values
 | Status | Meaning |
 |---|---|
@@ -122,6 +171,10 @@ whose newest complete bar is already stored. `python -m app.history` ends with a
 - `app/hub.py` - tick -> quality gate -> bars -> price table
 - `app/calendar.py` - trading days and holidays
 - `app/history.py` - daily and 5-minute history download (Breeze or sim), paced, retries empty replies, skips stored data
+- `app/models.py` - Tick, Bar, and the Signal contract with its schema check
+- `app/strategies/` - `base.py` (Strategy, MarketContext) and the five strategies
+- `app/costs.py` - ICICI cost model (Decimal, to the paise); empty rates stop a backtest and are named
+- `app/backtest.py` - backtest engine, walk-forward split, reports (`python -m app.backtest`)
 - `app/watchlist.py` - Nifty 50 file -> Breeze codes and sectors -> the `nifty50` block of config.yaml (pure functions)
 - `scripts/update_watchlist.py` - refresh the Nifty 50 watchlist from a new `data/nifty50.csv`
 - `app/indicators.py` - SMA, EMA, ATR, daily return, percentile, breadth (pure functions)
@@ -129,11 +182,14 @@ whose newest complete bar is already stored. `python -m app.history` ends with a
 - `app/manual_data.py` - events, holidays and FII/DII CSV loading and import
 - `app/main.py` - web server and API: `/health`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`,
   `/api/config`, `/api/regime`, and `POST /data/import/{fii_dii|events|holidays}` (writes only your data files;
-  JSON body, local Host/Origin only)
+  JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Costs against a real contract note.** The rates are published standard rates, not checked against your fills.
+  Which legs ICICI charges Prime brokerage on (assumed: both legs, intraday and options) is not stated on its page.
+- Corporate actions: no adjustment factors are applied; history across a big overnight gap is simply not used.
 - **Live subscriptions for all 53 symbols.** The paced subscription and the startup summary are tested against a fake SDK only.
   When the 50 stocks were added, an app was already running on port 8000, so a second live Breeze connection was not opened.
   On your next start in breeze mode, look for `subscribed 53 of 53 symbols` in the console.

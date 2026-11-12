@@ -27,6 +27,7 @@ PAGE_HTML = """<!doctype html>
 </style></head><body>
 <header><h1>Trading Research System</h1>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
+ <a class="tag" href="/backtests">Backtest reports</a>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
 <main>
  <div class="card" id="regime-card"><h2>Today's market type</h2>
@@ -101,3 +102,74 @@ document.getElementById("ibtn").onclick=async()=>{
 cfg();tick();regime();setInterval(tick,2000);setInterval(regime,15000);
 </script></body></html>
 """
+
+
+BACKTEST_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backtest Reports</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#16202a;--mute:#5b6875;--line:#dde2e8;--ok:#0a7a45;--bad:#b3261e;--warn:#9a6200}
+ @media (prefers-color-scheme:dark){:root{--bg:#11161c;--card:#1a212a;--ink:#e8edf2;--mute:#9aa7b4;--line:#2c3743;--ok:#4cc38a;--bad:#ff8a80;--warn:#f0b849}}
+ body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+ h1{font-size:18px;margin:0} h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600}
+ .tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:2px 8px;color:var(--mute)}
+ .warn{color:var(--warn);border-color:var(--warn)}
+ main{padding:16px 20px;display:grid;gap:16px;max-width:1000px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+ table{border-collapse:collapse;width:100%} th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+ th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
+ .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)}
+ .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
+ .badges{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+ .badge{font-weight:700;font-size:16px;border-radius:6px;padding:6px 12px;border:2px solid currentColor}
+ .TRENDING_UP,.BULLISH{color:var(--ok)} .TRENDING_DOWN,.BEARISH{color:var(--bad)} .VOLATILE,.EVENT{color:var(--warn)}
+ .RANGE,.NEUTRAL{color:var(--ink)} .UNKNOWN{color:var(--mute)}
+ ul{margin:4px 0 0;padding-left:20px} li{margin:2px 0} .mute{color:var(--mute);font-size:13px}
+ textarea{width:100%;box-sizing:border-box;min-height:90px;font:13px ui-monospace,Consolas,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px}
+ select,button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+ details summary{cursor:pointer;color:var(--mute);font-size:13px;font-weight:600}
+</style></head><body>
+<header><h1>Backtest reports</h1>
+ <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
+ <a class="tag" href="/">Back to prices</a></header>
+<main>
+ <div class="card"><h2>Latest run per strategy</h2>
+  <div class="mute">Net results are after brokerage, taxes, charges and slippage. Entries fill at the next bar's open.
+  Results with fewer than 30 trades are marked LOW SAMPLE. Run <code>python -m app.backtest</code> to refresh.</div>
+  <table style="margin-top:8px"><thead><tr><th>Strategy</th><th>Period</th><th>Trades</th><th>Win %</th><th>Avg win</th>
+  <th>Avg loss</th><th>Net P&amp;L (Rs)</th><th>Costs (Rs)</th><th>Max DD (Rs)</th><th>PF</th><th>Sample</th></tr></thead>
+  <tbody id="runs"><tr><td colspan="11" class="mute">loading...</td></tr></tbody></table></div>
+ <div id="detail"></div>
+</main>
+<script>
+const fmt=(x,d=2)=>x===null||x===undefined?'-':Number(x).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function row(name,o,period){return `<tr><td>${name}</td><td>${esc(period)}</td><td>${o.trades}</td><td>${fmt(o.win_rate_pct,1)}</td>
+ <td>${fmt(o.avg_win_inr)}</td><td>${fmt(o.avg_loss_inr)}</td><td class="${o.net_pnl_inr>0?'up':(o.net_pnl_inr<0?'down':'')}">${fmt(o.net_pnl_inr)}</td>
+ <td>${fmt(o.costs_inr)}</td><td>${fmt(o.max_drawdown_inr)}</td><td>${fmt(o.profit_factor)}</td>
+ <td class="${o.low_sample?'STALE':''}">${o.low_sample?'LOW SAMPLE':'ok'}</td></tr>`}
+async function show(id){
+ const r=await (await fetch('/api/backtests/'+encodeURIComponent(id))).json(); const rep=r.report;
+ const reg=Object.entries(rep.by_regime).map(([k,o])=>row(`<span class="${k}">${k}</span>`,o,'')).join('')||'<tr><td colspan="11" class="mute">no trades</td></tr>';
+ const wf=rep.walk_forward.windows.map(w=>row(w.from+' .. '+w.to,w,w.sessions+' sessions')).join('');
+ const h=rep.holdout; const hold=h.evaluated?row('holdout',h.result,h.from+' .. '+h.to):`<tr><td colspan="11" class="mute">${esc(h.from)} .. ${esc(h.to)}: ${esc(h.result)}</td></tr>`;
+ document.getElementById('detail').innerHTML=`<div class="card"><h2>${esc(rep.strategy_id)} ${esc(rep.strategy_version)}</h2>
+ <div class="badges"><span class="tag warn">${esc(rep.cost_label)}</span><span class="tag">${esc(rep.costs.plan)}</span>
+ <span class="tag">source ${esc(rep.data_source)}</span>${rep.data_note?`<span class="tag warn">${esc(rep.data_note)}</span>`:''}</div>
+ <div class="mute">${esc(rep.overall.sample_note)}.${rep.exposure?` Peak exposure: ${rep.exposure.max_open_trades} trades open, Rs ${fmt(rep.exposure.max_position_value_inr,0)} (${rep.exposure.max_position_value_pct_of_capital}% of capital).`:''} Regimes: ${esc(rep.allowed_regimes.join(', '))}. Skipped signals: ${esc(JSON.stringify(rep.skipped_signals))}</div>
+ <h2 style="margin-top:12px">By regime</h2><table><thead><tr><th>Regime</th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${reg}</tbody></table>
+ <h2 style="margin-top:12px">Walk-forward windows (fixed rules)</h2><table><thead><tr><th>Window</th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${wf}</tbody></table>
+ <h2 style="margin-top:12px">Holdout</h2><table><tbody>${hold}</tbody></table>
+ <ul>${rep.notes.map(n=>`<li class="mute">${esc(n)}</li>`).join('')}</ul></div>`;
+}
+async function load(){
+ const r=await (await fetch('/api/backtests')).json(); const seen=new Set(); let html='';
+ for(const run of r.runs){ if(seen.has(run.strategy_id))continue; seen.add(run.strategy_id); const rep=run.report;
+  html+=row(`<a href="#" onclick="show('${esc(run.run_id)}');return false">${esc(run.strategy_id)}</a><div class="mute">${esc(rep.cost_label)}</div>`,
+            rep.overall,(rep.period.from||'-')+' .. '+(rep.period.to||'-'));}
+ document.getElementById('runs').innerHTML=html||'<tr><td colspan="11" class="mute">No backtests yet. Run python -m app.backtest</td></tr>';
+}
+load();
+</script></body></html>"""

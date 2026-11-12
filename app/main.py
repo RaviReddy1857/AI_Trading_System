@@ -19,7 +19,7 @@ from .history import BreezeHistorySource, HistoryLoader, seed_sim_history
 from .hub import MarketHub
 from .manual_data import KINDS, MAX_IMPORT_BYTES, ManualData
 from .models import utcnow
-from .page import PAGE_HTML
+from .page import BACKTEST_HTML, PAGE_HTML
 from .regime import RegimeService
 from .store import Store
 
@@ -180,6 +180,21 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     @app.get("/", response_class=HTMLResponse)
     def home():
         return PAGE_HTML
+
+    @app.get("/api/backtests")
+    def backtests(limit: int = 50):
+        return {"runs": store.backtest_runs(min(max(limit, 1), 200))}
+
+    @app.get("/api/backtests/{run_id}")
+    def backtest_detail(run_id: str):
+        run = store.backtest_run(run_id)
+        if run is None:
+            raise HTTPException(404, "unknown run_id")
+        return run
+
+    @app.get("/backtests", response_class=HTMLResponse)
+    def backtest_page():
+        return BACKTEST_HTML
 
     return app
 

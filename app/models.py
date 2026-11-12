@@ -32,3 +32,100 @@ class Bar:
     close: float
     volume: float | None = 0.0   # None = unknown (index history carries no volume)
     ticks: int = 0
+
+
+# ---------------- phase 3: signals ----------------
+ASSET_CLASSES = ("CASH_EQUITY", "INDEX_OPTION", "STOCK_OPTION")
+DIRECTIONS = ("LONG", "SHORT", "SPREAD")
+HORIZONS = ("INTRADAY", "SWING", "WEEKLY", "MONTHLY")
+
+
+class InvalidSignal(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Signal:
+    """A trade idea (architecture.md section 6). Prices are computed by code, never by an LLM.
+    `entry` is the reference price (the signal bar's close); a fill happens later, at the next
+    bar's open at the earliest. `entry_zone` is the acceptable fill range, if the strategy gives one."""
+    signal_id: str
+    created_at: datetime            # UTC: close time of the bar that produced the signal
+    strategy_id: str
+    strategy_version: str
+    symbol: str
+    asset_class: str
+    direction: str
+    horizon: str
+    entry: float
+    stop: float
+    target: float
+    valid_until: datetime           # UTC
+    regime: str
+    why_now: tuple[str, ...]
+    data_as_of: datetime            # UTC: newest data the strategy saw
+    entry_zone: tuple[float, float] | None = None
+    legs: tuple | None = None       # options only (phase 4)
+
+    def __post_init__(self):
+        problems = signal_problems(self)
+        if problems:
+            raise InvalidSignal("; ".join(problems))
+
+    @property
+    def reason(self) -> str:
+        return "; ".join(self.why_now)
+
+    def to_dict(self) -> dict:
+        return {
+            "signal_id": self.signal_id, "created_at": self.created_at.isoformat(),
+            "strategy_id": self.strategy_id, "strategy_version": self.strategy_version,
+            "symbol": self.symbol, "asset_class": self.asset_class, "direction": self.direction,
+            "horizon": self.horizon, "entry": self.entry, "stop": self.stop, "target": self.target,
+            "entry_zone": list(self.entry_zone) if self.entry_zone else None,
+            "valid_until": self.valid_until.isoformat(), "regime": self.regime,
+            "why_now": list(self.why_now), "data_as_of": self.data_as_of.isoformat(),
+            "legs": list(self.legs) if self.legs else None,
+        }
+
+
+def signal_problems(s: "Signal") -> list[str]:
+    """Schema check for a Signal: types, enumerations, finite positive prices, and a stop and
+    target on the correct sides of the entry."""
+    import math
+    out = []
+    for name in ("signal_id", "strategy_id", "strategy_version", "symbol", "regime"):
+        if not isinstance(getattr(s, name), str) or not getattr(s, name):
+            out.append(f"{name} must be a non-empty string")
+    if s.asset_class not in ASSET_CLASSES:
+        out.append(f"asset_class {s.asset_class!r} not in {ASSET_CLASSES}")
+    if s.direction not in DIRECTIONS:
+        out.append(f"direction {s.direction!r} not in {DIRECTIONS}")
+    if s.horizon not in HORIZONS:
+        out.append(f"horizon {s.horizon!r} not in {HORIZONS}")
+    for name in ("created_at", "valid_until", "data_as_of"):
+        v = getattr(s, name)
+        if not isinstance(v, datetime) or v.tzinfo is None:
+            out.append(f"{name} must be a timezone-aware datetime")
+    prices = {"entry": s.entry, "stop": s.stop, "target": s.target}
+    bad = [k for k, v in prices.items()
+           if not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0]
+    if bad:
+        out.append(f"{', '.join(bad)} must be finite and above zero")
+    elif s.direction == "LONG" and not (s.stop < s.entry < s.target):
+        out.append(f"LONG needs stop < entry < target (got {s.stop}, {s.entry}, {s.target})")
+    elif s.direction == "SHORT" and not (s.target < s.entry < s.stop):
+        out.append(f"SHORT needs target < entry < stop (got {s.target}, {s.entry}, {s.stop})")
+    times_ok = all(isinstance(getattr(s, n), datetime) and getattr(s, n).tzinfo is not None
+                   for n in ("created_at", "valid_until", "data_as_of"))
+    if times_ok and not out and s.valid_until <= s.created_at:
+        out.append("valid_until must be after created_at")
+    if s.entry_zone is not None:
+        lo, hi = s.entry_zone
+        if not (0 < lo <= hi):
+            out.append("entry_zone must be (low, high) with 0 < low <= high")
+    if not s.why_now or not all(isinstance(x, str) and x for x in s.why_now):
+        out.append("why_now must list at least one reason")
+    if times_ok and s.data_as_of > s.created_at:
+        out.append("data_as_of is later than created_at (look-ahead)")
+    return out

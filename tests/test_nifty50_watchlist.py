@@ -287,7 +287,7 @@ def test_empty_after_all_retries_is_reported_not_fatal():
     out = HistoryLoader(s, Store(":memory:"), src, sleep=lambda x: None).update(T0)
     daily = [c for c in src.calls if c[0] == "RELIANCE" and c[1] == DAILY]
     assert len(daily) == 1 + s.history.empty_retries
-    assert out["RELIANCE:1day"] == {"saved": 0, "rejected": 0, "empty": True}
+    assert out["RELIANCE:1day"] == {"saved": 0, "rejected": 0, "requests": 1, "empty": True}
     assert out["NIFTY:1day"]["saved"] > 250                  # other symbols still downloaded
     assert "EMPTY  RELIANCE:1day" in summarize(out)
 
