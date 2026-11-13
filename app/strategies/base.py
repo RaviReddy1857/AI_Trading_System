@@ -75,6 +75,10 @@ class Strategy(ABC):
         self.version = f"{self.base_version}/{hashlib.sha256(blob).hexdigest()[:8]}"
         # Counts of candidate signals a filter removed (reporting only; never affects output).
         self.rejections: Counter = Counter()
+        # From config strategies.status (set by build_strategies): no alerts, paper-only unless configured.
+        self.alerts_enabled: bool = False
+        self.mode: str = "paper_only"
+        self.status_label: str = "not yet evaluated"
 
     def evaluate(self, ctx: MarketContext) -> list[Signal]:
         if ctx.status != "LIVE" or ctx.regime not in self.allowed_regimes or ctx.kind != "stock":

@@ -450,6 +450,7 @@ def build_report(strategy: Strategy, settings: Settings, costs: CostModel, sourc
         },
         "skipped_signals": dict(skipped),
         "filtered_signals": dict(filtered or {}),
+        "strategy_status": {"alerts": strategy.alerts_enabled, "mode": strategy.mode, "label": strategy.status_label},
         "round_trip_cost_pct": strategy.round_trip_cost_pct,
         "notes": [
             "Entries fill at the next bar's open plus slippage; the signal bar's close is never a fill.",
@@ -502,15 +503,19 @@ def run_backtest(settings: Settings, store: Store, source: str, strategy: Strate
 
 
 def load_calendar(settings: Settings, store: Store) -> MarketCalendar:
-    """Load holidays, events and FII/DII from the CSV files into the store (as the app does at start-up),
-    so a backtest run sees the same holidays as the app. An invalid file keeps the last good copy."""
-    from .manual_data import ManualData
-    cal = MarketCalendar(store.holidays())
-    manual = ManualData(settings, store, cal)
-    manual.load_all()
-    for line in manual.problems():
-        log.warning(line)
-    return MarketCalendar(store.holidays())
+    """The trading calendar for a backtest: holidays read from holidays.csv, so a run sees the same
+    holidays as the app. Read-only: nothing is written to the database (the running app may hold its
+    write lock). If the file is missing or invalid, the holidays last stored by the app are used."""
+    from .manual_data import parse_holidays
+    p = settings.path(settings.calendar.holidays_csv)
+    try:
+        parsed, errors = parse_holidays(p.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError) as e:
+        parsed, errors = None, [f"cannot read file: {type(e).__name__}"]
+    if errors or parsed is None:
+        log.warning("%s not used (%s); using the holidays stored by the app", p.name, "; ".join(errors[:3]))
+        return MarketCalendar(store.holidays())
+    return MarketCalendar(parsed)
 
 
 def main(argv: list[str] | None = None) -> int:

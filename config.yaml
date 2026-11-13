@@ -174,6 +174,18 @@ costs:
 # ---- Phase 3: strategy thresholds (each strategy has an id and version in its own file) ----
 strategies:
   inactive: [vwap_pullback]     # retired from cash trading (phase 3b); code kept, run only by name
+  # Alerts (phase 6) and mode per strategy, labelled from the backtest evidence (2026-11-13, Prime 4999 rates):
+  # every phase 3 cash strategy loses after costs on the development period -> no alerts, paper only.
+  status:
+    orb: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    vwap_pullback: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    range_reversion: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    swing_pullback: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    swing_breakout: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    orb_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    range_reversion_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    swing_pullback_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    swing_breakout_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
   orb:                          # opening-range breakout, intraday
     range_minutes: 15           # opening range = 09:15-09:30
     breakout_buffer_pct: 0.05   # close must clear the range by this %

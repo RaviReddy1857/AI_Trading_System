@@ -293,16 +293,23 @@ def test_point_in_time_regime_skips_unreliable_late_bars():
 
 
 # ---------------- holidays for backtests ----------------
-def test_backtest_loads_holidays_from_the_csv(tmp_path):
+def test_backtest_reads_holidays_from_the_csv_without_writing(tmp_path):
     (tmp_path / "holidays.csv").write_text("Sr. No,Date,Day,Description\n1,2026-11-10,Tuesday,Diwali\n",
                                            encoding="utf-8")
-    (tmp_path / "events.csv").write_text("date,type,note,symbol\n", encoding="utf-8")
-    (tmp_path / "fii_dii.csv").write_text("date,fii_net_cr,dii_net_cr\n", encoding="utf-8")
-    s = settings(calendar={"holidays_csv": str(tmp_path / "holidays.csv"), "events_csv": str(tmp_path / "events.csv"),
-                           "fii_dii_csv": str(tmp_path / "fii_dii.csv")})
+    s = settings(calendar={"holidays_csv": str(tmp_path / "holidays.csv")})
     store = Store(":memory:")
     cal = load_calendar(s, store)
-    assert not cal.is_trading_day(date(2026, 11, 10)) and store.holidays() == {date(2026, 11, 10): "Diwali"}
+    assert not cal.is_trading_day(date(2026, 11, 10))
+    assert store.holidays() == {}                                   # nothing written (the app may hold the lock)
+
+
+def test_backtest_falls_back_to_stored_holidays_when_the_csv_is_bad(tmp_path):
+    (tmp_path / "holidays.csv").write_text("date,note\nnot-a-date,x\n", encoding="utf-8")
+    s = settings(calendar={"holidays_csv": str(tmp_path / "holidays.csv")})
+    store = Store(":memory:")
+    store.replace_holidays([("2026-11-24", "Gurpurb")])
+    cal = load_calendar(s, store)
+    assert not cal.is_trading_day(date(2026, 11, 24)) and cal.is_trading_day(date(2026, 11, 10))
 
 
 # ---------------- history: request timeout, tail chunk, floor on first download ----------------
@@ -386,3 +393,37 @@ def test_test_start_excludes_earlier_sessions_from_development():
     assert dev_holdout(s, days, "5minute")[0][0] == days[0]          # other interval unaffected
     real = __import__("app.config", fromlist=["load_settings"]).load_settings()
     assert real.backtest.test_start == {"1day": date(2019, 1, 22)}
+
+
+# ---------------- strategy status: alerts off, paper only, evidence label ----------------
+def test_every_phase3_cash_strategy_is_paper_only_without_alerts():
+    real = __import__("app.config", fromlist=["load_settings"]).load_settings()
+    assert real.strategies.alert_ids() == []
+    for sid in CLASSES:
+        st = real.strategies.status_of(sid)
+        assert sid in real.strategies.status, f"{sid} has no status entry"
+        assert st.alerts is False and st.mode == "paper_only"
+        assert st.label in ("negative in backtests", "no edge vs random")
+    built = build_strategies(real, list(CLASSES))
+    assert all(x.alerts_enabled is False and x.mode == "paper_only" and x.status_label for x in built)
+
+
+def test_strategy_status_defaults_and_validation():
+    s = settings(strategies={"status": {}})
+    assert s.strategies.status_of("orb").alerts is False and s.strategies.status_of("orb").mode == "paper_only"
+    s2 = settings(strategies={"status": {"orb": {"alerts": True, "mode": "live", "label": "x"}}})
+    assert s2.strategies.alert_ids() == ["orb"]
+    raw = settings().model_dump()
+    raw["strategies"]["status"] = {"nope": {}}
+    with pytest.raises(ValueError, match="unknown ids"):
+        Settings.model_validate(raw)
+
+
+def test_report_carries_the_strategy_status():
+    s = settings(strategies={"status": {"orb": {"label": "negative in backtests"}}})
+    store = Store(":memory:")
+    for d in (date(2026, 11, 3), date(2026, 11, 4)):
+        store.save_history_bars("bars_5m", five("NIFTY", [(1, 1, 1, 1)] * 3, d=d), "sim")
+    eng = Engine(s, store, "sim", MarketCalendar(), regime=FixedRegime())
+    rep = run_backtest(s, store, "sim", build_strategies(s, ["orb"])[0], engine=eng, save=False)["report"]
+    assert rep["strategy_status"] == {"alerts": False, "mode": "paper_only", "label": "negative in backtests"}

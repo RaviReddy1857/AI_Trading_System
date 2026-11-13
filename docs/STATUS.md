@@ -10,7 +10,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 2 | Market-regime classifier | Built and tested in sim mode; review 1 fixes, review 2 findings 1-3 and review 3 findings 1-2 applied; live history works (user); live subscriptions confirmed in the SDK log, live ticks not yet seen | 184 passing (whole suite) | 2026-11-11 |
 | - | Nifty 50 watchlist (task before phase 3) | Built; 50 of 50 mapped; live history downloaded; 53 live subscriptions not yet seen | 212 passing (whole suite) | 2026-11-12 |
 | 3 | Intraday and swing strategies with backtests | Built and tested; backtests run on real Breeze data (all five lose after costs); costs not yet verified against a contract note | 259 passing (whole suite) | 2026-11-12 |
-| 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; all v2 versions still lose after costs and none beats random entries; holdout not opened | 294 passing (whole suite) | 2026-11-12 |
+| 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; rerun at Prime 4999 rates 2026-11-13: all v1 and v2 still lose after costs, none beats random; all set to no alerts, paper only, "negative in backtests"; holdout not opened | 300 passing (whole suite) | 2026-11-13 |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -438,6 +438,46 @@ exits, next-bar entry).
   side) = Rs 68.54. v1 strategy versions are unchanged; orb_v2 and range_reversion_v2 versions changed (2/5d1213de,
   2/e859fa76) because their cost floor moved. The backtests were not rerun.
 
+## Rerun at Prime 4999 rates and strategy status (2026-11-13)
+
+Development period only; holdout not opened; nothing tuned. Same data and rules as the phase 3b run; only the cost rates
+changed (Prime 4999 brokerage; NSE charges per NSE/FA/73061). Round-trip cost estimate 0.159% of price (5x = 0.80%,
+2x = 0.32%), so orb_v2 and range_reversion_v2 have new versions and different trade counts. Random baseline: 20 seeds,
+information available at the time only (see phase 3b).
+
+| Strategy | Version | Trades | Win % | Gross incl. slippage (Rs) | Charges (Rs) | Net (Rs) | Max DD (Rs) | PF net | PF no costs | Random PF no costs, mean (min-max) | Random PF net, mean (min-max) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| orb | 1/db0cb746 | 242 | 31.8 | -25,780 | 6,972 | -32,752 | 33,042 | 0.45 | 0.71 | 0.96 (0.68-1.16) | 0.59 (0.41-0.72) |
+| orb_v2 | 2/5d1213de | 542 | 42.6 | -24,633 | 15,586 | -40,219 | 46,332 | 0.68 | 1.02 | 0.93 (0.72-1.14) | 0.58 (0.44-0.71) |
+| range_reversion | 1/bcf1f9a1 | 1,799 | 33.7 | -89,104 | 51,794 | -140,898 | 141,499 | 0.31 | 0.99 | 1.00 (0.91-1.11) | 0.31 (0.28-0.34) |
+| range_reversion_v2 | 2/e859fa76 | 1,027 | 46.7 | -61,613 | 29,575 | -91,188 | 91,511 | 0.43 | 0.90 | 0.96 (0.78-1.09) | 0.44 (0.36-0.51) |
+| swing_pullback | 1/70681558 | 1,316 | 42.2 | +149,645 | 290,809 | -141,165 | 200,832 | 0.88 | 1.22 | 1.18 (1.02-1.28) | 0.85 (0.74-0.93) |
+| swing_pullback_v2 | 2/a9ac026c | 1,311 | 42.0 | +138,399 | 289,754 | -151,355 | 211,023 | 0.87 | 1.21 | 1.21 (1.09-1.35) | 0.87 (0.78-0.98) |
+| swing_breakout | 1/dfa9ac55 | 999 | 40.6 | +13,797 | 213,041 | -199,244 | 199,244 | 0.80 | 1.07 | 1.22 (1.08-1.35) | 0.89 (0.78-0.99) |
+| swing_breakout_v2 | 2/682e0a81 | 998 | 39.9 | -10,545 | 212,980 | -223,526 | 223,526 | 0.78 | 1.04 | 1.23 (1.08-1.39) | 0.89 (0.78-1.00) |
+
+- **Every version still loses after costs.** Lower brokerage cut charges by about a third (swing: Rs 452k -> 291k for
+  swing_pullback) and raised every profit factor, but none reaches 1.0 after costs.
+- Before costs: intraday versions are inside the random range (orb_v2 1.02 vs 0.72-1.14). swing_pullback v1/v2 equal random
+  long entries on the same regime days (market drift, not the entry rule). swing_breakout v1 and v2 are **below every random
+  seed** before costs (1.07 / 1.04 vs 1.08 minimum).
+- Filters at these rates: orb_v2 rule 1 removed 159 signals (542 traded); range_reversion_v2 target rule removed 1,823
+  (1,027 traded; 1,017 stops widened); swing v2 NIFTY filter removed 8 each.
+- Mechanical checks: no problems on any real or random trade. Peak exposure 2.7-7.4x capital (no portfolio limits yet).
+- Walk-forward: intraday 0-1 of 4-5 windows profitable; swing 20-23 of 60-62.
+
+**Strategy status (config.yaml -> `strategies.status`; shown on the backtests page and in every report):**
+every phase 3 cash strategy, v1 and v2 (orb, vwap_pullback, range_reversion, swing_pullback, swing_breakout, orb_v2,
+range_reversion_v2, swing_pullback_v2, swing_breakout_v2) is set to `alerts: false`, `mode: paper_only`,
+label **"negative in backtests"**. None turned positive after costs, so the alternative label "no edge vs random" was not
+needed. `Strategies.alert_ids()` returns no strategy; phase 6 alerts must read it. Strategies without an entry also default
+to no alerts and paper only.
+
+**Other changes in this step:** backtests read `holidays.csv` directly and no longer write it to the database (the first
+rerun failed with "database is locked" because the running app held the write lock); an invalid file falls back to the
+holidays the app stored. A leftover background wait-loop from phase 3 (it waited for "no Python process", which never
+happens while the app runs) was stopped.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -466,7 +506,8 @@ exits, next-bar entry).
 | 22 | 2 | Sim startup is slower with 53 symbols (over 2 minutes the first time with 190 days of fake 5-minute history) | Open, low priority |
 | 23 | 3 | Cost rates are standard published rates, not verified against a contract note | Waiting for user: compare one contract note |
 | 24 | 3 | Options IPFT rate empty (sources disagree) | Fixed 2026-11-13: NSE circular NSE/FA/73061 (user) - Rs 3,553/crore of premium each side including IPFT; IPFT set to 0 so it is not counted twice |
-| 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Open: rerun the backtests (`python -m app.backtest`) to see results at the new rates; v2 versions changed with the cost estimate |
+| 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Fixed 2026-11-13: rerun at Prime 4999 rates; all still negative after costs |
+| 35 | 3b | Backtest start-up wrote holidays to the database and failed while the app held the write lock | Fixed 2026-11-13: holidays read from the CSV, nothing written |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -474,7 +515,7 @@ exits, next-bar entry).
 | 29 | 3 | The phase 3 diagnosis's intraday random baseline reused each real trade's session and direction (leaks the future for breakouts) | Fixed 2026-11-12: corrected baseline; "orb and vwap worse than random" withdrawn |
 | 30 | 3b | Breeze daily history before 2019-01-22 has wrong-scale days (stocks, several dates) and ~100x VIX values | Open: swing tests start 2019-01-22 (`backtest.test_start`); older bars kept |
 | 31 | 3b | A Breeze history request once hung for over 30 minutes (no SDK timeout) | Fixed: 60 s timeout per request; that symbol fails and a rerun resumes |
-| 32 | 3b | No v2 strategy is profitable after costs or better than random entries | Waiting for user |
+| 32 | 3b | No v2 strategy is profitable after costs or better than random entries | All phase 3 cash strategies set to no alerts, paper only, "negative in backtests" (2026-11-13). Waiting for user: what to try next |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
 ## Decisions log
@@ -508,4 +549,6 @@ exits, next-bar entry).
 | 2026-11-12 | Backtests load the CSV files (holidays, events, FII/DII) first, as the app does |
 | 2026-11-12 | Random baseline uses only information available at the random entry's time |
 | 2026-11-13 | Brokerage plan: ICICI Direct Prime 4999 (user): delivery 0.10%, intraday 0.010%, options Rs 19/lot, each side |
+| 2026-11-13 | All phase 3 cash strategies (v1 and v2): no alerts, paper only, labelled "negative in backtests" (`strategies.status`) |
+| 2026-11-13 | Backtests read holidays.csv without writing to the database |
 | 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |

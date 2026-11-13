@@ -42,6 +42,9 @@ def build_strategies(settings: Settings, ids: list[str] | None = None) -> list[S
             out.append(cls(getattr(cfg, i), cost))
         else:
             out.append(cls(getattr(cfg, i)))
+    for st in out:
+        status = cfg.status_of(st.id)
+        st.alerts_enabled, st.mode, st.status_label = status.alerts, status.mode, status.label
     return out
 
 

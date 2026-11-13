@@ -156,7 +156,7 @@ async function show(id){
  const wf=rep.walk_forward.windows.map(w=>row(w.from+' .. '+w.to,w,w.sessions+' sessions')).join('');
  const h=rep.holdout; const hold=h.evaluated?row('holdout',h.result,h.from+' .. '+h.to):`<tr><td colspan="11" class="mute">${esc(h.from)} .. ${esc(h.to)}: ${esc(h.result)}</td></tr>`;
  document.getElementById('detail').innerHTML=`<div class="card"><h2>${esc(rep.strategy_id)} ${esc(rep.strategy_version)}</h2>
- <div class="badges"><span class="tag warn">${esc(rep.cost_label)}</span><span class="tag">${esc(rep.costs.plan)}</span>
+ <div class="badges">${stat(rep)}<span class="tag warn">${esc(rep.cost_label)}</span><span class="tag">${esc(rep.costs.plan)}</span>
  <span class="tag">source ${esc(rep.data_source)}</span>${rep.data_note?`<span class="tag warn">${esc(rep.data_note)}</span>`:''}</div>
  <div class="mute">${esc(rep.overall.sample_note)}.${rep.exposure?` Peak exposure: ${rep.exposure.max_open_trades} trades open, Rs ${fmt(rep.exposure.max_position_value_inr,0)} (${rep.exposure.max_position_value_pct_of_capital}% of capital).`:''} Regimes: ${esc(rep.allowed_regimes.join(', '))}. Skipped signals: ${esc(JSON.stringify(rep.skipped_signals))}</div>
  <h2 style="margin-top:12px">By regime</h2><table><thead><tr><th>Regime</th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${reg}</tbody></table>
@@ -164,10 +164,14 @@ async function show(id){
  <h2 style="margin-top:12px">Holdout</h2><table><tbody>${hold}</tbody></table>
  <ul>${rep.notes.map(n=>`<li class="mute">${esc(n)}</li>`).join('')}</ul></div>`;
 }
+function stat(rep){
+ const s=rep.strategy_status; if(!s) return '';
+ return `<span class="tag warn">${esc(s.label)}</span><span class="tag">${s.alerts?'alerts on':'no alerts'}</span><span class="tag">${s.mode==='live'?'live':'paper only'}</span>`;
+}
 async function load(){
  const r=await (await fetch('/api/backtests')).json(); const seen=new Set(); let html='';
  for(const run of r.runs){ if(seen.has(run.strategy_id))continue; seen.add(run.strategy_id); const rep=run.report;
-  html+=row(`<a href="#" onclick="show('${esc(run.run_id)}');return false">${esc(run.strategy_id)}</a><div class="mute">${esc(rep.cost_label)}</div>`,
+  html+=row(`<a href="#" onclick="show('${esc(run.run_id)}');return false">${esc(run.strategy_id)}</a><div>${stat(rep)}</div><div class="mute">${esc(rep.cost_label)}</div>`,
             rep.overall,(rep.period.from||'-')+' .. '+(rep.period.to||'-'));}
  document.getElementById('runs').innerHTML=html||'<tr><td colspan="11" class="mute">No backtests yet. Run python -m app.backtest</td></tr>';
 }

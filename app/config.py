@@ -305,8 +305,17 @@ class SwingBreakoutV2Params(SwingBreakoutParams):
     index_sma_days: int = Field(50, ge=2, le=400)
 
 
+class StrategyStatus(StrictModel):
+    """Whether a strategy may produce alerts (phase 6) and in which mode, with a plain-language label
+    from its backtest evidence. Strategies without an entry get no alerts and are paper-only."""
+    alerts: bool = False
+    mode: Literal["paper_only", "live"] = "paper_only"
+    label: str = "not yet evaluated"
+
+
 class Strategies(StrictModel):
-    inactive: list[str] = []          # strategy ids kept in code but not run by default (retired)
+    inactive: list[str] = []          # strategy ids kept in code but not run by default in backtests (retired)
+    status: dict[str, StrategyStatus] = {}   # alerts / paper-only / evidence label per strategy id
     orb: OrbParams = OrbParams()
     vwap_pullback: VwapParams = VwapParams()
     range_reversion: RangeParams = RangeParams()
@@ -319,11 +328,21 @@ class Strategies(StrictModel):
 
     @model_validator(mode="after")
     def known_inactive(self) -> "Strategies":
-        known = set(type(self).model_fields) - {"inactive"}
+        known = set(type(self).model_fields) - {"inactive", "status"}
         bad = [x for x in self.inactive if x not in known]
         if bad:
             raise ValueError(f"strategies.inactive has unknown ids {bad}")
+        bad = [x for x in self.status if x not in known]
+        if bad:
+            raise ValueError(f"strategies.status has unknown ids {bad}")
         return self
+
+    def status_of(self, sid: str) -> StrategyStatus:
+        return self.status.get(sid, StrategyStatus())
+
+    def alert_ids(self) -> list[str]:
+        """Strategy ids allowed to produce alerts (phase 6 reads this)."""
+        return sorted(s for s, st in self.status.items() if st.alerts)
 
 
 class Backtest(StrictModel):

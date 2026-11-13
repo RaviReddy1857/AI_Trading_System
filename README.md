@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 296 passed
+python -m pytest -q          # should say 300 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -162,7 +162,12 @@ averages, ATR, breakouts and the regime's breadth only use bars after it, and a 
 ## Phase 3b: strategy revision (v2 versions)
 v1 strategies are kept unchanged for comparison; the new versions have their own ids. Results and the comparison with
 random entries are in `docs/STATUS.md` (phase 3b). In short: **no version is profitable after costs yet, and none beats
-random entries**; nothing has been tested on the holdout.
+random entries** (rerun at Prime 4999 rates on 2026-11-13: still true); nothing has been tested on the holdout.
+
+**Strategy status** (`config.yaml` -> `strategies.status`): every phase 3 cash strategy, v1 and v2, is set to
+**no alerts, paper only**, labelled **"negative in backtests"**. The label shows on the backtests page and in each report.
+Phase 6 alerts will only use strategies with `alerts: true`; none has it. Change an entry only after a strategy shows an
+edge after costs and against random entries.
 
 | Strategy | What changed from v1 |
 |---|---|
