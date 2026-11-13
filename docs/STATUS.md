@@ -4,6 +4,8 @@ Claude updates this file at the end of every phase. It is the memory between ses
 
 ## Summary
 
+**Build order (changed 2026-11-13): 1, 2, 3 done; next 4, 5, 6, then 9 (stock option selling), then 7, 8.**
+
 | Phase | Name | State | Tests | Finished |
 |---|---|---|---|---|
 | 1 | Data feed and quality gate | Built; live Breeze run pending | 18 passing | 2026-11-11 |
@@ -16,7 +18,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
-| 9 | Stock option selling | Not started | | |
+| 9 | Stock option selling (built after 6, before 7) | Not started; plan extended 2026-11-13 | | |
 
 ## Phase 1
 
@@ -478,6 +480,37 @@ rerun failed with "database is locked" because the running app held the write lo
 holidays the app stored. A leftover background wait-loop from phase 3 (it waited for "no Python process", which never
 happens while the app runs) was stopped.
 
+## Plan change (2026-11-13, documents only, no code)
+
+Requested by the user; `docs/implementation.md` and `docs/architecture.md` updated with matching tracker tasks.
+
+- **Build order:** 4, 5, 6, 9, 7, 8. The user trades monthly hedged stock option selling now, so phase 9 comes before the
+  journal/scorecard (7) and LLM (8) phases. Phase 9 uses only phases 4, 5 and 6; phase 7 will cover phase 9 spreads.
+- **Phase 4 additions** (P4.9-P4.12): first check whether Breeze provides historical option prices and record the answer
+  here; if it does, option backtests must use them, otherwise reports say "payoff simulation". Every option strategy
+  backtest has a no-filter baseline (the same spread every month or week, no entry rules). Pre-2019 Breeze stock history is
+  treated as unreliable (no session before 2019-01-22 is tested). IV and delta are computed by code.
+- **Phase 6 additions** (P6.10 rewritten, P6.13-P6.16): six trade-type alert switches (intraday stocks, swing stocks,
+  index option buying, index option selling, stock option buying, stock option selling), stored in the database, changed via
+  `POST /journal/alert-switches`, default off; switched-off types still paper-trade; each switch shows the type's track
+  record and label (UNPROVEN, "negative in backtests"). Exit calls for every open position of every type, taken or entered
+  manually (target, stop, breakeven, trailing stop, partial, time exit, entry invalidated, regime flip, kill switch), each
+  with action and reason, repeating until marked closed. Manual position entry under /journal/.
+- **Phase 9 extensions** (P9.1-P9.11, all thresholds in `stock_option_selling` in config.yaml): universe = all NSE F&O stocks
+  from the instrument list filtered by option liquidity; daily shortlist after the close (IV rank, trend clarity, distance to
+  support/resistance, liquidity, no events before expiry) on a "Stock option selling" page; short strike beyond support or
+  resistance, beyond the highest-OI strike and at or below delta 0.20; hedge 2-3 strikes out, same expiry, within
+  max_loss_per_stock_spread_pct, liquid; entry 20-35 days to expiry, never expiry week; exits at 50% of credit, stop at 2x
+  credit, breach or trend-flip alerts with exit and roll numbers, forced exit before expiry week; manual spread entry with
+  UNHEDGED flag (never suggested by the system); capital advisory only (capital-fit label).
+
+**Interpretations to confirm (recorded as defaults in architecture.md section 15):**
+1. A switched-on trade type sends alerts only for strategies whose `strategies.status` allows alerts. So with today's
+   statuses, switching on "intraday stocks" or "swing stocks" sends nothing ("negative in backtests"). Alternative: the
+   switch alone decides.
+2. "Stop at 2x credit" = close when the cost to buy back the spread reaches 2x the credit received (a loss of about 1x
+   the credit before costs). Alternative: close when the loss reaches 2x the credit (buy-back cost 3x credit).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -508,6 +541,9 @@ happens while the app runs) was stopped.
 | 24 | 3 | Options IPFT rate empty (sources disagree) | Fixed 2026-11-13: NSE circular NSE/FA/73061 (user) - Rs 3,553/crore of premium each side including IPFT; IPFT set to 0 so it is not counted twice |
 | 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Fixed 2026-11-13: rerun at Prime 4999 rates; all still negative after costs |
 | 35 | 3b | Backtest start-up wrote holidays to the database and failed while the app held the write lock | Fixed 2026-11-13: holidays read from the CSV, nothing written |
+| 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Waiting for user (default: both) |
+| 37 | plan | Meaning of "stop at 2x credit" for stock spreads | Waiting for user (default: buy-back cost reaches 2x credit) |
+| 38 | plan | Whether Breeze provides historical option prices | Open: first task of phase 4 (P4.9) |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -551,4 +587,9 @@ happens while the app runs) was stopped.
 | 2026-11-13 | Brokerage plan: ICICI Direct Prime 4999 (user): delivery 0.10%, intraday 0.010%, options Rs 19/lot, each side |
 | 2026-11-13 | All phase 3 cash strategies (v1 and v2): no alerts, paper only, labelled "negative in backtests" (`strategies.status`) |
 | 2026-11-13 | Backtests read holidays.csv without writing to the database |
+| 2026-11-13 | Build order 4, 5, 6, 9, 7, 8: stock option selling before journal and LLM (user trades it now) |
+| 2026-11-13 | Option backtests use Breeze option history if it exists, else "payoff simulation"; always with a no-filter baseline |
+| 2026-11-13 | Per-trade-type alert switches stored in the database (POST /journal/alert-switches); switched-off types paper-trade |
+| 2026-11-13 | Exit calls for every open position, taken or manual, repeat until closed; always sent regardless of switches |
+| 2026-11-13 | Phase 9 rules: F&O universe by liquidity, daily shortlist, short strike beyond S/R and max-OI with delta <= 0.20, hedge 2-3 strikes out, 20-35 DTE, 50% target, 2x credit stop, exit/roll alerts, manual UNHEDGED positions flagged, capital advisory |
 | 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |

@@ -1,6 +1,8 @@
 # Implementation plan
 
-Nine phases. Build one phase per Claude Code session, in order. Each phase lists what to build, the tasks tracked in `Trading_System_Build_Tracker.xlsx`, and acceptance checks. A phase is finished only when every acceptance check passes and `docs/AFTER_EACH_PHASE.md` has been followed.
+Nine phases. Build one phase per Claude Code session, in the **build order** below (not numeric order). Each phase lists what to build, the tracker tasks (mirrored in `Trading_System_Build_Tracker.xlsx` if you keep one; the tables here are the source), and acceptance checks. A phase is finished only when every acceptance check passes and `docs/AFTER_EACH_PHASE.md` has been followed.
+
+**Build order (changed 2026-11-13): 1, 2, 3 (done), then 4, 5, 6, 9, 7, 8.** Stock option selling (phase 9) moves ahead of the journal (7) and the LLM layer (8) because the user trades monthly hedged stock option selling now. Phase numbers are unchanged; a phase may use only what earlier phases *in this order* have built (phase 9 relies on 4, 5 and 6, not on 7 or 8).
 
 ## How to start a phase
 
@@ -12,17 +14,17 @@ Read CLAUDE.md, docs/architecture.md, docs/implementation.md and docs/STATUS.md.
 
 ## Phase overview
 
-| Phase | Name | What the user will see |
-|---|---|---|
-| 1 | Data feed and quality gate | Live price page; bad and stale data quarantined; 1-minute bars stored |
-| 2 | Market-regime classifier | A 'today's market type' badge that updates during the day |
-| 3 | Intraday and swing strategies with backtests | Per-strategy report: net result after costs, drawdown, trade count |
-| 4 | Option strategies | Option signals with premium, margin and max loss shown |
-| 5 | Risk engine | Quantity and rupee risk on every signal, or NO TRADE with a reason |
-| 6 | Live signals and alerts (paper mode) | Real-time instruction cards on the dashboard and Telegram |
-| 7 | Journal and weekly scorecard | Weekly table of which strategies earn after costs; losers cut back automatically |
-| 8 | LLM layer and go-live gate | A short explanation on each card; a pass/fail decision per strategy |
-| 9 | Stock option selling (signals always shown; capital check is advisory) | Entry alerts for hedged stock option spreads with reason, estimated profit and capital needed |
+| Build order | Phase | Name | What the user will see |
+|---|---|---|---|
+| 1 | 1 | Data feed and quality gate | Live price page; bad and stale data quarantined; 1-minute bars stored |
+| 2 | 2 | Market-regime classifier | A 'today's market type' badge that updates during the day |
+| 3 | 3 | Intraday and swing strategies with backtests | Per-strategy report: net result after costs, drawdown, trade count |
+| 4 | 4 | Option strategies | Option signals with premium, margin and max loss shown; option backtests against a no-filter baseline |
+| 5 | 5 | Risk engine | Quantity and rupee risk on every signal, or NO TRADE with a reason |
+| 6 | 6 | Live signals and alerts (paper mode) | Real-time instruction cards; per-trade-type alert switches; exit calls for every open position |
+| 7 | 9 | Stock option selling (signals always shown; capital check is advisory) | Daily shortlist, entry alerts for hedged stock option spreads with strikes, credit, max loss and margin; exit and roll alerts |
+| 8 | 7 | Journal and weekly scorecard | Weekly table of which strategies earn after costs; losers cut back automatically |
+| 9 | 8 | LLM layer and go-live gate | A short explanation on each card; a pass/fail decision per strategy |
 
 ---
 
@@ -134,10 +136,13 @@ Intraday and swing strategies with cost-inclusive backtests.
 
 ### Scope
 
-Option strategies. Index options are cash-settled; stock options are physically settled, so in this phase stock options are BUY-ONLY and must carry an exit warning before expiry week (hedged stock option selling is added in phase 9 behind a capital gate). No naked option selling of any kind.
+Option strategies. Index options are cash-settled; stock options are physically settled, so in this phase stock options are BUY-ONLY and must carry an exit warning before expiry week (hedged stock option selling is added in phase 9, built right after phase 6; capital is advisory there, never a gate). No naked option selling of any kind.
+
+Data rules added 2026-11-13: option backtests use Breeze's historical option prices if Breeze provides them (checked first, step 0); every option strategy backtest is compared with a no-filter baseline; Breeze stock history before 2019-01-22 is unreliable and is not used for tests (phase 3b finding: wrong-scale days and ~100x VIX values).
 
 ### Build steps
 
+0. **Check Breeze historical option prices first.** With read-only data calls only (`get_historical_data_v2` with an options product type, expiry, strike and right), try a few known past contracts (one NIFTY weekly, one BANKNIFTY monthly, two stock monthlies; daily and 5-minute). Record in `docs/STATUS.md` what exists: which underlyings, intervals, how far back, whether expired contracts are available, and whether OI is included. If usable history exists, download it into an `option_bars` table (same pacing, retry, timeout and quality rules as stock history) and option backtests **must** price entries and exits from it. If it does not, option backtests price options from a model and every report and card says **"payoff simulation"**. A backtest never mixes the two silently: each trade records its price source.
 1. Add app/options/chain.py: load option chains through BreezeFeed.option_chain() for NIFTY (weekly and monthly), BANKNIFTY (monthly only) and watchlist stocks (monthly). Store strike, right, expiry, bid, ask, last, OI and timestamp. Quarantine rows with missing or crossed bid/ask.
 2. Read lot sizes and expiry dates from the broker's instrument list at runtime. Never hardcode a lot size.
 3. Add app/options/payoff.py: pure functions for max loss, max profit and breakevens of a long option, a vertical credit spread and an iron condor, including costs. Property-based tests.
@@ -145,13 +150,19 @@ Option strategies. Index options are cash-settled; stock options are physically 
 5. Margin: add a read-only margin lookup. If Breeze's margin calculator needs functions outside the allowed data calls, do not use it; instead add a manual margin entry field and mark the signal MARGIN_UNKNOWN until filled.
 6. Every option signal shows premium, lot size, total cost, max loss in rupees and as % of capital, margin blocked, and breakevens.
 7. Add app/options/analytics.py: implied volatility rank against the past year, put-call ratio, change in open interest, and the highest-OI call and put strikes as resistance and support. Show them on an 'Options view' page. Use them in strategy rules: buy options only when IV rank is low or moderate, sell spreads only when IV rank is high, and place sold strikes beyond the highest-OI strike.
+8. Implied volatility and delta are computed by code (Black-Scholes on the option mid price, risk-free rate and dividend assumptions in config.yaml), never estimated by an LLM. Phase 9 uses the same functions.
+9. **No-filter baseline for every option strategy backtest.** Next to each strategy's result, run the same structure (same strike-selection rule, width, expiry choice and exits) sold or bought on a fixed schedule with no entry rules: every month for monthly strategies, every week for weekly ones, on a fixed day. Report both side by side with the same costs and the same price source. A strategy that does not beat its baseline after costs is reported as "no edge vs baseline".
+10. Backtests that use stock or index daily history start no earlier than `backtest.test_start` (2019-01-22): Breeze history before that is treated as unreliable.
 
 ### Acceptance checks
 
 - No signal if bid/ask, lot size or margin is unknown
 - A single short leg without its hedge is rejected
 - Stock option selling returns NO_TRADE in this phase and that is tested
-- Option backtests are labelled 'payoff simulation' unless real historical option quotes are stored
+- Option backtests are labelled 'payoff simulation' unless real historical option quotes are stored, and each backtest trade records whether its prices came from stored option history or a model
+- If Breeze historical option prices exist, a test shows the backtest uses them (a fixture option bar changes the result)
+- Every option backtest report contains the no-filter baseline for the same period, costs and price source
+- No option or stock backtest tests a session before 2019-01-22
 
 ### Tracker tasks
 
@@ -165,6 +176,10 @@ Option strategies. Index options are cash-settled; stock options are physically 
 | P4.6 | Margin figure fetched from ICICI or entered manually | No signal if margin is unknown |
 | P4.7 | Stock options are buy-only in this phase, with expiry-week exit warning | Stock option selling arrives in phase 9 |
 | P4.8 | Option intelligence: IV rank, put-call ratio, highest-OI strikes as support and resistance | Shown on dashboard and used by strategies |
+| P4.9 | Check whether Breeze provides historical option prices (index and stock, intervals, depth, expired contracts) | Findings recorded in STATUS.md; option history stored if available, otherwise reports say "payoff simulation" |
+| P4.10 | No-filter baseline in every option backtest (same spread every month or week, no entry rules) | Baseline shown beside each strategy with the same costs |
+| P4.11 | Pre-2019 Breeze stock history treated as unreliable | No backtest tests a session before 2019-01-22 (test) |
+| P4.12 | IV and delta computed by code (Black-Scholes on mid price) | Values match a hand calculation in a test |
 
 ---
 
@@ -227,15 +242,20 @@ Live signals in paper mode.
 5. Add two buttons per card, 'I took this trade' and 'I skipped it', with an optional note and my actual fill price. These only write to the journal.
 6. Signals expire at valid-until and cannot be acted on afterwards.
 7. Signal score (0-100) computed by code from confluence: agreement between 5-minute, 15-minute and daily trend, volume versus average, relative strength versus NIFTY and sector, fit with the regime, FII bias, and distance to the nearest support or resistance. Rank signals by score, send Telegram alerts only for the top ones, and cap alerts per day (config). The score is a ranking aid, never shown as a probability.
-8. Position management: for every position I marked as taken, keep watching it and alert me to move the stop to breakeven after a set gain, trail the stop, book partial profit at the first target, exit on a time stop, or exit immediately if the regime flips, the kill switch fires or the reason for entry is invalidated. Each alert says what to do and why.
+8. **Exit calls for every open position**, of every trade type (intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling), whether I marked it as taken from a card or entered it manually (step 12). The engine re-evaluates each open position on every closed bar and issues an exit call when any of these fires: target hit; stop hit; move stop to breakeven (after a set gain); trail the stop; book partial profit; time exit; entry reason invalidated; regime flip; kill switch. Each call states the **action** (for example "Exit all 2 lots now", "Move stop to 1,245.50") and the **reason** with the values that triggered it. A call repeats (interval in config.yaml) until I mark the position closed under /journal/. Option positions are judged on the option or spread price as well as the underlying. Exit calls are alerts only; nothing is sent to the broker.
 9. Pre-market plan at 9:00 IST (regime, bias, events, watchlist levels) and an end-of-day summary at 15:45 (signals given, taken, paper and real P&L, open positions and their stops).
 10. Heartbeat: a small watchdog that sends a Telegram alert if the feed is STALE or the engine has not processed a bar for two minutes during market hours.
+11. **Trade-type selector.** Six switches: intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling. Each switch controls alerts (dashboard highlight and Telegram) for that type only; every strategy keeps paper-trading whatever its switch says. Beside each switch show the type's track record (paper and backtest trades, win rate, net result after costs, with the number of trades; "low sample" under 30) and its label: **UNPROVEN** (no track record yet), **"negative in backtests"** (from `strategies.status`, phase 3b), or the strategy's other status label. An alert is sent only when the type's switch is on **and** the strategy's `strategies.status` entry allows alerts, so a strategy labelled "negative in backtests" stays silent until its status is changed in config.yaml. The switch positions are stored in the database (table `alert_switches`), changed only through `POST /journal/alert-switches` (JSON body: type, on/off; local Host/Origin rules apply) and default to off. Each change is logged with time and old/new value. Exit calls for positions I hold are always sent, whatever the switch.
+12. **Manual position entry** under /journal/ (`POST /journal/positions`, `POST /journal/positions/{id}/close`): positions I opened outside a signal (instrument or option legs, quantity or lots, entry price, date, optional stop and target). They get the same exit calls as positions taken from cards. Phase 9 extends this to stock option spreads and unhedged positions.
 
 ### Acceptance checks
 
 - An end-to-end test from fixture bars to a stored signal card
 - The safety tests still pass
 - Write routes exist only under /journal/, /data/import/ and /capital/, and no path contains order, execute, square, submit or trade/
+- With a type's switch off, its signals are paper-traded and no alert is sent; with it on, alerts follow `strategies.status` (a strategy with `alerts: false` sends none)
+- Switch positions survive a restart (database) and each change is logged
+- For each trade type, a fixture open position produces each exit call (target, stop, breakeven, trail, partial, time, entry invalidated, regime flip, kill switch) with an action and a reason, and the call repeats until the position is marked closed
 
 ### Tracker tasks
 
@@ -250,9 +270,13 @@ Live signals in paper mode.
 | P6.7 | 'I took this trade' / 'I skipped' buttons (journal only) | Decision stored |
 | P6.8 | Signals expire after valid-until | Expired card greyed out |
 | P6.9 | Signal score from confluence (timeframes, volume, relative strength, regime, bias); only top-ranked alerts sent | Daily alert cap respected |
-| P6.10 | Position management alerts after entry: move stop to breakeven, trail, book partial, exit now | Alert fires for each open position event |
+| P6.10 | Exit calls for every open position of every trade type (taken or entered manually): target, stop, breakeven, trailing stop, partial booking, time exit, entry reason invalidated, regime flip, kill switch | Each call states action and reason and repeats until the position is marked closed (test per trade type) |
 | P6.11 | Pre-market plan and end-of-day summary | Both arrive on Telegram |
 | P6.12 | Heartbeat: alert me if the system or feed stops during market hours | Alert within 2 minutes |
+| P6.13 | Trade-type selector: six switches controlling alerts per type; switched-off types still paper-trade | Switch off = paper only, no alert; switch on = alerts only for strategies whose status allows them |
+| P6.14 | Track record and label beside each switch (UNPROVEN, "negative in backtests") | Shown with trade count; "low sample" under 30 |
+| P6.15 | Switch choices stored in the database, changed through POST /journal/alert-switches, changes logged | Survives restart; safety test passes |
+| P6.16 | Manual position entry under /journal/ for any trade type | Manually entered position receives exit calls |
 
 ---
 
@@ -262,7 +286,7 @@ Live signals in paper mode.
 
 ### Scope
 
-Journal, scorecard and automatic cut-back.
+Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5, 6, 9, 7, 8), so it covers every trade type, including the stock option spreads of phase 9 and manually entered positions, and builds on the journal routes and tables phase 6 already created.
 
 ### Build steps
 
@@ -330,39 +354,59 @@ The LLM layer and the go-live gate.
 
 ## Phase 9: Stock option selling (signals always shown; capital check is advisory)
 
-**Outcome:** Entry alerts for hedged stock option spreads with reason, estimated profit and capital needed
+**Outcome:** A daily shortlist of stocks for monthly hedged option selling, entry alerts with both strikes, credit, max loss, breakeven and margin, and exit and roll alerts until each position is closed
+
+**Built after phase 6** (build order 4, 5, 6, 9, 7, 8). Uses phase 4 (option chains, lot sizes, IV and delta, payoff, analytics, option history check), phase 5 (risk engine) and phase 6 (alerts, trade-type selector, exit calls, manual positions, paper trading). Does not depend on phases 7 or 8.
 
 ### Scope
 
-Stock option selling. Capital never blocks a signal in this phase. Every valid setup is shown to me, and I decide whether to trade it. Instead of a gate, each card carries a capital-fit label computed from margin required versus capital_inr in config.yaml: FITS (margin plus the uncommitted-cash rule is satisfied), TIGHT (margin fits but breaks the uncommitted-cash rule), or NEEDS MORE CAPITAL (margin exceeds free capital, with the shortfall in rupees). The recommended capital for this strategy (recommended_capital_inr, default 1000000) is shown as guidance only.
+Monthly hedged stock option selling (bull put spreads and bear call spreads). Capital never blocks a signal in this phase. Every valid setup is shown to me, and I decide whether to trade it. Instead of a gate, each card carries a capital-fit label computed from margin required versus capital_inr in config.yaml: FITS (margin plus the uncommitted-cash rule is satisfied), TIGHT (margin fits but breaks the uncommitted-cash rule), or NEEDS MORE CAPITAL (margin exceeds free capital, with the shortfall in rupees). The recommended capital for this strategy (recommended_capital_inr, default 1000000) is shown as guidance only.
+
+Hard rules: hedged spreads only (every sold option is paired with a bought option of the same expiry); the system never suggests an unhedged position, and a single uncovered short stock option is rejected (`UNHEDGED_SHORT`); no position may be open in expiry week because stock options are physically settled. Every number on a card (strikes, delta, credit, max loss, breakeven, margin) is computed by code.
+
+### Configuration (`stock_option_selling` in config.yaml, each with a validated field)
+
+enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_loss_per_stock_spread_pct, min_open_interest, max_bid_ask_spread_pct, max_short_delta (0.20), hedge_strikes_out (2-3, i.e. min 2, max 3), entry_min_days_to_expiry (20), entry_max_days_to_expiry (35), profit_target_pct_of_credit (50), stop_multiple_of_credit (2.0), exit_days_before_expiry (start of expiry week), shortlist_size, ranking weights (IV rank, trend clarity, distance to support/resistance, liquidity), lookback for support/resistance, alert repeat interval, risk-free rate.
 
 ### Build steps
 
-Hard rules: hedged spreads only (every sold option is paired with a bought option of the same expiry); a single uncovered short stock option is rejected; no position may be open in expiry week because stock options are physically settled.
-1. Add stock_option_selling to config.yaml: enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_loss_per_stock_spread_pct, min_open_interest, max_bid_ask_spread_pct, exit_days_before_expiry.
-2. Eligible list: only F&O stocks that pass liquidity filters on the strikes to be traded (open interest and bid/ask width from the stored option chain). Read lot sizes from the instrument list.
-3. Strategy 'stock_credit_spread_v1' using the phase 3 interface. Entry conditions, all thresholds in config: (a) stock trend from the swing rules is up for a bull put spread or down for a bear call spread; (b) the short strike sits beyond a recent support or resistance level and at least a set distance from spot; (c) the stock's implied volatility is high against its own past year, so the premium collected is worthwhile; (d) no results, board meeting or corporate action for that stock before expiry; (e) market regime is not VOLATILE or EVENT.
-4. Card content: the 'Why now' section lists which of the conditions above fired with their actual values. The 'Estimate' section shows premium collected (maximum profit), maximum loss, breakevens, margin blocked, return on margin if held to target, and costs. Label it 'Estimate, not a forecast'.
-5. Exit rules: profit target at a set share of the premium collected, stop when the spread value reaches a set multiple of the premium, and a forced exit alert exit_days_before_expiry days ahead of expiry that repeats until I mark the position closed.
-6. Risk engine: counts margin blocked against the capital pool and reports the capital-fit label; it warns (does not block) on max_open_stock_spreads and the sector limit; it still blocks on missing or stale data, unknown margin, a missing hedge leg, or results before expiry, because those make the numbers on the card unreliable.
-7. Backtests are labelled 'payoff simulation' unless real historical stock option quotes are stored. Every signal is paper-traded automatically from day one; until the strategy has 8 weeks of paper results the card shows the banner 'UNPROVEN: no track record yet'.
+1. **Universe.** All NSE F&O stocks from the broker's instrument list (not only the watchlist), refreshed daily; lot sizes and expiries from the same list. A stock is eligible only if the strikes to be traded pass the liquidity filters (open interest at least min_open_interest, bid-ask width at most max_bid_ask_spread_pct of mid) in the stored option chain. Chain requests are paced like history requests; failures make that stock ineligible for the day, never guessed.
+2. **Daily shortlist after the close.** For each eligible stock and each eligible expiry, score: IV rank (high is better for selling), trend clarity (from the swing trend rules; a clear up trend for bull put spreads, a clear down trend for bear call spreads), distance from spot to the relevant support or resistance, and liquidity. Exclude any stock with results, a board meeting or a corporate action before expiry. Show the top `shortlist_size` candidates with the reason for each score on a read-only **"Stock option selling"** page (`/stock-option-selling`, `GET /api/stock-option-selling/shortlist`), stored daily in a `shortlist` table.
+3. **Short strike.** For puts: the first strike below the nearest support, below the highest-OI put strike, with |delta| at or below max_short_delta. For calls: the first strike above the nearest resistance, above the highest-OI call strike, with delta at or below max_short_delta. If no strike meets all three conditions: no signal, with the reason shown.
+4. **Hedge strike.** Same expiry, hedge_strikes_out strikes further out (try 2, then 3), choosing the nearest one that keeps max loss (width x lot size - net credit, plus costs) within max_loss_per_stock_spread_pct of capital and passes the liquidity filters. If none qualifies: no signal. The card shows net credit, max loss, breakeven, margin blocked (phase 4 margin rule; MARGIN_UNKNOWN until known), return on margin at target, costs and the capital-fit label.
+5. **Entry window.** Signals only when days to expiry is between entry_min_days_to_expiry and entry_max_days_to_expiry (default 20-35), never in expiry week.
+6. **Exit and adjustment alerts** (through the phase 6 exit calls; each repeats until I mark the position closed):
+   - Profit target: spread can be bought back for (100 - profit_target_pct_of_credit)% of the credit, i.e. 50% of the credit kept.
+   - Stop: the cost to close the spread reaches stop_multiple_of_credit x the credit received (default 2x, a loss of about 1x the credit before costs).
+   - Threat: the stock closes beyond the short strike, or the trend rules flip against the position. The alert shows two choices with numbers: **Exit** (cost to close now, realised P&L) and **Roll** (close this spread and open the same structure at the next valid strikes and/or the next month, with the net debit or credit of the roll, the new max loss, the new breakeven and margin). Roll choices obey all entry rules; if no valid roll exists, it says so.
+   - Forced exit: before expiry week (exit_days_before_expiry), "Exit now: physical settlement", repeating until closed.
+7. **Manual positions** under /journal/ (extends phase 6 step 12): enter spreads I already hold, leg by leg (stock, expiry, strike, right, buy/sell, lots, price). A position with a short leg not covered by a bought leg of the same expiry and right is stored and flagged **UNHEDGED** in red on every view and alert, with max loss shown as unlimited (calls) or strike-based (puts). It still receives every exit call. The system never generates an unhedged suggestion, including in rolls.
+8. **Risk engine:** counts margin blocked against the capital pool and reports the capital-fit label; it warns (does not block) on max_open_stock_spreads and the sector limit; it still blocks on missing or stale data, unknown margin, a missing hedge leg, illiquid strikes, or results before expiry, because those make the numbers on the card unreliable. Capital stays advisory: capital-fit label only.
+9. **Evidence:** backtests use stored option history if phase 4 found it, otherwise they are labelled "payoff simulation"; each includes the phase 4 no-filter baseline (the same spread sold every month at a fixed days-to-expiry with no entry rules); no session before 2019-01-22. Every signal is paper-traded automatically from day one; until the strategy has 8 weeks of paper results the card and the trade-type switch show **UNPROVEN: no track record yet**. Alerts for this type follow the phase 6 switch "stock option selling" and `strategies.status`.
 
 ### Acceptance checks
 
 - Tests that a valid setup produces a signal at Rs 2,00,000 capital labelled NEEDS MORE CAPITAL with the correct shortfall, and FITS at Rs 10,00,000
-- A short leg without its hedge is rejected
-- No entry is allowed when results fall before expiry
-- The forced-exit alert fires
-- Safety tests still pass
+- Short-strike tests: the chosen strike is beyond support/resistance, beyond the highest-OI strike and at or below the delta limit; when no strike meets all three, there is no signal
+- Hedge tests: the hedge is 2-3 strikes out, same expiry, liquid, and max loss stays within max_loss_per_stock_spread_pct; otherwise no signal
+- No signal outside 20-35 days to expiry or in expiry week; no entry when results or a corporate action fall before expiry
+- A short leg without its hedge is rejected; a manually entered unhedged position is stored and flagged UNHEDGED; no suggestion (entry or roll) is ever unhedged
+- Profit-target, stop, threat (exit and roll with numbers) and forced-exit alerts fire in tests and repeat until the position is closed
+- The shortlist excludes illiquid stocks and stocks with events before expiry, and shows a reason per candidate
+- Safety tests still pass (new writes only under /journal/)
 
 ### Tracker tasks
 
 | ID | Task | Done when |
 |---|---|---|
 | P9.1 | Capital-fit label on every signal: FITS / TIGHT / NEEDS MORE CAPITAL, with margin required | Signal is shown in all three cases |
-| P9.2 | Eligible stock list: most liquid F&O stocks only, with OI and spread filters | Illiquid stocks rejected |
-| P9.3 | Hedged credit spread strategy on stocks (bull put / bear call) | Max loss and margin shown |
-| P9.4 | Entry timing rules: trend, support/resistance, volatility rank, no results before expiry | Why-now text on the card |
-| P9.5 | Estimated profit, max loss, breakevens and margin on the card | All in rupees |
-| P9.6 | Forced exit alert before expiry week (physical settlement) | Alert fires in test |
-| P9.7 | Automatic paper tracking from day one; UNPROVEN banner until 8 weeks of results | Banner shows and clears correctly |
+| P9.2 | Universe: all NSE F&O stocks from the instrument list, filtered by OI and bid-ask width on the strikes to be traded | Illiquid stocks and strikes rejected (test) |
+| P9.3 | Daily shortlist after the close ranked by IV rank, trend clarity, distance to support/resistance, liquidity; events before expiry excluded | "Stock option selling" page shows top candidates with reasons |
+| P9.4 | Short strike: beyond nearest support/resistance, beyond highest-OI strike, delta at or below 0.20 (config) | No signal when no strike meets all three (test) |
+| P9.5 | Hedge strike: same expiry, 2-3 strikes out (config), max loss within max_loss_per_stock_spread_pct, liquid | Card shows net credit, max loss, breakeven and margin |
+| P9.6 | Entry window 20-35 days to expiry (config), never in expiry week | No signal outside the window (test) |
+| P9.7 | Exit and adjustment alerts: 50% profit target, 2x credit stop, short strike breached or trend flip with exit and roll numbers, forced exit before expiry week | Each alert fires in a test and repeats until closed |
+| P9.8 | Manual spread entry under /journal/, unhedged positions flagged UNHEDGED; system never suggests an unhedged position | UNHEDGED flag shown; no unhedged suggestion in tests |
+| P9.9 | Capital stays advisory: capital-fit label only | Signal never hidden for capital (test) |
+| P9.10 | Backtest with option history if available (else "payoff simulation") and the no-filter monthly baseline, from 2019-01-22 | Report shows strategy and baseline side by side |
+| P9.11 | Automatic paper tracking from day one; UNPROVEN banner until 8 weeks of results | Banner shows and clears correctly |

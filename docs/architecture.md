@@ -55,8 +55,14 @@ K is outside the application. The only writes the user can make are journal entr
 3. On each closed bar the engine reads the current regime (recomputed on a schedule and on bar close).
 4. Each strategy whose `allowed_regimes` contains the regime receives bars and returns zero or more `Signal`s.
 5. The risk engine sizes each signal and returns a `RiskDecision`.
-6. Approved signals are scored, ranked, stored, paper-traded, shown on the dashboard, and the top ones alerted.
-7. Open positions the user marked as taken are re-evaluated for management alerts.
+6. Approved signals are scored, ranked, stored and paper-traded, and shown on the dashboard. They are alerted only if the
+   trade type's switch is on (`alert_switches`, phase 6) **and** the strategy's `strategies.status` allows alerts; the top
+   ones by score are sent. Switched-off types still paper-trade.
+7. Open positions (taken from a card or entered manually, any trade type) are re-evaluated on every closed bar for exit
+   calls: target, stop, breakeven, trailing stop, partial booking, time exit, entry reason invalidated, regime flip,
+   kill switch (stock option spreads add: short strike breached or trend flip with exit and roll numbers, forced exit
+   before expiry week). Each call states the action and the reason and repeats until the position is marked closed.
+   Exit calls are always sent, whatever the switches.
 
 Anything unknown at any step (stale price, missing lot size, unknown margin) produces `NO_TRADE`, never a guess.
 
@@ -100,9 +106,11 @@ trading_system/
     costs.py  backtest.py                                    # phase 3 (PointInTimeRegime in regime.py)
     options/    chain.py  payoff.py  analytics.py
                 long_option.py  credit_spread.py  iron_condor.py
-                stock_credit_spread.py                       # phases 4 and 9
+                greeks.py  option_history.py                 # phase 4: IV/delta by code; Breeze option history if available
+                stock_credit_spread.py  universe.py  shortlist.py  # phase 9 (built after phase 6)
     risk/       sizing.py  portfolio.py  limits.py  engine.py  # phase 5
-    engine.py  scoring.py  paper.py  alerts.py  positions.py   # phase 6
+    engine.py  scoring.py  paper.py  alerts.py  positions.py   # phase 6 (positions: exit calls, manual entry)
+    switches.py                                               # phase 6: trade-type alert switches
     journal.py  scorecard.py  cutback.py  ladder.py            # phase 7
     llm/        base.py  claude_cli.py  prompts.py             # phase 8
   data/         market.db  events.csv  holidays.csv  fii_dii.csv
@@ -200,11 +208,15 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `backtest_runs`, `backtest_trades` | 3 | run_id, strategy_id, version, params_json, report_json; per-trade JSON. Reports also saved to `data/backtests/*.json` |
 | `history_floor` | 3 | table, symbol, source, floor_utc: the source has no data before this (backfill is not re-asked) |
 | `option_chain` | 4 | as_of_utc, underlying, expiry, strike, right, bid, ask, last, oi |
+| `option_bars` | 4 | underlying, expiry, strike, right, interval, start_utc, o/h/l/c, volume, oi, source: only if Breeze provides historical option prices (checked first in phase 4) |
 | `instruments` | 4 | underlying, lot_size, expiry list, as_of (read from broker list) |
 | `signals` | 6 | signal_id, all Signal fields, RiskDecision fields, score, card_json |
 | `paper_trades` | 6 | signal_id, entry/exit time and price, costs, net_pnl, exit_reason |
 | `journal` | 6 | signal_id, decision (TOOK/SKIPPED), fill price, note, exit price |
-| `positions` | 6 | open positions the user took, current stop, last alert |
+| `positions` | 6 | open positions the user took or entered manually: origin (SIGNAL/MANUAL), trade type, legs (instrument or option legs), quantity/lots, entry, current stop/target, hedged flag (UNHEDGED shown in red), status, last exit call |
+| `alert_switches` | 6 | trade type (intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling), on/off (default off), changed_at; with a change log |
+| `exit_calls` | 6 | position_id, at_utc, kind (TARGET, STOP, BREAKEVEN, TRAIL, PARTIAL, TIME, ENTRY_INVALIDATED, REGIME_FLIP, KILL_SWITCH, STRIKE_BREACHED, TREND_FLIP, FORCED_EXPIRY_EXIT), action text, reason values, repeat count |
+| `shortlist` | 9 | session_date, stock, expiry, side, scores (IV rank, trend clarity, distance to S/R, liquidity), reasons, rank |
 | `capital_log` | 7 | date, type (DEPOSIT/WITHDRAWAL), amount |
 | `strategy_state` | 7 | strategy_id, regime, enabled, size_factor, changed_at, changed_by |
 | `llm_calls` | 8 | at_utc, task, tokens/cost if known, ok, latency |
@@ -223,8 +235,13 @@ All timestamps are stored in UTC and shown in IST. Signals and their evidence ar
 Phase 3 adds `costs` (every rate with source and effective date; empty = backtests refuse to run), `strategies.<id>` and `backtest`.
 Phase 3b adds `strategies.inactive`, the v2 strategy blocks, `backtest.holdout_start` (fixed holdout dates per bar interval)
 and `regime.ignore_5m_bar_starts` (stored 5-minute bars the backtest regime skips: Breeze's 15:15 and 15:20 bars).
-Later phases add: `options`, `position_cap_pct` (default 25),
-`scoring`, `alerts`, `cutback`, `ladder`, `llm`, `stock_option_selling`, `go_live_gate`.
+2026-11-13 adds `strategies.status` (per strategy: alerts on/off, paper_only/live, evidence label; every phase 3 cash strategy
+is set to no alerts, paper only, "negative in backtests").
+Later phases add: `options` (risk-free rate and dividend assumptions for IV/delta, option history settings), `position_cap_pct`
+(default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9: universe filters
+min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
+max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,
+exit_days_before_expiry, recommended_capital_inr), `cutback`, `ladder`, `llm`, `go_live_gate`.
 
 Rules:
 - Every rupee limit is derived as a percentage of `account.capital_inr`.
@@ -242,9 +259,18 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 | Cash stocks | Intraday, swing | n/a | No leverage or borrowed funds |
 | Nifty options | Weekly, monthly | Credit spread, iron condor | Cash-settled |
 | Bank Nifty options | Monthly | Credit spread | Weekly contracts do not exist |
-| Stock options | Monthly | Hedged credit spread (phase 9) | Physically settled: no position in expiry week |
+| Stock options | Monthly | Hedged credit spread (phase 9): bull put / bear call, 20-35 days to expiry | Physically settled: no position in expiry week |
 
-- A short option without a bought option of the same expiry is rejected (`UNHEDGED_SHORT`).
+- A short option without a bought option of the same expiry is rejected (`UNHEDGED_SHORT`). The system never suggests an
+  unhedged position (entry or roll). A position the user already holds and enters manually may be unhedged: it is stored,
+  flagged UNHEDGED on every view and alert, and still gets exit calls.
+- Phase 9 short strike: beyond the nearest support (puts) or resistance (calls), beyond the highest-OI strike on that side,
+  and |delta| at or below `max_short_delta`; otherwise no signal. Hedge: same expiry, `hedge_strikes_out` strikes further out,
+  liquid, keeping max loss within `max_loss_per_stock_spread_pct`.
+- Universe for stock option selling: every NSE F&O stock in the broker's instrument list that passes the liquidity filters
+  on the strikes to be traded (not limited to the watchlist).
+- Option backtests use stored Breeze option prices if they exist, else they are labelled "payoff simulation"; each is
+  compared with a no-filter baseline (the same structure every month or week, no entry rules).
 - Lot sizes and expiry dates are read from the broker's instrument list at run time. Never hardcode them.
 - Capital never hides a stock option selling signal; the card carries a capital-fit label instead.
 
@@ -252,10 +278,13 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 
 Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, `/api/config` (phase 1);
 `/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options/{underlying}` (4);
-`/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions` (6); `/api/scorecard` (7); `/api/briefing` (8).
+`/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
+`/api/stock-option-selling/shortlist` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
-`POST /data/import/{kind}` for FII/DII, events, holidays and margin entries, `POST /capital/log`.
+`POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
+6; option legs and the UNHEDGED flag, 9), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries,
+`POST /capital/log`. Route names avoid the forbidden word list (for example `alert-switches`, never `trade/`).
 
 Forbidden in any path: `order`, `execute`, `square`, `submit`, `trade/`. The safety test checks every route.
 
@@ -307,7 +336,12 @@ Tests run offline. Anything needing the live broker goes behind the feed interfa
 4. User switches `account.mode` to `live_manual` for strategies that passed.
 5. Capital ladder governs increases; step-ups are judged per strategy.
 
-Option backtests are labelled "payoff simulation" unless real historical option quotes are stored.
+Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
+no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).
+
+**Build order (2026-11-13):** phases 1-3 done, then 4, 5, 6, 9, 7, 8. Phase 9 (stock option selling) comes before the
+journal/scorecard (7) and LLM (8) phases because the user trades monthly hedged stock option selling now; it uses only
+phases 4, 5 and 6.
 
 ## 15. Open decisions (user)
 
@@ -318,6 +352,8 @@ Option backtests are labelled "payoff simulation" unless real historical option 
 | Brokerage and tax rates | 2026-11-13: Prime 4999 brokerage (user); NSE charges per circular NSE/FA/73061 (IPFT included in the exchange charge); other statutory rates from published sources. Labelled "not yet verified against a contract note". User to verify against a contract note |
 | Watchlist | NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (2026-11-12), codes mapped from ICICI's instrument list by symbol and ISIN |
 | Risk percentages | As in section 8 |
+| Alert rule for a switched-on trade type | Alert only if the strategy's `strategies.status` also allows alerts (so "negative in backtests" strategies stay silent). User may decide that the switch alone should be enough |
+| Stock spread stop "2x credit" | Close when the cost to buy back the spread reaches 2x the credit received (loss about 1x credit before costs). User to confirm |
 
 ## 16. Source-of-truth order
 
