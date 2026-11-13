@@ -315,7 +315,7 @@ Option backtests are labelled "payoff simulation" unless real historical option 
 |---|---|
 | Intraday leverage | None. Position value capped at 25% of capital, so intraday cash trades are small |
 | Breeze read-only use | Proceed; user to confirm with ICICI in writing |
-| Brokerage and tax rates | 2026-11-12: Prime 999 brokerage and standard statutory rates filled from published sources, labelled "not yet verified against a contract note"; options IPFT empty. User to verify against a contract note |
+| Brokerage and tax rates | 2026-11-13: Prime 4999 brokerage (user); NSE charges per circular NSE/FA/73061 (IPFT included in the exchange charge); other statutory rates from published sources. Labelled "not yet verified against a contract note". User to verify against a contract note |
 | Watchlist | NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (2026-11-12), codes mapped from ICICI's instrument list by symbol and ISIN |
 | Risk percentages | As in section 8 |
 

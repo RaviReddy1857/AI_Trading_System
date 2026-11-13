@@ -382,7 +382,7 @@ bar in the signal window where the regime at that bar allows the strategy, in th
 long/short mix), with a real trade's stop and target distances. v1 intraday baselines were rerun. Swing baselines were not
 affected (random allowed-regime days of the same stock, long only).
 
-Round-trip cost estimate 0.187% of price (5x = 0.94%, 2x = 0.37%). Intraday period 2026-05-06..2026-10-01 (104 sessions).
+Round-trip cost estimate 0.187% of price (5x = 0.94%, 2x = 0.37%) **at the Prime 999 rates used for this run**; with Prime 4999 (2026-11-13) it is 0.159% (5x = 0.80%, 2x = 0.32%) and the results below are not yet rerun. Intraday period 2026-05-06..2026-10-01 (104 sessions).
 Swing period 2019-01-22..2026-06-05 (1,817 sessions). v1 rerun on the same data (2026 holidays loaded; longer daily history).
 
 | Strategy | Version | Trades | Win % | Gross incl. slippage (Rs) | Charges (Rs) | Net (Rs) | Max DD (Rs) | PF net | PF no costs | Random PF no costs, mean (min-max of 20) | Random PF net, mean (min-max) |
@@ -423,6 +423,21 @@ exits, next-bar entry).
 - Walk-forward windows: no intraday version had a profitable window; swing 18-20 of 60-62 windows profitable.
 - Diagnosis output: `data/diagnostics/` (not tracked); rerun with `scripts/diagnostics/diag.py` and `fwd.py`.
 
+## Costs update (2026-11-13)
+
+- Plan changed to **ICICI Direct Prime 4999** (user): delivery 0.10% (was 0.22%), intraday 0.010% (was 0.022%), options
+  Rs 19 per lot (was Rs 49), each charged on both sides (the engine already charges both legs).
+- NSE charges set from **NSE circular NSE/FA/73061** (27 Feb 2026, effective 1 Mar 2026; as given by the user, not fetched
+  here): total NSE outflow per side, IPFT included - equity cash Rs 307 per crore (0.00307%), equity options Rs 3,553 per crore
+  of premium (0.03553%). The exchange charge carries the whole figure and IPFT is 0 in all three segments.
+  The cash figure already matched (0.00307%), but a separate IPFT of 0.0000001% was being added on top: corrected.
+  The options IPFT gap is closed, so no rate is empty.
+- Still labelled "standard rates, not yet verified against a contract note".
+- Effect: intraday round trip on Rs 50,000 = Rs 29.55 in charges (was Rs 43.71); round-trip cost estimate with slippage
+  0.159% of price (was 0.187%); delivery 0.606% (was about 0.77%). One option lot bought and sold (Rs 10,000 premium each
+  side) = Rs 68.54. v1 strategy versions are unchanged; orb_v2 and range_reversion_v2 versions changed (2/5d1213de,
+  2/e859fa76) because their cost floor moved. The backtests were not rerun.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -450,7 +465,8 @@ exits, next-bar entry).
 | 21 | - | Live start with 53 subscriptions not yet seen (port 8000 was busy during the change) | Waiting for user: restart the app in breeze mode and check the summary line |
 | 22 | 2 | Sim startup is slower with 53 symbols (over 2 minutes the first time with 190 days of fake 5-minute history) | Open, low priority |
 | 23 | 3 | Cost rates are standard published rates, not verified against a contract note | Waiting for user: compare one contract note |
-| 24 | 3 | Options IPFT rate empty (sources disagree) | Waiting for user: fill from a contract note before phase 4 |
+| 24 | 3 | Options IPFT rate empty (sources disagree) | Fixed 2026-11-13: NSE circular NSE/FA/73061 (user) - Rs 3,553/crore of premium each side including IPFT; IPFT set to 0 so it is not counted twice |
+| 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Open: rerun the backtests (`python -m app.backtest`) to see results at the new rates; v2 versions changed with the cost estimate |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -491,3 +507,5 @@ exits, next-bar entry).
 | 2026-11-12 | Swing backtests start 2019-01-22 because of price errors in older Breeze daily history |
 | 2026-11-12 | Backtests load the CSV files (holidays, events, FII/DII) first, as the app does |
 | 2026-11-12 | Random baseline uses only information available at the random entry's time |
+| 2026-11-13 | Brokerage plan: ICICI Direct Prime 4999 (user): delivery 0.10%, intraday 0.010%, options Rs 19/lot, each side |
+| 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |

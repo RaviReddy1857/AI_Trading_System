@@ -136,36 +136,36 @@ storage:                       # one file per feed mode; chosen from feed.mode
 costs:
   label: "standard rates, not yet verified against a contract note"
   verified_against_contract_note: false
-  plan: "ICICI Direct Prime 999 (resident, one-time plan)"
-  compiled_on: "2026-11-12"
+  plan: "ICICI Direct Prime 4999 (user, 2026-11-13)"
+  compiled_on: "2026-11-13"
   gst_pct: {value: 18, source: "zerodha.com/charges; angelone.in/exchange-transaction-charges; icicidirect.com (GST 18% on brokerage)", effective: "in force on 2026-11-12 (start date not stated on source)"}
   # Zerodha and Angel One differ on whether GST applies to the tiny IPFT charge; both include brokerage, NSE and SEBI.
   gst_on: [brokerage, exchange_txn, sebi_fee, ipft, dp_charge]
   intraday_equity:
-    brokerage_pct:      {value: 0.022, source: "icicidirect.com/brokerage and secure.icicidirect.com/customer/brokerageplans: Prime 999 'Intraday / Futures' 0.022%; applied to each leg (side not stated)", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    brokerage_pct:      {value: 0.010, source: "ICICI Direct Prime 4999 plan rates as given by the user on 2026-11-13; charged on both sides (user): intraday 0.010%", effective: "user's current plan (2026-11-13)"}
     stt_buy_pct:        {value: 0, source: "zerodha.com/charges; angelone.in; navia.co.in STT table (sell side only)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in)"}
     stt_sell_pct:       {value: 0.025, source: "zerodha.com/charges; angelone.in; navia.co.in (dated 2026-11-11)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; cash rates unchanged)"}
-    exchange_txn_pct:   {value: 0.00307, source: "zerodha.com/charges 'NSE: 0.00307%'; angelone.in 0.0030699%. NSE page did not load. ICICI page shows an older 0.00297%", effective: "in force on 2026-11-12 (start date not stated)"}
+    exchange_txn_pct:   {value: 0.00307, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): equity cash total NSE outflow Rs 307 per crore each side, including IPFT (matches zerodha.com/charges 0.00307%)", effective: "2026-03-01"}
     sebi_fee_pct:       {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
     stamp_duty_buy_pct: {value: 0.003, source: "zerodha.com/charges '0.003% or Rs 300/crore on buy side'; angelone.in 0.003%", effective: "in force on 2026-11-12 (start date not stated)"}
-    ipft_pct:           {value: 0.0000001, source: "zerodha.com/charges 'Rs 0.01 per crore'; angelone.in 0.0000001%", effective: "in force on 2026-11-12 (start date not stated)"}
+    ipft_pct:           {value: 0, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): IPFT is included in the Rs 307/crore exchange charge above (0 here so it is not counted twice)", effective: "2026-03-01"}
   delivery_equity:
-    brokerage_pct:      {value: 0.22, source: "icicidirect.com/brokerage and secure.icicidirect.com/customer/brokerageplans: Prime 999 delivery 0.22%, 'No minimum brokerage'", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    brokerage_pct:      {value: 0.10, source: "ICICI Direct Prime 4999 plan rates as given by the user on 2026-11-13; charged on both sides (user): delivery 0.10%", effective: "user's current plan (2026-11-13)"}
     stt_buy_pct:        {value: 0.1, source: "zerodha.com/charges; angelone.in; navia.co.in", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; unchanged)"}
     stt_sell_pct:       {value: 0.1, source: "zerodha.com/charges; angelone.in; navia.co.in", effective: "2026-04-01 (Finance Act 2026, per navia.co.in; unchanged)"}
-    exchange_txn_pct:   {value: 0.00307, source: "zerodha.com/charges 'NSE: 0.00307%'; angelone.in 0.0030699%. NSE page did not load", effective: "in force on 2026-11-12 (start date not stated)"}
+    exchange_txn_pct:   {value: 0.00307, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): equity cash total NSE outflow Rs 307 per crore each side, including IPFT (matches zerodha.com/charges 0.00307%)", effective: "2026-03-01"}
     sebi_fee_pct:       {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
     stamp_duty_buy_pct: {value: 0.015, source: "zerodha.com/charges '0.015% or Rs 1500/crore on buy side'; angelone.in 0.015%", effective: "in force on 2026-11-12 (start date not stated)"}
-    ipft_pct:           {value: 0.0000001, source: "zerodha.com/charges 'Rs 0.01 per crore'; angelone.in 0.0000001%", effective: "in force on 2026-11-12 (start date not stated)"}
+    ipft_pct:           {value: 0, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): IPFT is included in the Rs 307/crore exchange charge above (0 here so it is not counted twice)", effective: "2026-03-01"}
     dp_charge_per_sell_inr: {value: 20, source: "icicidirect.com/brokerage: NSDL/CDSL Rs 20 + GST per scrip on the first debit of the day", effective: "in force on 2026-11-12 (no date on ICICI page)"}
   options:
-    brokerage_per_lot_inr:    {value: 49, source: "icicidirect.com/brokerage: Prime 999 options Rs 49 per lot; applied to each leg (side not stated)", effective: "in force on 2026-11-12 (no date on ICICI page)"}
+    brokerage_per_lot_inr:    {value: 19, source: "ICICI Direct Prime 4999 plan rates as given by the user on 2026-11-13; charged on both sides (user): options Rs 19 per lot", effective: "user's current plan (2026-11-13)"}
     stt_sell_premium_pct:     {value: 0.15, source: "zerodha.com/charges; angelone.in; navia.co.in (0.10% -> 0.15%)", effective: "2026-04-01 (Finance Act 2026, per navia.co.in)"}
-    exchange_txn_premium_pct: {value: 0.03553, source: "zerodha.com/charges 'NSE: 0.03553% (on premium)'; angelone.in 0.0355299%", effective: "in force on 2026-11-12 (start date not stated)"}
+    exchange_txn_premium_pct: {value: 0.03553, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): equity options total NSE outflow Rs 3,553 per crore of premium each side, including IPFT", effective: "2026-03-01"}
     sebi_fee_pct:             {value: 0.0001, source: "zerodha.com/charges and angelone.in: Rs 10 per crore", effective: "in force on 2026-11-12 (start date not stated)"}
     stamp_duty_buy_pct:       {value: 0.003, source: "zerodha.com/charges; angelone.in: 0.003% on buy side", effective: "in force on 2026-11-12 (start date not stated)"}
-    # Left empty on purpose: sources disagree (Zerodha Rs 0.01/crore; Angel One lists both 0.0000001% and 0.002%).
-    ipft_pct:                 {value: null, source: "NOT SOURCED - conflicting figures; fill from your contract note", effective: ""}
+    # Transaction charge + IPFT = 0.03553% of premium (circular total); IPFT is inside that figure.
+    ipft_pct:                 {value: 0, source: "NSE circular NSE/FA/73061 dated 2026-02-27 (as given by the user; not fetched here): IPFT is included in the Rs 3,553/crore exchange charge above (0 here so it is not counted twice)", effective: "2026-03-01"}
   slippage_pct:                # a setting, not a published rate: adverse move per side, % of price
     intraday_equity: 0.05
     delivery_equity: 0.05

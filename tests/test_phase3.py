@@ -189,18 +189,44 @@ def test_ACCEPTANCE_empty_rates_fail_loudly_and_are_named():
         CostModel(None)
 
 
-def test_real_config_costs_are_labelled_and_options_ipft_left_empty():
+def test_real_config_costs_are_labelled_complete_and_sourced():
     from app.config import load_settings as real
     c = real().costs
     assert c.label == "standard rates, not yet verified against a contract note"
     assert c.verified_against_contract_note is False
     m = CostModel(c)
-    assert m.missing("intraday_equity") == [] and m.missing("delivery_equity") == []
-    assert m.missing("options") == ["costs.options.ipft_pct"]
+    assert m.missing("intraday_equity") == [] and m.missing("delivery_equity") == [] and m.missing("options") == []
     for seg in ("intraday_equity", "delivery_equity", "options"):
         for name, rate in getattr(c, seg):
             if rate is not None and rate.value is not None:
                 assert rate.source and rate.effective, f"{seg}.{name} has no source/effective date"
+
+
+def test_real_config_nse_charges_match_circular_without_double_counting_ipft():
+    """NSE/FA/73061 (effective 2026-03-01): total NSE outflow per side, IPFT included -
+    equity cash Rs 307 per crore, equity options Rs 3,553 per crore of premium."""
+    from app.config import load_settings as real
+    c = real().costs
+    crore = Decimal(10_000_000)
+    for seg, total_inr in (("intraday_equity", 307), ("delivery_equity", 307)):
+        r = getattr(c, seg)
+        pct = Decimal(str(r.exchange_txn_pct.value)) + Decimal(str(r.ipft_pct.value))
+        assert pct / 100 * crore == total_inr
+        assert r.ipft_pct.value == 0 and "73061" in r.exchange_txn_pct.source
+    o = c.options
+    pct = Decimal(str(o.exchange_txn_premium_pct.value)) + Decimal(str(o.ipft_pct.value))
+    assert pct / 100 * crore == 3553 and o.ipft_pct.value == 0 and "73061" in o.exchange_txn_premium_pct.source
+
+
+def test_real_config_brokerage_is_prime_4999():
+    from app.config import load_settings as real
+    c = real().costs
+    assert "Prime 4999" in c.plan
+    assert c.intraday_equity.brokerage_pct.value == 0.010
+    assert c.delivery_equity.brokerage_pct.value == 0.10
+    assert c.options.brokerage_per_lot_inr.value == 19
+    # both sides: one lot bought and sold = 2 x Rs 19 brokerage
+    assert CostModel(c).options(1, 1000, 1000).brokerage == Decimal("38.00")
 
 
 def test_position_size_respects_risk_and_cap():

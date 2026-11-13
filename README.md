@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 294 passed
+python -m pytest -q          # should say 296 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -146,11 +146,13 @@ How the backtest works:
 - Each report: period, trades, win rate, average win and loss, net P&L after costs, costs, max drawdown, profit factor,
   results by regime and by window. Anything under 30 trades is marked **LOW SAMPLE**.
 
-**Costs** (`config.yaml` -> `costs`) are ICICI Direct **Prime 999** brokerage plus standard statutory charges, each with
-its source and effective date. They are **standard rates, not yet verified against a contract note**, and every report says so.
+**Costs** (`config.yaml` -> `costs`) are your ICICI Direct **Prime 4999** brokerage (delivery 0.10%, intraday 0.010%,
+options Rs 19 per lot, each side) plus statutory charges, each with its source and effective date. NSE charges follow NSE
+circular NSE/FA/73061 (effective 2026-03-01): total NSE outflow per side, IPFT included, is Rs 307 per crore for equity cash
+and Rs 3,553 per crore of premium for equity options, so the IPFT rate is 0 (it is inside the exchange charge, not counted
+twice). They are **standard rates, not yet verified against a contract note**, and every report says so.
 To verify: take one real contract note and compare brokerage, STT, transaction charges, SEBI fee, stamp duty and GST line by line;
-fix any rate, then set `verified_against_contract_note: true`. One rate is left empty on purpose: the options IPFT charge
-(sources disagree). Option backtests (phase 4) will refuse to run until you fill it; equity backtests do not need it.
+fix any rate, then set `verified_against_contract_note: true`. No rate is empty now, so option backtests (phase 4) can run.
 
 **Unadjusted history.** Breeze daily history is not adjusted for splits, bonuses or demergers (for example RELIANCE "falls 50%"
 on 2024-10-28, its 1:1 bonus). An overnight gap of more than 25% (`history.max_overnight_gap_pct`) is treated as a break:
@@ -170,7 +172,7 @@ random entries**; nothing has been tested on the holdout.
 | `vwap_pullback` | Retired from cash trading: listed in `strategies.inactive`, so not run by default (`--strategy vwap_pullback` still works) |
 
 - **Round-trip cost estimate** (rule 1): charges for an intraday round trip at the position cap plus slippage on both sides,
-  computed from `config.yaml` costs (0.187% of price at current rates). It is part of each v2 version, so changing a rate
+  computed from `config.yaml` costs (0.159% of price with Prime 4999; it was 0.187% with Prime 999). It is part of each v2 version, so changing a rate
   changes the version.
 - **Fixed holdout**: `backtest.holdout_start` - 5-minute strategies from 2026-10-05, daily strategies from 2026-06-08.
   Downloading more history never moves the holdout back over data already used.
