@@ -13,6 +13,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Nifty 50 watchlist (task before phase 3) | Built; 50 of 50 mapped; live history downloaded; 53 live subscriptions not yet seen | 212 passing (whole suite) | 2026-11-12 |
 | 3 | Intraday and swing strategies with backtests | Built and tested; backtests run on real Breeze data (all five lose after costs); costs not yet verified against a contract note | 259 passing (whole suite) | 2026-11-12 |
 | 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; rerun at Prime 4999 rates 2026-11-13: all v1 and v2 still lose after costs, none beats random; all set to no alerts, paper only, "negative in backtests"; holdout not opened | 300 passing (whole suite) | 2026-11-13 |
+| - | Backtest engine review fixes (Codex review of phase 3) | Fixed and tested; dev backtests and random baselines rerun; no conclusion changes; holdout not opened | 327 passing (whole suite) | 2026-11-13 |
 | 4 | Option strategies | Not started | | |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -511,6 +512,70 @@ Requested by the user; `docs/implementation.md` and `docs/architecture.md` updat
 2. "Stop at 2x credit" = close when the cost to buy back the spread reaches 2x the credit received (a loss of about 1x
    the credit before costs). Alternative: close when the loss reaches 2x the credit (buy-back cost 3x credit).
 
+## Backtest engine review fixes (2026-11-13, before phase 4)
+
+A Codex review of the phase 3 engine found three problems. All three were confirmed in the code and fixed, because
+phases 4 and 9 reuse the engine. Development period only; the holdout was not opened; no strategy or parameter changed.
+
+1. **Entry validated on the raw open, not the slipped fill** (`Engine._open`). Slippage is adverse, so it moves the fill
+   toward the target: an open just inside the target could fill beyond it, and the trade then "hit the target" on its
+   entry bar at a loss. Now both the raw open and the fill after slippage must lie strictly between stop and target;
+   otherwise no trade, counted as `FILL_BEYOND_STOP_OR_TARGET` in `skipped_signals` (a raw open beyond stays
+   `GAPPED_PAST_STOP_OR_TARGET`). **Real-data impact: none** - no trade in the previous run (intraday or swing) had a
+   fill at or beyond its stop or target, and the rerun skipped none for this reason.
+2. **Incomplete intraday sessions were traded**, and two fallbacks invented exits: "the exit bar is missing: leave at the
+   first price after it" and "data ended: EOD at the last bar's close". Now an intraday session is used only if it has
+   every 5-minute bar from 09:15 to the bar ending at `backtest.intraday_exit_time` (09:15..15:10, 72 bars; the 15:15
+   and 15:20 bars are not required). Both fallbacks are gone: a trade whose holding period crosses a missing bar, or
+   whose session ends before the exit bar, is dropped (a guard; it cannot happen once sessions are complete). Counts are
+   in the report's new `data_exclusions` section, on the backtests page and in the CLI output.
+   **Real-data impact:** 50 of 5,200 development symbol-sessions removed - all on 2026-05-06, the first day of 5-minute
+   history, where every stock lacks the 09:15 and 09:20 bars. Trades removed: range_reversion 1 (1,799 -> 1,798); no
+   other active strategy traded that day (retired vwap_pullback had 29 there; not rerun). Trades dropped by the
+   missing-bar guard: 0. In the previous run no trade crossed a missing bar and no EOD exit came from a truncated session.
+   The random baseline (`diag.py`) now draws only complete sessions, so it is compared on the same footing.
+3. **ORB `range_minutes`** accepted values that are not whole 5-minute bars (17 silently became 15). `OrbParams` and
+   `OrbV2Params` now reject them at config load ("must be a multiple of 5"). Current values (15, 30) are unaffected.
+
+**Tests** (`tests/test_review4_fixes.py`, 27 tests): fill past / exactly at the target, long and short; fill inside
+still trades; raw gap still a gap; report separates skipped signals from data exclusions; required bars 09:15..15:10;
+truncated session, missing midday bar, missing exit bar and empty symbol-session are not traded; a session without
+15:15/15:20 bars is used and exits EOD at 15:15; the three drop guards (with the completeness check bypassed); config
+rejects 17/22/33 for orb and orb_v2 and accepts multiples of 5; the backtests page shows the exclusions. Run against
+the pre-fix engine, 18 of them fail and 8 pass (the 8 check behaviour that was already right; the three guard tests
+fail there at the missing `session_usable` hook rather than at their assertion). Seven existing engine tests used 3-4
+bar sessions; they now pad to a full session (`full_day` in test_phase3.py) with unchanged assertions, and the two that
+tested "no next bar" / "gap in bars" now expect `SESSIONS_INCOMPLETE`.
+
+**Rerun (Prime 4999 rates, same data, 20 random seeds):**
+
+| Strategy | Trades before -> after | Net (Rs) before -> after | PF net | PF no costs | Random PF no costs before -> after, mean (min-max) | Random PF net before -> after, mean (min-max) |
+|---|---|---|---|---|---|---|
+| orb | 242 -> 242 | -32,752 (same) | 0.45 | 0.705 | 0.96 (0.68-1.16) -> 0.91 (0.72-1.09) | 0.59 (0.41-0.72) -> 0.56 (0.43-0.67) |
+| orb_v2 | 542 -> 542 | -40,219 (same) | 0.68 | 1.02 | 0.93 (0.72-1.14) -> 0.88 (0.72-1.11) | 0.58 (0.44-0.71) -> 0.55 (0.44-0.68) |
+| range_reversion | 1,799 -> 1,798 | -140,898 -> -140,886 | 0.31 | 0.99 | 1.00 (0.91-1.11) -> 1.02 (0.90-1.12) | 0.31 (0.28-0.34) -> 0.31 (0.27-0.34) |
+| range_reversion_v2 | 1,027 -> 1,027 | -91,188 (same) | 0.43 | 0.90 | 0.96 (0.78-1.09) -> 0.96 (0.82-1.03) | 0.44 (0.36-0.51) -> 0.44 (0.38-0.48) |
+| swing_pullback | 1,316 -> 1,316 | -141,165 (same) | 0.88 | 1.22 | 1.18 (1.02-1.28), same | 0.85 (0.74-0.93), same |
+| swing_pullback_v2 | 1,311 -> 1,311 | -151,355 (same) | 0.87 | 1.21 | 1.21 (1.09-1.35), same | 0.87 (0.78-0.98), same |
+| swing_breakout | 999 -> 999 | -199,244 (same) | 0.80 | 1.07 | 1.22 (1.08-1.35), same | 0.89 (0.78-0.99), same |
+| swing_breakout_v2 | 998 -> 998 | -223,526 (same) | 0.78 | 1.04 | 1.23 (1.08-1.39), same | 0.89 (0.776-1.00), same |
+
+**Does any conclusion change? No.** Every version still loses after costs; none beats random entries; all stay
+"negative in backtests", no alerts, paper only. Details:
+- Swing results and swing baselines are identical to the last run (finding 2 is intraday only; finding 1 never occurred).
+- The intraday random ranges moved because random draws now skip 2026-05-06, which changes the random sequence. That is
+  seed-to-seed sampling noise, not an engine effect. Side effect: orb v1's PF before costs (0.705, unchanged) is now
+  just below every random seed (minimum 0.719; before 0.677). With 20 seeds that margin is within noise, so it is not
+  treated as a new finding; orb v1 was already the weakest intraday strategy.
+- swing_breakout_v2's PF after costs (0.775) was already just below every seed (0.776) in the last run; the earlier
+  table rounded both to 0.78.
+- Mechanical checks: no problems on any real or random trade.
+
+Output: `data/diagnostics/bt_review4.txt`, `data/diagnostics/diag_review4.txt` and the JSON reports in `data/backtests/`.
+
+**Not tested:** the app was not started for this fix (the backtests page is covered by a TestClient test). Swing trades
+across a stock's missing daily bar are not checked (outside this review; open issue 42).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -544,6 +609,10 @@ Requested by the user; `docs/implementation.md` and `docs/architecture.md` updat
 | 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Waiting for user (default: both) |
 | 37 | plan | Meaning of "stop at 2x credit" for stock spreads | Waiting for user (default: buy-back cost reaches 2x credit) |
 | 38 | plan | Whether Breeze provides historical option prices | Open: first task of phase 4 (P4.9) |
+| 39 | review | Engine validated the raw open, not the slipped fill, against stop/target | Fixed 2026-11-13: fill after slippage checked (`FILL_BEYOND_STOP_OR_TARGET`); no real trade affected |
+| 40 | review | Incomplete intraday sessions were traded; a missing exit bar or truncated data gave invented EOD exits | Fixed 2026-11-13: sessions need every bar 09:15..15:10; trades crossing a missing bar are dropped; 50 symbol-sessions (2026-05-06) and 1 trade removed |
+| 41 | review | ORB range_minutes not a multiple of 5 was silently rounded down | Fixed 2026-11-13: rejected at config load |
+| 42 | review | Swing backtests do not check for a stock's missing daily bar inside a holding period (a day the index traded but the stock has no bar) | Open, low priority: outside this review; measure before phase 9 reuses the swing path |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -592,4 +661,7 @@ Requested by the user; `docs/implementation.md` and `docs/architecture.md` updat
 | 2026-11-13 | Per-trade-type alert switches stored in the database (POST /journal/alert-switches); switched-off types paper-trade |
 | 2026-11-13 | Exit calls for every open position, taken or manual, repeat until closed; always sent regardless of switches |
 | 2026-11-13 | Phase 9 rules: F&O universe by liquidity, daily shortlist, short strike beyond S/R and max-OI with delta <= 0.20, hedge 2-3 strikes out, 20-35 DTE, 50% target, 2x credit stop, exit/roll alerts, manual UNHEDGED positions flagged, capital advisory |
+| 2026-11-13 | Backtest entries need both the raw open and the slipped fill strictly between stop and target |
+| 2026-11-13 | An intraday session is backtested only if it has every 5-minute bar 09:15..15:10 (to the exit bar); trades crossing a missing bar are dropped, never given an invented exit |
+| 2026-11-13 | ORB range_minutes must be a multiple of 5 |
 | 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |

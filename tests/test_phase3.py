@@ -40,6 +40,16 @@ def five(sym, ohlcv, d=DAY, start=(9, 15)):
     return out
 
 
+FULL_SESSION_BARS = 72                           # 09:15 .. 15:10: every bar a usable session needs
+
+
+def full_day(sym, ohlcv, d=DAY):
+    """A complete session: the given 5-minute bars from 09:15, padded with flat bars at the last close up
+    to the 15:10 bar (the engine skips sessions with a missing bar)."""
+    c = ohlcv[-1][3]
+    return five(sym, list(ohlcv) + [(c, c, c, c)] * (FULL_SESSION_BARS - len(ohlcv)), d=d)
+
+
 # Explicit rates for the reconciliation test, so editing config.yaml cannot change the expected paise.
 TEST_COSTS = {
     "label": "standard rates, not yet verified against a contract note", "plan": "test", "compiled_on": "2026-11-12",
@@ -152,7 +162,7 @@ def test_ACCEPTANCE_fixture_trade_reconciles_to_the_paise():
     buy value 49,024.50; sell value 49,955.01; gross 930.51.
     brokerage 10.79 + 10.99 = 21.78; STT 12.49; NSE 1.51 + 1.53 = 3.04; SEBI 0.05 + 0.05 = 0.10; IPFT 0.00;
     stamp 1.47; GST 18% x (21.78 + 3.04 + 0.10 + 0.00) = 4.49; total 43.37; net 887.14."""
-    bars = five("TCS", [(999, 1001, 998, 1000), (1000, 1005, 999, 1004), (1004, 1021, 1003, 1018), (1018, 1019, 1010, 1012)])
+    bars = full_day("TCS", [(999, 1001, 998, 1000), (1000, 1005, 999, 1004), (1004, 1021, 1003, 1018), (1018, 1019, 1010, 1012)])
     eng, s = engine_with(bars)
     trades, _ = eng.run(Stub(ist(9, 20), stop=990.0, target=1020.0), [DAY], [("TCS", "stock")])
     assert len(trades) == 1
@@ -238,7 +248,7 @@ def test_position_size_respects_risk_and_cap():
 # ---------------- backtest engine ----------------
 def test_ACCEPTANCE_signal_bar_close_is_never_the_fill():
     """The signal bar closes at 1000; the next bar opens at 1010. The fill must be 1010 + slippage."""
-    bars = five("TCS", [(995, 1001, 994, 1000), (1010, 1012, 1008, 1011), (1011, 1013, 1009, 1012)])
+    bars = full_day("TCS", [(995, 1001, 994, 1000), (1010, 1012, 1008, 1011), (1011, 1013, 1009, 1012)])
     eng, _ = engine_with(bars)
     strat = Stub(ist(9, 20), stop=950.0, target=1100.0)
     trades, _ = eng.run(strat, [DAY], [("TCS", "stock")])
@@ -252,18 +262,21 @@ def test_ACCEPTANCE_signal_bar_close_is_never_the_fill():
 
 
 def test_ACCEPTANCE_no_next_bar_means_no_trade():
-    """A signal on the last available bar cannot be filled on that bar."""
+    """A signal on the last available bar cannot be filled on that bar: a session that ends there is
+    incomplete, so it is not traded at all (no fill, no EOD exit)."""
     bars = five("TCS", [(995, 1001, 994, 1000), (1000, 1001, 999, 1000)])
     eng, _ = engine_with(bars)
     trades, skipped = eng.run(Stub(ist(9, 25), stop=950.0, target=1100.0), [DAY], [("TCS", "stock")])
-    assert trades == [] and skipped["NO_NEXT_BAR"] == 1
+    assert trades == [] and skipped["SESSIONS_INCOMPLETE"] == 1
 
 
 def test_gap_in_bars_means_no_fill():
-    bars = five("TCS", [(995, 1001, 994, 1000)]) + five("TCS", [(1000, 1001, 999, 1000)], start=(9, 30))
+    """09:25 is missing, so the bar after the 09:20 signal is not the next bar: no trade."""
+    full = full_day("TCS", [(995, 1001, 994, 1000)] * 3)
+    bars = [b for b in full if b.start != ist(9, 25)]
     eng, _ = engine_with(bars)
     trades, skipped = eng.run(Stub(ist(9, 20), stop=950.0, target=1100.0), [DAY], [("TCS", "stock")])
-    assert trades == [] and skipped["NO_NEXT_BAR"] == 1
+    assert trades == [] and skipped["SESSIONS_INCOMPLETE"] == 1
 
 
 def test_strategy_context_cannot_contain_a_future_bar():
@@ -274,21 +287,21 @@ def test_strategy_context_cannot_contain_a_future_bar():
 
 
 def test_stop_assumed_first_when_bar_hits_both():
-    bars = five("TCS", [(999, 1001, 998, 1000), (1000, 1001, 999, 1000), (1000, 1030, 980, 1000)])
+    bars = full_day("TCS", [(999, 1001, 998, 1000), (1000, 1001, 999, 1000), (1000, 1030, 980, 1000)])
     eng, _ = engine_with(bars)
     t = eng.run(Stub(ist(9, 20), stop=990.0, target=1020.0), [DAY], [("TCS", "stock")])[0][0]
     assert t.exit_reason == "STOP" and t.exit_price == 989.51              # 990 x 0.9995 = 989.505, half up
 
 
 def test_gap_through_stop_fills_at_the_open():
-    bars = five("TCS", [(999, 1001, 998, 1000), (1000, 1001, 999, 1000), (970, 975, 960, 965)])
+    bars = full_day("TCS", [(999, 1001, 998, 1000), (1000, 1001, 999, 1000), (970, 975, 960, 965)])
     eng, _ = engine_with(bars)
     t = eng.run(Stub(ist(9, 20), stop=990.0, target=1020.0), [DAY], [("TCS", "stock")])[0][0]
     assert t.exit_reason == "STOP" and t.exit_price == 969.52              # 970 x 0.9995 (worse than the stop)
 
 
 def test_short_trade_profit_and_costs():
-    bars = five("TCS", [(1001, 1002, 999, 1000), (1000, 1001, 999, 1000), (1000, 1000, 975, 978)])
+    bars = full_day("TCS", [(1001, 1002, 999, 1000), (1000, 1001, 999, 1000), (1000, 1000, 975, 978)])
     eng, _ = engine_with(bars)
     t = eng.run(Stub(ist(9, 20), stop=1010.0, target=980.0, direction="SHORT"), [DAY], [("TCS", "stock")])[0][0]
     assert t.direction == "SHORT" and t.exit_reason == "TARGET"

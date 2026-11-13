@@ -5,8 +5,8 @@ touch, entry on the bar after the signal). Development period only; the holdout 
 Random baseline: each real trade is paired with one random entry that has the same stop and target
 distances; the engine's exit rules and costs are unchanged. Where the random entry goes uses only
 information available at that moment:
-- intraday: a random stock, development session and bar in the strategy's signal window, kept only
-  if the regime at that bar is one the strategy trades. Direction = the regime's (TRENDING_UP long,
+- intraday: a random stock, development session (complete sessions only, as the engine requires) and
+  bar in the strategy's signal window, kept only if the regime at that bar is one the strategy trades. Direction = the regime's (TRENDING_UP long,
   TRENDING_DOWN short); in RANGE, drawn from the real trades' long/short mix.
   (Until 2026-11-12 the random entry reused the real trade's own session and direction. For a breakout
   strategy that leaks the future: the session was chosen because price later broke out that way.)
@@ -227,6 +227,8 @@ def schedule_for(eng, strat, trades, dev, rng, stocks):
             for _ in range(500):
                 sym = rng.choice(stocks)
                 bars = eng.five(sym).get(rng.choice(dev), [])
+                if not eng.session_usable(bars):     # the engine would not trade an incomplete session
+                    continue
                 cands = [b.start + FIVE for b in bars if lo <= (b.start + FIVE).astimezone(IST).time() <= hi]
                 if not cands:
                     continue

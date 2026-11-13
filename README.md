@@ -136,6 +136,13 @@ JSON in `data/backtests/` (`<strategy>_latest.json` plus one file per run).
 How the backtest works:
 - Entry at the **next** bar's open after the signal bar closed, plus slippage. The signal bar's close is never a fill.
 - If one bar touches both stop and target, the **stop** is assumed hit first. A bar that opens beyond the stop fills at its open.
+- No trade if the entry fill **after slippage** (or the raw open) is at or beyond the stop or the target; the report counts
+  these as `FILL_BEYOND_STOP_OR_TARGET` / `GAPPED_PAST_STOP_OR_TARGET` under skipped signals.
+- An intraday session is traded only if it has **every 5-minute bar from 09:15 to the 15:10 bar** (the bar that ends at the
+  15:15 exit; Breeze's 15:15 and 15:20 bars are not needed). A trade that would cross a missing bar is dropped, never closed
+  at an invented end-of-day price. The report's `data_exclusions` (and the backtests page) show how many symbol-sessions
+  and trades this removed.
+- ORB `range_minutes` must be a multiple of 5 (whole 5-minute bars); any other value stops config loading with an error.
 - Intraday trades close at 15:15 IST; no new entries after 14:45. Swing trades exit at stop, target, or after 10 sessions.
 - Size: 1% of capital at risk to the stop, capped at 25% of capital per position. Each trade is sized on its own: there are
   no portfolio limits yet (phase 5), so the report shows **peak exposure**, which can be several times your capital.

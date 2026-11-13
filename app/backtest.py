@@ -7,6 +7,13 @@ Rules (CLAUDE.md, architecture.md section 14):
   first. A bar that opens beyond the stop fills at its open (worse than the stop).
 - Intraday trades are closed at the close of the bar ending at `backtest.intraday_exit_time`
   (15:15 IST); no entries after `last_entry_time`.
+- The fill is checked after slippage: if the slipped fill (or the raw open) is at or beyond the stop or
+  the target, there is no trade (FILL_BEYOND_STOP_OR_TARGET / GAPPED_PAST_STOP_OR_TARGET).
+- An intraday session is usable only if it has every 5-minute bar that starts from 09:15 up to (not
+  including) the exit time, i.e. 09:15 .. 15:10 for a 15:15 exit. The 15:15 and 15:20 bars are not
+  required. Other sessions are not traded (counted in data_exclusions). A trade whose holding period
+  crosses a missing bar, or whose session ends before the exit bar, is dropped, never closed at a
+  made-up EOD price (a guard: with complete sessions it cannot happen).
 - Every trade pays brokerage, taxes and charges from config.yaml (app/costs.py). Empty rates stop
   the run with an error naming them.
 - The regime at each moment comes from PointInTimeRegime: only data available at that moment.
@@ -47,6 +54,27 @@ from .strategies import MarketContext, Strategy, build_strategies
 
 log = logging.getLogger("backtest")
 FIVE_MIN = timedelta(minutes=5)
+SESSION_OPEN = time(9, 15)
+# Counter keys that describe data removed by the completeness rules, not skipped signals. They are
+# reported under "data_exclusions" instead of "skipped_signals".
+DATA_EXCLUSION_KEYS = ("SESSIONS_NO_BARS", "SESSIONS_INCOMPLETE", "DROPPED_MISSING_BAR_DURING_TRADE",
+                       "DROPPED_SESSION_ENDED_BEFORE_EXIT")
+
+
+def required_bar_starts(exit_time: time) -> tuple[time, ...]:
+    """IST start times of the 5-minute bars a usable intraday session must have: every bar that starts
+    at or after 09:15 and before the exit time (09:15 .. 15:10 for a 15:15 exit)."""
+    out, t = [], datetime.combine(date(2000, 1, 3), SESSION_OPEN)
+    while t.time() < exit_time:
+        out.append(t.time())
+        t += FIVE_MIN
+    return tuple(out)
+
+
+def session_complete(bars: list[Bar], required: tuple[time, ...]) -> bool:
+    """True if every required bar start is present in the session's bars."""
+    have = {b.start.astimezone(IST).time() for b in bars}
+    return all(t in have for t in required)
 
 
 @dataclass
@@ -96,6 +124,7 @@ class Engine:
         self.costs = CostModel(settings.costs)
         self.regime = regime or PointInTimeRegime(settings, store, self.calendar, source)
         self.cfg = settings.backtest
+        self.required_starts = required_bar_starts(hhmm(self.cfg.intraday_exit_time))
         self._five: dict[str, dict[date, list[Bar]]] = {}
         self._five_days: dict[str, list[date]] = {}
         self._daily: dict[str, list[Bar]] = {}
@@ -147,12 +176,18 @@ class Engine:
             return sorted(self.five(idx))
         return [bar_date(b) for b in self.daily(idx)]
 
+    def session_usable(self, bars: list[Bar]) -> bool:
+        """An intraday session can be traded only if no required 5-minute bar is missing."""
+        return bool(bars) and session_complete(bars, self.required_starts)
+
     # ---- fills ----
     def _segment(self, strategy: Strategy) -> str:
         return "intraday_equity" if strategy.horizon == "INTRADAY" else "delivery_equity"
 
     def _open(self, sig: Signal, bar: Bar, segment: str, skipped: Counter):
-        """Fill at the bar's open (+ slippage). Returns (fill, qty) or None."""
+        """Fill at the bar's open (+ slippage). Returns (fill, qty) or None.
+        Both the raw open and the final slipped fill must lie strictly between the stop and the target;
+        slippage is adverse, so it moves the fill toward the target."""
         o = bar.open
         if sig.direction == "LONG" and (o <= sig.stop or o >= sig.target):
             skipped["GAPPED_PAST_STOP_OR_TARGET"] += 1
@@ -161,6 +196,11 @@ class Engine:
             skipped["GAPPED_PAST_STOP_OR_TARGET"] += 1
             return None
         fill = self.costs.fill_price(segment, o, "BUY" if sig.direction == "LONG" else "SELL")
+        stop, target = Decimal(str(sig.stop)), Decimal(str(sig.target))
+        if (sig.direction == "LONG" and (fill <= stop or fill >= target)) or \
+                (sig.direction == "SHORT" and (fill >= stop or fill <= target)):
+            skipped["FILL_BEYOND_STOP_OR_TARGET"] += 1
+            return None
         qty = position_size(self.s.account.capital_inr, self.s.risk.max_loss_per_trade_pct,
                             self.cfg.position_cap_pct, float(fill), sig.stop)
         if qty < 1:
@@ -214,16 +254,23 @@ class Engine:
         data = self.five(sym)
         for d in sessions:
             bars = data.get(d, [])
-            prior = self.prior_sessions(sym, d, strategy.prior_sessions_needed) if bars else ()
+            if not bars:
+                skipped["SESSIONS_NO_BARS"] += 1
+                continue
+            if not self.session_usable(bars):
+                skipped["SESSIONS_INCOMPLETE"] += 1
+                continue
+            prior = self.prior_sessions(sym, d, strategy.prior_sessions_needed)
             pos = None   # (signal, entry fill, qty, entry time, entry index)
             for i, bar in enumerate(bars):
                 end = bar.start + FIVE_MIN
                 end_t = end.astimezone(IST).time()
                 if pos is not None:
                     sig, fill, qty, et, ei = pos
-                    if bar.start.astimezone(IST).time() >= exit_at:
-                        # the bar ending at the exit time is missing: leave at the first price after it
-                        trades.append(self._close(sig, seg, fill, qty, et, bar.open, bar.start, "EOD", strategy))
+                    if bar.start != bars[i - 1].start + FIVE_MIN or bar.start.astimezone(IST).time() >= exit_at:
+                        # a bar is missing inside the holding period (or the exit bar itself): the path is
+                        # unknown, so the trade is dropped rather than given an invented exit
+                        skipped["DROPPED_MISSING_BAR_DURING_TRADE"] += 1
                         pos = None
                     else:
                         hit = self._hit(sig.direction, bar, sig.stop, sig.target, i == ei)
@@ -250,10 +297,8 @@ class Engine:
                     if got:
                         pos = (sig, got[0], got[1], nxt.start, i + 1)
                     break
-            if pos is not None:   # data ended before the exit time
-                sig, fill, qty, et, ei = pos
-                trades.append(self._close(sig, seg, fill, qty, et, bars[-1].close,
-                                          bars[-1].start + FIVE_MIN, "EOD", strategy))
+            if pos is not None:   # data ended before the exit bar: no EOD exit from a truncated session
+                skipped["DROPPED_SESSION_ENDED_BEFORE_EXIT"] += 1
         return trades
 
     # ---- swing ----
@@ -404,6 +449,18 @@ def windows(sessions: list[date], size: int, step: int) -> list[list[date]]:
     return out
 
 
+def data_exclusions(skipped: Counter, settings: Settings) -> dict:
+    """What the intraday completeness rules removed (symbol-sessions and trades)."""
+    return {
+        "rule": (f"an intraday session is used only if it has every 5-minute bar from 09:15 up to the bar ending "
+                 f"{settings.backtest.intraday_exit_time} IST; a trade crossing a missing bar is dropped"),
+        "sessions_without_bars": skipped.get("SESSIONS_NO_BARS", 0),
+        "sessions_incomplete": skipped.get("SESSIONS_INCOMPLETE", 0),
+        "trades_dropped_missing_bar": skipped.get("DROPPED_MISSING_BAR_DURING_TRADE", 0),
+        "trades_dropped_session_ended": skipped.get("DROPPED_SESSION_ENDED_BEFORE_EXIT", 0),
+    }
+
+
 def build_report(strategy: Strategy, settings: Settings, costs: CostModel, source: str,
                  dev: list[date], hold: list[date], dev_trades: list[Trade], skipped: Counter,
                  hold_trades: list[Trade] | None, hold_skipped: Counter | None, symbols: int,
@@ -446,9 +503,12 @@ def build_report(strategy: Strategy, settings: Settings, costs: CostModel, sourc
             "evaluated": hold_trades is not None,
             "result": stats(hold_trades, cap, cfg.min_trades) if hold_trades is not None else
             "untouched - run with --holdout only once you have finished changing this strategy",
-            "skipped_signals": dict(hold_skipped) if hold_skipped is not None else None,
+            "skipped_signals": ({k: v for k, v in hold_skipped.items() if k not in DATA_EXCLUSION_KEYS}
+                                if hold_skipped is not None else None),
+            "data_exclusions": data_exclusions(hold_skipped, settings) if hold_skipped is not None else None,
         },
-        "skipped_signals": dict(skipped),
+        "skipped_signals": {k: v for k, v in skipped.items() if k not in DATA_EXCLUSION_KEYS},
+        "data_exclusions": data_exclusions(skipped, settings),
         "filtered_signals": dict(filtered or {}),
         "strategy_status": {"alerts": strategy.alerts_enabled, "mode": strategy.mode, "label": strategy.status_label},
         "round_trip_cost_pct": strategy.round_trip_cost_pct,
@@ -544,6 +604,13 @@ def main(argv: list[str] | None = None) -> int:
               f"  {o['sample_note']}")
         if r["filtered_signals"]:
             print(f"  filtered signals {r['filtered_signals']}")
+        if r["skipped_signals"]:
+            print(f"  skipped signals {r['skipped_signals']}")
+        if strat.interval == "5minute":
+            x = r["data_exclusions"]
+            print(f"  data exclusions: {x['sessions_incomplete']} incomplete and {x['sessions_without_bars']} empty "
+                  f"symbol-sessions; trades dropped: {x['trades_dropped_missing_bar']} missing bar, "
+                  f"{x['trades_dropped_session_ended']} session ended early")
         print(f"  saved {r['run_id']}")
     return 0
 

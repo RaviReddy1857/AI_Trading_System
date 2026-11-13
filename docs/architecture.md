@@ -336,6 +336,11 @@ Tests run offline. Anything needing the live broker goes behind the feed interfa
 4. User switches `account.mode` to `live_manual` for strategies that passed.
 5. Capital ladder governs increases; step-ups are judged per strategy.
 
+Backtest engine rules every phase reuses (`app/backtest.py`): entry at the next bar's open; no trade if the fill after
+slippage is at or beyond the stop or target; an intraday session is traded only if it has every 5-minute bar from 09:15
+to the bar ending at `backtest.intraday_exit_time`; a trade crossing a missing bar is dropped, never given an invented
+exit. Reports list `skipped_signals` and `data_exclusions`.
+
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).
 

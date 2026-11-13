@@ -221,8 +221,15 @@ class Costs(StrictModel):
         return v
 
 
+def _whole_5m_bars(v: int) -> int:
+    """An opening range is a whole number of 5-minute bars; 17 minutes would silently become 15."""
+    if v % 5:
+        raise ValueError(f"range_minutes must be a multiple of 5 (whole 5-minute bars), got {v}")
+    return v
+
+
 class OrbParams(StrictModel):
-    range_minutes: int = Field(15, ge=5, le=60)
+    range_minutes: Annotated[int, AfterValidator(_whole_5m_bars)] = Field(15, ge=5, le=60)
     breakout_buffer_pct: float = Field(0.05, ge=0, le=2)
     max_range_pct: float = Field(1.5, gt=0, le=10)       # skip days with a very wide opening range
     min_volume_mult: float = Field(1.2, ge=0, le=10)     # breakout bar volume vs opening-range average
@@ -270,7 +277,7 @@ class SwingBreakoutParams(StrictModel):
 class OrbV2Params(StrictModel):
     """Phase 3b. Opening range of range_minutes; a close beyond it on volume above min_volume_mult x the
     same time-of-day bar's average over the previous volume_lookback_sessions sessions."""
-    range_minutes: int = Field(30, ge=5, le=90)
+    range_minutes: Annotated[int, AfterValidator(_whole_5m_bars)] = Field(30, ge=5, le=90)
     min_volume_mult: float = Field(1.5, gt=0, le=10)
     volume_lookback_sessions: int = Field(20, ge=5, le=60)
     min_volume_sessions: int = Field(15, ge=1, le=60)    # sessions that must have the same time-of-day bar

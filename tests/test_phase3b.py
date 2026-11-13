@@ -246,7 +246,7 @@ def test_engine_gives_orb_v2_the_previous_sessions():
             days.append(d)
         d += timedelta(days=1)
     for d in days:
-        store.save_history_bars("bars_5m", five("TCS", [(1, 1, 1, 1, 1.0)] * 8, d=d), "sim")
+        store.save_history_bars("bars_5m", five("TCS", [(1, 1, 1, 1, 1.0)] * 72, d=d), "sim")   # full sessions
     eng = Engine(s, store, "sim", cal, regime=FixedRegime())
     eng.run(Spy(s.strategies.orb_v2, 0.187), days, [("TCS", "stock")])
     assert seen and min(seen) == 0 and max(seen) == 20
