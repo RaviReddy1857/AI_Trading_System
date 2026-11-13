@@ -312,6 +312,52 @@ class SwingBreakoutV2Params(SwingBreakoutParams):
     index_sma_days: int = Field(50, ge=2, le=400)
 
 
+# ---------------- phase 4: option strategies ----------------
+class LongOptionParams(StrictModel):
+    """Directional option buying: an intraday or swing signal on the underlying triggers buying a
+    near-the-money call (LONG trigger) or put (SHORT trigger). Stops and targets are % of the premium."""
+    trigger_strategies: list[str] = ["swing_pullback_v2", "orb_v2"]   # underlying strategies whose signals trigger a buy
+    max_iv_rank: float = Field(60.0, ge=0, le=100)            # buy only when IV rank is low or moderate
+    min_days_to_expiry: int = Field(7, ge=1, le=60)           # nearest expiry at least this many calendar days away
+    stop_pct_of_premium: float = Field(40.0, gt=0, lt=100)    # stop = premium x (1 - this%)
+    target_pct_of_premium: float = Field(80.0, gt=0, le=1000)  # target = premium x (1 + this%)
+    max_hold_days: int = Field(10, ge=1, le=60)               # sessions (swing triggers); intraday triggers exit the same day
+    stock_exit_days_before_expiry: int = Field(7, ge=5, le=30)   # stock options: out before expiry week (physical settlement)
+    index_exit_days_before_expiry: int = Field(0, ge=0, le=30)
+
+
+class CreditSpreadParams(StrictModel):
+    """Hedged credit spread on an index, monthly expiry: bull put spread in TRENDING_UP, bear call
+    spread in TRENDING_DOWN. Every sold option is paired with a bought option of the same expiry."""
+    min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when IV rank is high
+    max_short_delta: float = Field(0.20, gt=0, lt=0.5)        # |delta| of the sold strike at most this
+    hedge_width_pct: float = Field(1.0, gt=0, le=10)          # bought strike this % of spot further out (rounded to a strike)
+    entry_min_dte: int = Field(20, ge=1, le=90)               # calendar days to expiry at the signal
+    entry_max_dte: int = Field(35, ge=1, le=120)
+    min_credit_pct_of_width: float = Field(8.0, ge=0, le=100)  # skip if the credit is too thin for the risk
+    profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)   # close when this share of the credit is kept
+    stop_multiple_of_credit: float = Field(2.0, gt=1, le=10)  # close when buying back costs this x the credit
+    exit_days_before_expiry: int = Field(1, ge=0, le=30)      # out at the open of the first session this close to expiry
+
+    @model_validator(mode="after")
+    def window(self) -> "CreditSpreadParams":
+        if self.entry_min_dte > self.entry_max_dte:
+            raise ValueError("entry_min_dte cannot exceed entry_max_dte")
+        if self.exit_days_before_expiry >= self.entry_min_dte:
+            raise ValueError("exit_days_before_expiry must be below entry_min_dte")
+        return self
+
+
+class IronCondorParams(CreditSpreadParams):
+    """Iron condor on NIFTY weekly options: a bull put spread and a bear call spread together.
+    RANGE regime only (so never on an EVENT day)."""
+    max_short_delta: float = Field(0.15, gt=0, lt=0.5)
+    hedge_width_pct: float = Field(0.5, gt=0, le=10)
+    entry_min_dte: int = Field(3, ge=1, le=90)
+    entry_max_dte: int = Field(7, ge=1, le=120)
+    exit_days_before_expiry: int = Field(0, ge=0, le=30)
+
+
 class StrategyStatus(StrictModel):
     """Whether a strategy may produce alerts (phase 6) and in which mode, with a plain-language label
     from its backtest evidence. Strategies without an entry get no alerts and are paper-only."""
@@ -332,6 +378,9 @@ class Strategies(StrictModel):
     range_reversion_v2: RangeV2Params = RangeV2Params()
     swing_pullback_v2: SwingPullbackV2Params = SwingPullbackV2Params()
     swing_breakout_v2: SwingBreakoutV2Params = SwingBreakoutV2Params()
+    long_option: LongOptionParams = LongOptionParams()          # phase 4
+    credit_spread: CreditSpreadParams = CreditSpreadParams()
+    iron_condor: IronCondorParams = IronCondorParams()
 
     @model_validator(mode="after")
     def known_inactive(self) -> "Strategies":
@@ -370,6 +419,58 @@ class Backtest(StrictModel):
     test_start: dict[Literal["5minute", "1day"], _date] = {}
 
 
+class OptionUnderlying(StrictModel):
+    """One underlying whose options the system follows."""
+    expiries: list[Literal["weekly", "monthly"]] = ["monthly"]   # which expiries get a chain and signals
+    # Strike spacing assumed for EXPIRED contracts in backtests (the instrument list only has current
+    # contracts). Live strikes always come from the instrument list. None = try round steps near the price.
+    backtest_strike_step: float | None = Field(None, gt=0)
+    dividend_yield_pct: float = Field(0.0, ge=0, le=20)
+
+
+class OptionChainCfg(StrictModel):
+    refresh_seconds: int = Field(300, ge=30, le=3600)      # breeze mode: reload index chains this often in market hours
+    max_age_seconds: int = Field(900, ge=30, le=86400)     # a stored chain older than this is stale: no signal
+    max_spread_pct: float = Field(10.0, gt=0, le=100)      # a traded strike's bid-ask width, % of mid, at most this
+    min_open_interest_lots: int = Field(100, ge=0)         # a traded strike's open interest, in lots, at least this
+    request_pause_seconds: float = Field(0.7, ge=0, le=10)
+
+
+class OptionMargin(StrictModel):
+    csv: str = "data/margins.csv"                          # margins you copy from ICICI's margin calculator
+    max_age_days: int = Field(7, ge=1, le=90)              # an older entry counts as unknown
+
+
+class OptionBacktest(StrictModel):
+    """Option backtests (app/options/backtest.py). Trades are 1 lot each; sizing is phase 5."""
+    underlyings: dict[str, list[str]] = {                  # strategy id -> underlyings tested
+        "credit_spread": ["NIFTY", "BANKNIFTY"], "iron_condor": ["NIFTY"],
+        "long_option": ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "INFY", "SBIN"]}
+    start: dict[str, _date] = {}                           # strategy id -> first session tested (default backtest.test_start)
+    trigger: str = "swing_pullback_v2"                     # long_option: the daily-bar trigger that is backtested
+    max_requests_per_run: int = Field(1500, ge=0, le=5000)  # --download: stop asking Breeze after this many requests
+    strike_search_steps: int = Field(8, ge=1, le=30)       # how far the short-strike search may walk
+
+
+class Options(StrictModel):
+    """Phase 4. Implied volatility and delta are computed by code (Black-Scholes on the option's mid price)."""
+    risk_free_rate_pct: float = Field(6.5, ge=0, le=20)
+    iv_reference_symbol: str = "INDIAVIX"                  # index IV measure for IV rank (stocks: stored ATM IV history)
+    iv_rank_lookback_days: int = Field(252, ge=20, le=1000)
+    iv_rank_min_history_days: int = Field(200, ge=20, le=1000)
+    underlyings: dict[str, OptionUnderlying] = {}          # index underlyings; watchlist stocks use `stocks`
+    stocks: OptionUnderlying = OptionUnderlying()
+    chain: OptionChainCfg = OptionChainCfg()
+    margin: OptionMargin = OptionMargin()
+    backtest: OptionBacktest = OptionBacktest()
+
+    @model_validator(mode="after")
+    def consistent(self) -> "Options":
+        if self.iv_rank_min_history_days > self.iv_rank_lookback_days:
+            raise ValueError("options.iv_rank_min_history_days cannot exceed iv_rank_lookback_days")
+        return self
+
+
 class Settings(StrictModel):
     account: Account
     risk: Risk
@@ -384,6 +485,7 @@ class Settings(StrictModel):
     costs: Costs | None = None               # required by backtests (phase 3)
     strategies: Strategies = Strategies()
     backtest: Backtest = Backtest()
+    options: Options = Options()             # phase 4
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":
@@ -397,7 +499,25 @@ class Settings(StrictModel):
             sym = getattr(self.regime, name)
             if sym not in symbols:
                 raise ValueError(f"regime.{name} '{sym}' is not in the watchlist")
+        o = self.options
+        bad = sorted(set(o.underlyings) - symbols)
+        if bad:
+            raise ValueError(f"options.underlyings has symbols not in the watchlist: {bad}")
+        if o.iv_reference_symbol not in symbols:
+            raise ValueError(f"options.iv_reference_symbol '{o.iv_reference_symbol}' is not in the watchlist")
+        known = set(Strategies.model_fields) - {"inactive", "status"}
+        bad = sorted(set(self.strategies.long_option.trigger_strategies + [o.backtest.trigger]) - known)
+        if bad:
+            raise ValueError(f"unknown trigger strategy ids {bad}")
         return self
+
+    def option_underlying(self, symbol: str) -> "OptionUnderlying | None":
+        """Option settings for a watchlist symbol: its entry in options.underlyings, or options.stocks
+        for a stock. None for an index without an entry (for example INDIAVIX)."""
+        if symbol in self.options.underlyings:
+            return self.options.underlyings[symbol]
+        inst = next((i for i in self.watchlist if i.symbol == symbol), None)
+        return self.options.stocks if inst is not None and inst.kind == "stock" else None
 
     @property
     def is_live_feed(self) -> bool:

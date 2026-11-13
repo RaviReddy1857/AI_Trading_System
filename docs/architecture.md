@@ -104,9 +104,10 @@ trading_system/
                 orb_v2.py  range_reversion_v2.py             # phase 3b (v1 kept for comparison)
                 swing_pullback_v2.py  swing_breakout_v2.py
     costs.py  backtest.py                                    # phase 3 (PointInTimeRegime in regime.py)
-    options/    chain.py  payoff.py  analytics.py
+    options/    chain.py  payoff.py  analytics.py             # phase 4 (analytics.py also holds OptionDesk for the page)
                 long_option.py  credit_spread.py  iron_condor.py
-                greeks.py  option_history.py                 # phase 4: IV/delta by code; Breeze option history if available
+                base.py  greeks.py  option_history.py        # OptionContext and strike rules; IV/delta by code; Breeze option history
+                instruments.py  margin.py  backtest.py       # lot sizes/expiries from the broker list; manual margins; option backtests
                 stock_credit_spread.py  universe.py  shortlist.py  # phase 9 (built after phase 6)
     risk/       sizing.py  portfolio.py  limits.py  engine.py  # phase 5
     engine.py  scoring.py  paper.py  alerts.py  positions.py   # phase 6 (positions: exit calls, manual entry)
@@ -149,7 +150,9 @@ class Signal:          # phase 3 (app/models.py; validated on creation, see sign
     valid_until: datetime
     regime: str
     why_now: list[str]             # plain-language conditions that fired, with values
-    legs: list[OptionLeg] | None   # options only: action, right, strike, expiry, lots, price
+    legs: list[OptionLeg] | None   # options only: action, right, strike, expiry, lots, price, lot_size
+    details: dict | None           # options only (phase 4), for ONE lot: premium, lot size, total cost, max loss in
+                                   # rupees and % of capital, max profit, breakevens, costs, margin, warnings, exit rules
     data_as_of: datetime           # never later than created_at
     entry_zone: (low, high) | None # phase 3: optional acceptable fill range
     # entry = the signal bar's close (reference only); fills happen at the next bar's open at the earliest
@@ -178,6 +181,12 @@ class ResearchModel(Protocol):     # phase 8
     def complete(self, task: str, payload: dict, schema: dict) -> dict: ...
 ```
 
+Option strategies (phase 4) subclass `Strategy` as `OptionStrategy` and take an `OptionContext` (underlying, spot, regime,
+unexpired expiries with lot sizes, a `Quotes` provider, IV rank, the underlying's trigger signal, margin lookup). The same
+strategy code runs on live chain quotes (bid/ask) and on stored option history (last traded prices; `historical=True`).
+For a SPREAD signal, `entry` is the net credit per share and `stop` / `target` are the cost to buy the spread back.
+`strategy.last_no_trade` lists the reason codes of the last evaluation.
+
 `MarketContext` (phase 3: symbol, kind, asof, regime, intraday 5-minute bars of the session, daily bars, price status;
 phase 3b: `prior_sessions`, the previous sessions' 5-minute bars, and `index_daily`, the index's daily bars up to the signal
 day) carries what a strategy may see for one symbol at one moment; later phases add bias, events and option analytics.
@@ -194,6 +203,9 @@ A strategy must be a pure function of its context: same input, same output, no n
 - **NO_TRADE reason codes:** `DATA_STALE`, `DATA_MISSING`, `OUTSIDE_REGIME`, `ZERO_SIZE`, `RISK_BUDGET_USED`,
   `DAILY_STOP`, `MONTHLY_PAUSE`, `DRAWDOWN_PAUSE`, `MARGIN_UNKNOWN`, `LOT_SIZE_UNKNOWN`, `UNHEDGED_SHORT`,
   `EVENT_BEFORE_EXPIRY`, `EXPIRY_WEEK`, `KILL_SWITCH`, `SIGNAL_EXPIRED`
+- **Option NO_TRADE reason codes (phase 4):** `IV_RANK_UNKNOWN`, `IV_RANK_TOO_HIGH`, `IV_RANK_TOO_LOW`, `NO_TRIGGER`,
+  `NO_EXPIRY`, `NO_STRIKE`, `NO_CREDIT`, `CREDIT_TOO_SMALL`, `ILLIQUID`, `PREMIUM_TOO_SMALL`, `NO_WEEKLY_OPTIONS`,
+  `STOCK_OPTION_SELLING_NOT_ALLOWED` (phase 4: stock options are buy-only)
 - **Warnings (do not block):** `NEEDS_MORE_CAPITAL`, `TIGHT_CAPITAL`, `SECTOR_LIMIT`, `MAX_SPREADS`, `UNPROVEN`, `LOW_SAMPLE`
 
 ## 7. Data model (SQLite)
@@ -207,9 +219,12 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `events`, `holidays`, `fii_dii` | 2 | loaded from CSV files the user maintains (events: date, type, symbol, note; fii_dii: date, fii_net_cr, dii_net_cr) |
 | `backtest_runs`, `backtest_trades` | 3 | run_id, strategy_id, version, params_json, report_json; per-trade JSON. Reports also saved to `data/backtests/*.json` |
 | `history_floor` | 3 | table, symbol, source, floor_utc: the source has no data before this (backfill is not re-asked) |
-| `option_chain` | 4 | as_of_utc, underlying, expiry, strike, right, bid, ask, last, oi |
-| `option_bars` | 4 | underlying, expiry, strike, right, interval, start_utc, o/h/l/c, volume, oi, source: only if Breeze provides historical option prices (checked first in phase 4) |
-| `instruments` | 4 | underlying, lot_size, expiry list, as_of (read from broker list) |
+| `option_chain` | 4 | underlying, source, expiry, strike, right, as_of_utc, bid, ask, last, oi, oi_change, volume, spot. Rows with a missing or crossed bid/ask are quarantined, never stored. Snapshots older than 2 days are deleted |
+| `option_bars` | 4 | underlying, expiry, strike, right, interval, source, start_utc, o/h/l/c, volume, oi. Breeze provides historical option prices (trades only, no bid/ask): downloaded per contract on demand |
+| `option_fetch_log` | 4 | underlying, expiry, strike, right, interval, source, fetched_utc, rows: every contract asked for, also when nothing came back, so it is not asked for twice |
+| `option_expiries`, `option_expiry_misses` | 4 | underlying, source, expiry, kind (weekly/monthly): expiry dates of EXPIRED contracts, found from the option history itself; and the weeks/months searched without a result |
+| `instruments` | 4 | underlying, source, expiry, lot_size, kind (weekly/monthly), strikes_json, as_of_utc (current contracts, read from the broker's list; replaced on each refresh) |
+| `margins` | 4 | underlying, structure (CREDIT_SPREAD/IRON_CONDOR), width, margin_per_lot_inr, as_of (entered by the user) |
 | `signals` | 6 | signal_id, all Signal fields, RiskDecision fields, score, card_json |
 | `paper_trades` | 6 | signal_id, entry/exit time and price, costs, net_pnl, exit_reason |
 | `journal` | 6 | signal_id, decision (TOOK/SKIPPED), fill price, note, exit price |
@@ -237,8 +252,10 @@ Phase 3b adds `strategies.inactive`, the v2 strategy blocks, `backtest.holdout_s
 and `regime.ignore_5m_bar_starts` (stored 5-minute bars the backtest regime skips: Breeze's 15:15 and 15:20 bars).
 2026-11-13 adds `strategies.status` (per strategy: alerts on/off, paper_only/live, evidence label; every phase 3 cash strategy
 is set to no alerts, paper only, "negative in backtests").
-Later phases add: `options` (risk-free rate and dividend assumptions for IV/delta, option history settings), `position_cap_pct`
-(default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9: universe filters
+Phase 4 adds `strategies.long_option` / `credit_spread` / `iron_condor` (with `strategies.status` entries) and `options`
+(risk-free rate and dividend assumptions for IV/delta, IV-rank lookback, per-underlying expiries and backtest strike step,
+chain refresh/staleness/liquidity limits, margin file and maximum age, option backtest underlyings/start/request limit).
+Later phases add: `position_cap_pct` (default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9: universe filters
 min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
 max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,
 exit_days_before_expiry, recommended_capital_inr), `cutback`, `ladder`, `llm`, `go_live_gate`.
@@ -270,20 +287,29 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 - Universe for stock option selling: every NSE F&O stock in the broker's instrument list that passes the liquidity filters
   on the strikes to be traded (not limited to the watchlist).
 - Option backtests use stored Breeze option prices if they exist, else they are labelled "payoff simulation"; each is
-  compared with a no-filter baseline (the same structure every month or week, no entry rules).
+  compared with a no-filter baseline (the same structure every month or week, no entry rules). Phase 4 finding: Breeze
+  has them (expired contracts too, back to at least 2017, with volume and OI; trades only, no bid/ask), so breeze-source
+  option backtests use `option_bars`; only the sim source uses model prices. Every trade records its price source.
+- Margin is entered by the user from ICICI's margin calculator (`margins` table); Breeze's margin calculator is not a
+  data call and is not used. A spread without a current margin entry gives no signal (`MARGIN_UNKNOWN`).
+- IV rank: India VIX against its past year for an index; stored at-the-money implied volatility for a stock. Unknown
+  IV rank means no signal. Options are bought only at or below `max_iv_rank` and spreads sold only at or above `min_iv_rank`.
+- Sold strikes: |delta| at or below the limit (delta from the strike's own price) and, live, beyond the highest-OI strike.
+  In backtests the highest-OI rule is not applied (history has no chain-wide open interest).
 - Lot sizes and expiry dates are read from the broker's instrument list at run time. Never hardcode them.
 - Capital never hides a stock option selling signal; the card carries a capital-fit label instead.
 
 ## 10. HTTP routes
 
 Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, `/api/config` (phase 1);
-`/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options/{underlying}` (4);
+`/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options`,
+`/api/options/{underlying}` and the page `/options` (4);
 `/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
 `/api/stock-option-selling/shortlist` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
 `POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
-6; option legs and the UNHEDGED flag, 9), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries,
+6; option legs and the UNHEDGED flag, 9), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries (`margins`, phase 4),
 `POST /capital/log`. Route names avoid the forbidden word list (for example `alert-switches`, never `trade/`).
 
 Forbidden in any path: `order`, `execute`, `square`, `submit`, `trade/`. The safety test checks every route.
@@ -339,7 +365,13 @@ Tests run offline. Anything needing the live broker goes behind the feed interfa
 Backtest engine rules every phase reuses (`app/backtest.py`): entry at the next bar's open; no trade if the fill after
 slippage is at or beyond the stop or target; an intraday session is traded only if it has every 5-minute bar from 09:15
 to the bar ending at `backtest.intraday_exit_time`; a trade crossing a missing bar is dropped, never given an invented
-exit. Reports list `skipped_signals` and `data_exclusions`.
+exit. Daily-bar trades (swing, and option positions): a session the index traded for which the stock or an option leg
+has no bar is a missing bar; a position open across one is dropped, and a signal is entered only on the next market session.
+Reports list `skipped_signals` and `data_exclusions`.
+
+Option backtests (`app/options/backtest.py`) reuse these rules: signal at a day's close, entry at the next session's open
+of every leg with slippage per leg, spread exits decided on closes and filled at the next open, never held to settlement,
+one lot per trade at today's lot size (sizing is phase 5).
 
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).

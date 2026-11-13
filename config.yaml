@@ -186,6 +186,10 @@ strategies:
     range_reversion_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
     swing_pullback_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
     swing_breakout_v2: {alerts: false, mode: paper_only, label: "negative in backtests"}
+    # Phase 4 option strategies: no alerts; labels follow the option backtests (see docs/STATUS.md)
+    long_option: {alerts: false, mode: paper_only, label: "no edge vs baseline"}
+    credit_spread: {alerts: false, mode: paper_only, label: "no edge vs baseline (6 backtest trades: low sample)"}
+    iron_condor: {alerts: false, mode: paper_only, label: "UNPROVEN: 1 backtest trade, no track record"}
   orb:                          # opening-range breakout, intraday
     range_minutes: 15           # opening range = 09:15-09:30
     breakout_buffer_pct: 0.05   # close must clear the range by this %
@@ -256,6 +260,66 @@ strategies:
     reward_risk: 2.0
     max_hold_days: 10
     index_sma_days: 50
+  # ---- Phase 4: option strategies (index selling is hedged spreads only; stock options are buy-only) ----
+  long_option:                  # buy a near-the-money call/put when an underlying strategy signals
+    trigger_strategies: [swing_pullback_v2, orb_v2]
+    max_iv_rank: 60             # buy only when IV rank is low or moderate
+    min_days_to_expiry: 7
+    stop_pct_of_premium: 40
+    target_pct_of_premium: 80
+    max_hold_days: 10
+    stock_exit_days_before_expiry: 7   # stock options settle physically: out before expiry week
+    index_exit_days_before_expiry: 0
+  credit_spread:                # NIFTY / BANKNIFTY monthly: bull put (TRENDING_UP) or bear call (TRENDING_DOWN)
+    min_iv_rank: 50             # sell only when IV rank is high
+    max_short_delta: 0.20
+    hedge_width_pct: 1.0        # bought strike about 1% of spot further out
+    entry_min_dte: 20
+    entry_max_dte: 35
+    min_credit_pct_of_width: 8
+    profit_target_pct_of_credit: 50
+    stop_multiple_of_credit: 2.0   # close when buying the spread back costs 2x the credit
+    exit_days_before_expiry: 1
+  iron_condor:                  # NIFTY weekly, RANGE regime only
+    min_iv_rank: 50
+    max_short_delta: 0.15
+    hedge_width_pct: 0.5
+    entry_min_dte: 3
+    entry_max_dte: 7
+    min_credit_pct_of_width: 8
+    profit_target_pct_of_credit: 50
+    stop_multiple_of_credit: 2.0
+    exit_days_before_expiry: 0  # out at the open of expiry day at the latest
+
+# ---- Phase 4: options. Lot sizes and expiry dates are read from ICICI's instrument list, never from here. ----
+options:
+  risk_free_rate_pct: 6.5       # ASSUMPTION for Black-Scholes IV and delta (roughly the 91-day T-bill yield); not verified
+  iv_reference_symbol: INDIAVIX # index IV rank uses India VIX; stock IV rank uses stored ATM implied volatility
+  iv_rank_lookback_days: 252
+  iv_rank_min_history_days: 200
+  underlyings:
+    NIFTY:     {expiries: [weekly, monthly], backtest_strike_step: 100, dividend_yield_pct: 0}
+    BANKNIFTY: {expiries: [monthly], backtest_strike_step: 500, dividend_yield_pct: 0}
+  stocks: {expiries: [monthly], dividend_yield_pct: 0}   # every watchlist stock; buy-only in this phase
+  chain:
+    refresh_seconds: 300        # breeze mode: index chains are reloaded this often during market hours
+    max_age_seconds: 900        # an older chain is stale: no option signal
+    max_spread_pct: 10          # traded strikes need a bid-ask width within 10% of the mid price
+    min_open_interest_lots: 100
+    request_pause_seconds: 0.7
+  margin:
+    csv: data/margins.csv       # margins you copy from ICICI's margin calculator (see README)
+    max_age_days: 7
+  backtest:
+    underlyings:
+      credit_spread: [NIFTY, BANKNIFTY]
+      iron_condor: [NIFTY]
+      long_option: [NIFTY, BANKNIFTY]   # stocks: add e.g. RELIANCE, HDFCBANK and run with --download (their option history is only partly stored)
+    start:
+      iron_condor: 2024-01-01   # weekly option history is downloaded from here (extend if wanted)
+    trigger: swing_pullback_v2  # long_option backtests use this daily trigger (intraday triggers are not backtested)
+    max_requests_per_run: 1500
+    strike_search_steps: 8
 
 # ---- Phase 3: backtest and walk-forward ----
 backtest:

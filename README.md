@@ -1,4 +1,4 @@
-# Trading Research System - Phases 1-3: data feed, quality gate, market regime, strategies and backtests
+# Trading Research System - Phases 1-4: data feed, quality gate, market regime, strategies, backtests and options
 
 Research and suggestions only. **This app cannot place, change or close orders**,
 and a test fails the build if such code is ever added. You trade manually in ICICI Direct.
@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 300 passed
+python -m pytest -q          # should say 410 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -199,6 +199,84 @@ edge after costs and against random entries.
   ```
   Output goes to `data/diagnostics/`.
 
+## Phase 4: options
+Open http://127.0.0.1:8000/options ("Options view" at the top of the main page). Pick an underlying to see:
+- **Lot size and expiries**, read from ICICI's instrument list (never typed into the code or the config).
+- **Option chain** near the money: bid, ask, open interest and its change, and **implied volatility and delta computed by
+  code** (Black-Scholes on the bid/ask mid price; the 6.5% risk-free rate in `config.yaml` -> `options` is an assumption).
+- **Put-call ratio, support and resistance** (the highest-OI put and call strikes) and **IV rank** against the past year
+  (India VIX for NIFTY and BANKNIFTY; stored at-the-money implied volatility for a stock).
+- **Option ideas** from three strategies, each either a SIGNAL with every figure, or NO TRADE with the reason:
+
+| Strategy | Where | Rules in short |
+|---|---|---|
+| `long_option` | NIFTY, BANKNIFTY, stocks | Buy a near-the-money call/put when an underlying strategy signals; only when IV rank is 60 or lower; stop and target as % of premium. **Stock options are buy-only** and carry "exit before expiry week" (physical settlement) |
+| `credit_spread` | NIFTY, BANKNIFTY monthly | TRENDING_UP: bull put spread; TRENDING_DOWN: bear call spread. Only when IV rank is 50 or higher; sold strike at delta 0.20 or less and beyond the highest-OI strike; bought strike about 1% further out; 20-35 days to expiry |
+| `iron_condor` | NIFTY weekly | RANGE regime only (never an EVENT day); both sides at delta 0.15 or less, each hedged; 3-7 days to expiry |
+
+A signal shows premium (or net credit), lot size, total cost, **max loss in rupees and as % of capital**, max profit,
+breakeven(s), estimated costs and the margin blocked, all for **one lot** (the risk engine in phase 5 decides the quantity).
+There is **no signal** when the price is not LIVE, the option chain is older than 15 minutes, a strike has no bid/ask, the
+lot size is not in the instrument list, or the margin is not known. A sold option without its bought hedge is always
+rejected (`UNHEDGED_SHORT`), and selling stock options returns NO TRADE in this phase.
+`long_option` shows `NO_TRIGGER` until the live signal loop exists (phase 6). All three are set to **no alerts, paper only**.
+
+**Margin** is not fetched from ICICI (its margin calculator is not one of the read-only data calls this app allows itself).
+Copy the margin for ONE lot of the spread from ICICI Direct's margin calculator and paste it on the Options page, or keep
+it in `data/margins.csv`:
+```
+underlying,structure,width,margin_per_lot_inr,as_of
+NIFTY,CREDIT_SPREAD,250,38500,2026-11-13
+```
+`structure` is `CREDIT_SPREAD` or `IRON_CONDOR`; `width` is the distance between the sold and bought strike (the NO TRADE
+reason names the width it needs). An entry older than 7 days counts as unknown. Do not use the example figure: it is made up.
+
+**Chains.** In breeze mode the NIFTY and BANKNIFTY chains reload every 5 minutes during market hours. Stock chains load on request:
+```
+python -m app.options.chain                # NIFTY, BANKNIFTY now
+python -m app.options.chain RELIANCE TCS   # these stocks
+```
+Rows with a missing or crossed bid/ask are quarantined (listed under Data quality as `BAD_OPTION_QUOTE`) and never used.
+In sim mode the chain, lot sizes and expiries are FAKE (built from the simulated price) and labelled so.
+
+**Historical option prices: Breeze has them** (checked 2026-11-13 with `python scripts/check_option_history.py`): single
+contracts including expired ones, NIFTY, BANKNIFTY and stocks, back to at least 2017, as daily, 5-minute and 1-minute bars
+with volume and open interest. They are **traded prices only: there is no bid/ask in history**. So option backtests on your
+real data use these stored prices; only `--source sim` uses model prices and is then labelled **"payoff simulation"**.
+Every backtest trade records its price source.
+
+**Option backtests**, each beside a **no-filter baseline** (the same structure, strike rule, width, expiry choice, exits and
+costs, entered on a fixed schedule with no entry rules: every monthly expiry for spreads, every weekly expiry for the
+condor, the first session of each month for option buying; a credit spread has a bull-put and a bear-call baseline):
+```
+python -m app.options.backtest --download            # first time: fetches the option contracts it needs from Breeze (read-only)
+python -m app.options.backtest                       # later runs: stored prices only, no login needed
+python -m app.options.backtest --strategy credit_spread --underlyings NIFTY
+python -m app.options.backtest --source sim          # fake data, labelled SIMULATED and "payoff simulation"
+python -m app.options.option_history                 # what option history is stored
+python -m app.options.option_history --iv-history RELIANCE TCS   # at-the-money history so a stock gets an IV rank
+```
+Results show on http://127.0.0.1:8000/backtests with the price source, the baseline rows and a verdict: a strategy that
+does not beat its baseline per trade after costs (or loses money) is marked **"no edge vs baseline"**.
+How these backtests work:
+- A signal comes from a day's close; every leg is entered at the **next session's open**, with 0.5% slippage per leg.
+- Spreads are judged on closing prices (cost to buy back): target at 50% of the credit kept, stop at 2x the credit, and out
+  before expiry. The exit is filled at the next session's open, so a stop can fill well past 2x. Nothing is held to settlement.
+- A bought option uses its own daily high/low (stop first), with a time exit after 10 sessions.
+- **One lot per trade at today's lot size** (past lot sizes are not in the instrument list). At Rs 2,00,000 capital one lot
+  of most index spreads risks more than the 2.5% per-option limit, so phase 5 would size many of them to zero lots.
+- `--download` asks Breeze once per contract and remembers the answer, also when nothing came back; `--max-requests` (default
+  1500) limits one run and a later run resumes. A report says INCOMPLETE if contracts it wanted are not stored.
+- A trade is dropped, never given an invented price, if a leg has no bar for a session while it is open; an entry is skipped
+  if a leg has no bar that day, if the next day is not a market session, or if the opening credit is already outside the
+  stop/target band. The report counts each.
+- In backtests the highest-OI rule and the margin rule are not applied (history has open interest per contract only, and
+  past margins are unknown). The IV rank of a stock uses the stored at-the-money calls.
+- No session before 2019-01-22 is tested, and the holdout (from 2026-06-08) is not opened.
+
+**Swing backtests (issue 42).** A daily-bar trade is now dropped if the stock has no daily bar for a session the index
+traded while the trade was open (its stop or target may have been hit that day). On your data this removed no trade.
+
 ## Status values
 | Status | Meaning |
 |---|---|
@@ -222,13 +300,26 @@ edge after costs and against random entries.
 - `app/indicators.py` - SMA, EMA, ATR, daily return, percentile, breadth (pure functions)
 - `app/regime.py` - regime rules, FII bias, and the service that feeds them
 - `app/manual_data.py` - events, holidays and FII/DII CSV loading and import
+- `app/options/` - phase 4: `instruments.py` (lot sizes, expiries, strikes from ICICI's list), `chain.py` (option chains
+  and their quality gate), `greeks.py` (Black-Scholes price, implied volatility, delta, IV rank), `payoff.py` (max loss,
+  max profit, breakevens, hedge check), `margin.py` (your margin entries), `base.py` (option context and strike rules),
+  `long_option.py`, `credit_spread.py`, `iron_condor.py`, `option_history.py` (stored Breeze option prices, expiry
+  discovery), `backtest.py` (option backtests with the baseline), `analytics.py` (put-call ratio, highest-OI strikes, the Options page data)
+- `scripts/check_option_history.py` - the check of what option history Breeze provides
 - `app/main.py` - web server and API: `/health`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`,
   `/api/config`, `/api/regime`, and `POST /data/import/{fii_dii|events|holidays}` (writes only your data files;
-  JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`
+  JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`, `/api/options`, `/api/options/{underlying}` and
+  the page `/options`; `POST /data/import/margins` for your margin entries
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Options, live.** The option chain loader, the 5-minute background refresh and live option signals have not been seen
+  running in market hours (the code was written after the close on 2026-11-13); one manual chain request returned 60
+  strikes per side with bid, ask and OI. Spread signals also need your margin entries.
+- **Margin and max loss against ICICI.** Check one spread's max loss and margin by hand against ICICI's margin calculator.
+- **Option backtest evidence is thin for the filtered strategies** (few trades: see docs/STATUS.md, phase 4), the
+  highest-OI rule is not part of the backtests, lot sizes are today's, and intraday-triggered option buying is not backtested.
 - **No strategy has an edge yet.** Every v1 and v2 version loses after costs on the development period and none is
   better than random entries (docs/STATUS.md, phase 3b). The holdout has not been opened.
 - Breeze daily history before 2019-01-22 has price errors; swing tests skip it. Holidays before 2026 are not in

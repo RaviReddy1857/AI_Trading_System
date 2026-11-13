@@ -14,7 +14,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 3 | Intraday and swing strategies with backtests | Built and tested; backtests run on real Breeze data (all five lose after costs); costs not yet verified against a contract note | 259 passing (whole suite) | 2026-11-12 |
 | 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; rerun at Prime 4999 rates 2026-11-13: all v1 and v2 still lose after costs, none beats random; all set to no alerts, paper only, "negative in backtests"; holdout not opened | 300 passing (whole suite) | 2026-11-13 |
 | - | Backtest engine review fixes (Codex review of phase 3) | Fixed and tested; dev backtests and random baselines rerun; no conclusion changes; holdout not opened | 327 passing (whole suite) | 2026-11-13 |
-| 4 | Option strategies | Not started | | |
+| 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
@@ -576,6 +576,135 @@ Output: `data/diagnostics/bt_review4.txt`, `data/diagnostics/diag_review4.txt` a
 **Not tested:** the app was not started for this fix (the backtests page is covered by a TestClient test). Swing trades
 across a stock's missing daily bar are not checked (outside this review; open issue 42).
 
+## Phase 4: option strategies (2026-11-13)
+
+### Step 0: does Breeze provide historical option prices? Yes
+
+Checked with read-only calls (`get_historical_data_v2`, product type options) by `python scripts/check_option_history.py`
+(559 requests; output in `data/diagnostics/option_history_probe.json`, not tracked).
+
+| Question | Finding |
+|---|---|
+| Underlyings | NIFTY, BANKNIFTY and stocks (RELIANCE, HDFCBANK, INFY, SBIN tried): all return data |
+| Expired contracts | Available. The oldest month tried was June 2017: NIFTY, BANKNIFTY and SBIN have it; RELIANCE from June 2018, INFY from June 2019, HDFCBANK from June 2020 in this probe (older misses are probably my strike guess, not missing data) |
+| Intervals | Daily, 5-minute and 1-minute all work, also for 2017-2020 contracts |
+| How much of a contract | Daily bars for about 3 months before a monthly expiry (62 bars), about 4-5 weeks for a weekly |
+| Fields | open, high, low, close, volume, open_interest (present on nearly every row: 2,967 of 3,074 daily rows) |
+| Bid/ask | **Not available. History is traded prices only.** |
+| Weekly contracts | NIFTY weekly contracts are available (the 2026-10-13 weekly returned 20 daily and 265 five-minute bars) |
+| Expiry dates | Not listed anywhere for expired contracts. A wrong date returns nothing (or, once, a single stale bar), so the real date is found by trying: Thursdays until mid-2025, Tuesdays since, earlier on holidays |
+
+Consequence: option backtests on real data **must and do** use stored option prices (`option_bars`); each trade records
+`price_source: option_history`. Only the sim source uses Black-Scholes prices, and those reports say "payoff simulation".
+
+### Built
+- `app/feeds/breeze_feed.py`: `option_historical_raw` / `option_historical` (one contract's bars) and
+  `nfo_scrip_master_lines` (ICICI's F&O instrument list from the public SecurityMaster file). Data calls only; the SDK is
+  still imported only here. `option_chain` now logs in first.
+- `app/options/instruments.py`: lot size, expiries (weekly/monthly) and listed strikes per underlying from the instrument
+  list, stored in `instruments`. An expiry whose rows disagree on the lot size, a symbol not in the list, or a list older
+  than 5 days is UNKNOWN. Today's list: NIFTY lot 65, BANKNIFTY 30 (163 contract expiries for the 53 watchlist symbols).
+- `app/options/chain.py`: chain loader for NIFTY (two nearest expiries plus two nearest monthly), BANKNIFTY (monthly) and
+  stocks (monthly, on request). Rows with a missing, zero, negative or crossed bid/ask are quarantined
+  (`BAD_OPTION_QUOTE` in `quality_events`) and never stored. A snapshot older than 15 minutes is stale.
+- `app/options/greeks.py`: Black-Scholes price and delta, implied volatility by bisection, IV rank. Unknown inputs give None.
+- `app/options/payoff.py`: max loss, max profit and breakevens including costs for a long option, a credit spread and an
+  iron condor; `check_hedged` rejects any sold option without a bought option of the same expiry and right further out.
+- `app/options/margin.py`: margins entered by the user (`data/margins.csv`, or pasted on the Options page through
+  `POST /data/import/margins`). No entry, or one older than 7 days: `MARGIN_UNKNOWN`, no signal.
+- Strategies on the phase 3 interface (id, version from thresholds, status): `long_option`, `credit_spread`,
+  `iron_condor` (rules in README and in each file). Stock option selling returns NO TRADE
+  (`STOCK_OPTION_SELLING_NOT_ALLOWED`). Every signal carries, for one lot: premium or net credit, lot size, total cost, max
+  loss in rupees and % of capital, max profit, breakevens, costs, margin, IV rank, legs with IV and delta, warnings.
+- `app/options/option_history.py`: per-contract download into `option_bars` (same pacing, timeout and bar-quality rules as
+  stock history; an error reply is never recorded as "no data"; every contract asked for is remembered), expiry discovery
+  into `option_expiries`, model prices for the sim source, at-the-money IV history for stocks.
+- `app/options/backtest.py`: option backtests with the **no-filter baseline** (P4.10), reports saved like the others and
+  shown on `/backtests` with the price source, baseline rows and verdict.
+- `app/options/analytics.py`: put-call ratio, change in OI, highest-OI strikes, chain table with IV and delta, and
+  `OptionDesk` behind `GET /api/options`, `GET /api/options/{underlying}` and the page `/options`.
+- App: instrument list loaded daily, index chains refreshed every 5 minutes in market hours (breeze) or continuously (sim,
+  fake chain), option-chain snapshots older than 2 days deleted.
+- Config: `options` section and `strategies.long_option / credit_spread / iron_condor`, all validated.
+- **Issue 42**: see the open-issues table; `Engine.session_dates / sessions_between / next_session` are shared by the
+  option engine.
+
+### Option history stored (live file)
+NIFTY 1,764 contracts (70,020 daily bars), BANKNIFTY 807 (38,091), RELIANCE 229 (9,820), HDFCBANK 133 (5,792); expiries
+2019-01-31 to 2026-06-30. Expiries found: NIFTY 90 monthly and 99 weekly (2024 onward; one week, 2026-06-15, not found),
+BANKNIFTY 90 monthly. No bar was rejected by the quality rules. About 3,950 Breeze requests were used today in total.
+
+### Results on real data (development period; holdout from 2026-06-08 not opened; nothing tuned)
+Prime 4999 costs, options slippage 0.5% per leg per side, one lot per trade at today's lot size (NIFTY 65, BANKNIFTY 30).
+Final run from stored prices only, no contract missing for these three reports.
+
+| Strategy | Underlyings, period | | Trades | Win % | Net after costs (Rs) | Costs (Rs) | Max DD (Rs) | PF | Per trade (Rs) |
+|---|---|---|---|---|---|---|---|---|---|
+| credit_spread 1/cff9bd39 | NIFTY, BANKNIFTY monthly, 2019-01-22..2026-06-05 | strategy | 6 | 50.0 | -2,307 | 682 | 2,941 | 0.51 | -385 |
+| | | baseline (both sides) | 289 | 64.4 | -125,848 | 33,051 | 130,849 | 0.59 | -435 |
+| | | baseline bull put | 144 | 68.8 | -46,748 | | | 0.66 | |
+| | | baseline bear call | 145 | 60.0 | -79,099 | | | 0.53 | |
+| iron_condor 1/4b4dadcc | NIFTY weekly, 2024-01-01..2026-06-05 | strategy | 1 | 100 | +673 | 187 | 0 | - | +673 |
+| | | baseline | 110 | 69.1 | -16,771 | 21,375 | 25,762 | 0.77 | -152 |
+| long_option 1/556436ff | NIFTY, BANKNIFTY, 2019-01-22..2026-06-05 | strategy (trigger swing_pullback_v2) | 81 | 35.8 | -3,759 | 7,101 | 79,312 | 0.99 | -46 |
+| | | baseline (ATM call, first session of each month) | 153 | 39.2 | -1,011 | 15,142 | 272,448 | 1.00 | -7 |
+
+Verdicts: credit_spread **no edge vs baseline (LOW SAMPLE)**; iron_condor "beats baseline" on **one trade**, which is no
+evidence (labelled UNPROVEN); long_option **no edge vs baseline**. All three: no alerts, paper only (`strategies.status`).
+
+What it shows:
+- **The selling filters almost never fire** (issue 43): 6 credit spreads in 7.4 years and 1 condor in 2.4 years.
+- **The unfiltered spreads lose** (issue 44). Win rates are 64-69%, but a winner keeps about half the credit and a stopped
+  trade is bought back at 2.6-2.8x the credit on average (NIFTY: credit 25, buy-back 68), because the stop is decided at a
+  close and filled at the next open (worst cases: the June 2024 election gap and March 2026). Costs take Rs 106-134 per
+  spread, about a quarter of the baseline loss. By year the credit spread baseline lost most in 2022-2024 and 2026.
+- Option buying on the indices is about break-even before costs with or without the swing trigger; costs make both negative.
+- Skipped baseline entries (one attempt per expiry): credit spread 31 with the opening credit outside the stop/target band
+  and 27 with a non-session next day, of about 360 scheduled; 7 trades dropped for a missing leg bar.
+- **Stocks (incomplete, not a result)**: RELIANCE and HDFCBANK with the history stored so far gave strategy 35 trades,
+  -25,676, against baseline 81 trades, +130,546, but 149 contracts were still missing when the request limit was reached,
+  and INFY and SBIN were not downloaded (issue 45). Stocks were therefore taken out of the default run.
+
+### Tested (offline, `tests/test_phase4.py`, 83 tests; whole suite 410 passing)
+- ACCEPTANCE: no signal if bid/ask, lot size or margin is unknown (each strategy).
+- ACCEPTANCE: a single short leg without its hedge is rejected (wrong right, other expiry, not further out, too few lots).
+- ACCEPTANCE: stock option selling returns NO_TRADE; stock option buying carries the expiry-week warning and is not
+  bought inside expiry week.
+- ACCEPTANCE: model-priced backtests are labelled "payoff simulation"; every trade records its price source; never mixed.
+- ACCEPTANCE: with stored option history the backtest uses it: changing one fixture option bar changes the fill and the result.
+- ACCEPTANCE: every option report has the no-filter baseline for the same period, costs and price source.
+- ACCEPTANCE: no option backtest tests a session before 2019-01-22.
+- ACCEPTANCE: IV and delta match a hand calculation; lot sizes and expiries come from the instrument list (a revised
+  list changes the lot size; no lot-size or expiry literal in `app/options`).
+- Also: property-based payoff bounds (credit spread, condor, long option) and implied-volatility inversion; entry at the
+  next session's open, never the signal day; a spread trade reconciled to the paise by independent arithmetic; trades
+  crossing a missing option bar dropped; unknown lot size or unstored contracts give no trades and are counted;
+  chain quarantine and loader; stale chain, stale instrument list, missing spot; margin parsing, age and import;
+  option history fetch, cache, pacing, error and request-limit handling; expiry discovery with a holiday-shifted expiry;
+  iron condor only in RANGE; regime, IV-rank, liquidity and credit rules; config validation; routes, page and the margin
+  import route (safety tests pass); issue 42 (four cases).
+
+### Run here
+- `python scripts/check_option_history.py` (live, read-only), `python -m app.options.backtest --download` in four parts and
+  a final `python -m app.options.backtest` from stored data; `python -m app.options.backtest --source sim`.
+- Swing backtests rerun after the issue 42 fix: identical trades and net P&L for all four; 0 trades dropped.
+- App in sim mode on port 8001 (8000 was in use): `/options` 200, `/api/options` lists 52 underlyings,
+  `/api/options/NIFTY` showed spot LIVE, lot size and 7 expiries (fake sim contracts), three fresh chains with put-call
+  ratio, highest-OI strikes and ATM IV, IV rank 36, and three NO TRADE ideas with reasons (regime RANGE; IV rank below 50;
+  no trigger). `/backtests` 200. A bad margin paste was refused (400).
+- One live `get_option_chain_quotes` call after the close: 60 strikes per side with bid, ask, last and OI.
+
+### Not tested / known gaps
+- Live: background chain refresh, live IV rank, live ideas and the `BAD_OPTION_QUOTE` count in market hours (issue 47).
+- No margin has been entered, and max loss / margin have not been compared with ICICI's calculator (issue 46).
+- `long_option` needs a live trigger signal: it shows NO_TRIGGER until phase 6. Intraday-triggered buying is not backtested
+  (it needs 5-minute option bars). Put buying is not backtested (the daily trigger is long-only).
+- Backtests: highest-OI rule and margin rule not applied; today's lot sizes; daily bars only (the opening prices of two
+  legs are not simultaneous); BANKNIFTY strikes assumed on a 500-point grid and NIFTY on 100; stock IV rank from a fixed
+  set of at-the-money calls; one entry attempt per expiry.
+- Stock option backtests incomplete (issue 45). The combined sim-source option reports are payoff simulations on fake data.
+- `data/backtests/*_latest.json` holds the last run of each strategy, whatever its source.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -608,11 +737,18 @@ across a stock's missing daily bar are not checked (outside this review; open is
 | 35 | 3b | Backtest start-up wrote holidays to the database and failed while the app held the write lock | Fixed 2026-11-13: holidays read from the CSV, nothing written |
 | 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Waiting for user (default: both) |
 | 37 | plan | Meaning of "stop at 2x credit" for stock spreads | Waiting for user (default: buy-back cost reaches 2x credit) |
-| 38 | plan | Whether Breeze provides historical option prices | Open: first task of phase 4 (P4.9) |
+| 38 | plan | Whether Breeze provides historical option prices | Fixed 2026-11-13: yes (expired contracts too, to at least 2017, daily/5-minute/1-minute, volume and OI; trades only, no bid/ask). Option backtests use them |
 | 39 | review | Engine validated the raw open, not the slipped fill, against stop/target | Fixed 2026-11-13: fill after slippage checked (`FILL_BEYOND_STOP_OR_TARGET`); no real trade affected |
 | 40 | review | Incomplete intraday sessions were traded; a missing exit bar or truncated data gave invented EOD exits | Fixed 2026-11-13: sessions need every bar 09:15..15:10; trades crossing a missing bar are dropped; 50 symbol-sessions (2026-05-06) and 1 trade removed |
 | 41 | review | ORB range_minutes not a multiple of 5 was silently rounded down | Fixed 2026-11-13: rejected at config load |
-| 42 | review | Swing backtests do not check for a stock's missing daily bar inside a holding period (a day the index traded but the stock has no bar) | Open, low priority: outside this review; measure before phase 9 reuses the swing path |
+| 42 | review | Swing backtests do not check for a stock's missing daily bar inside a holding period (a day the index traded but the stock has no bar) | Fixed 2026-11-13 (phase 4): such a trade is dropped and counted (`DROPPED_MISSING_DAILY_BAR_DURING_TRADE`); a signal is entered only on the next market session. Real data: 0 trades affected, all four swing results identical. Option backtests use the same rule for every leg |
+| 43 | 4 | The filtered selling strategies almost never trade in backtests (credit spread 6 trades in 7.4 years, iron condor 1 in 2.4 years): "IV rank at or above 50" rarely coincides with a trending or RANGE regime, because a high VIX usually makes the regime VOLATILE | Waiting for user: decide whether to change the rule (any change is a new version and needs its own backtest) |
+| 44 | 4 | The no-filter spread baselines lose after costs (credit spread PF 0.59, condor PF 0.77): stops decided at the close fill at the next open at about 2.6-2.8x the credit, not 2x | Open: phase 9 uses the same exits; consider intraday stop checks on 5-minute option bars (Breeze has them) |
+| 45 | 4 | Stock option history only partly stored (RELIANCE, HDFCBANK partial; INFY, SBIN none): about 3,950 Breeze requests were used on 2026-11-13 and the download was stopped there | Waiting for user: add the stocks to `options.backtest.underlyings.long_option` and run `python -m app.options.backtest --strategy long_option --download` on another day |
+| 46 | 4 | Margin for spreads must be entered by hand (Breeze's margin calculator is not a data call); none entered yet, so every live spread idea shows MARGIN_UNKNOWN | Waiting for user |
+| 47 | 4 | Live option chain refresh, live IV rank and live option ideas not yet seen in market hours (built after the close) | Waiting for user: restart the app in breeze mode and open /options |
+| 48 | 4 | Risk-free rate 6.5% for IV/delta is an assumption; dividend yield 0 | Waiting for user (low impact on short-dated options) |
+| 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -664,4 +800,12 @@ across a stock's missing daily bar are not checked (outside this review; open is
 | 2026-11-13 | Backtest entries need both the raw open and the slipped fill strictly between stop and target |
 | 2026-11-13 | An intraday session is backtested only if it has every 5-minute bar 09:15..15:10 (to the exit bar); trades crossing a missing bar are dropped, never given an invented exit |
 | 2026-11-13 | ORB range_minutes must be a multiple of 5 |
+| 2026-11-13 | Phase 4: option backtests on the breeze source use stored Breeze option bars (traded prices); model prices only for the sim source, labelled "payoff simulation" |
+| 2026-11-13 | Phase 4: expiry dates of expired contracts are found from the option history itself (a date is an expiry if the at-the-money call with that expiry traded on that date); stock monthly expiries follow the index monthly expiry |
+| 2026-11-13 | Phase 4: backtest trades are one lot at today's lot size from the instrument list (past lot sizes are not in the list); sizing is phase 5 |
+| 2026-11-13 | Phase 4: IV rank = position of the current value between the past year's low and high; India VIX for indices, stored at-the-money implied volatility for stocks; unknown = no signal |
+| 2026-11-13 | Phase 4: margins are entered by the user (`data/margins.csv` or the Options page); Breeze's margin calculator is not used; unknown or older than 7 days = MARGIN_UNKNOWN |
+| 2026-11-13 | Phase 4: spread exits are decided at a close and filled at the next session's open; nothing is held to settlement; one entry attempt per expiry per stream |
+| 2026-11-13 | Phase 4: in backtests the highest-OI rule and the margin rule are not applied (not knowable for past dates); both are enforced live |
+| 2026-11-13 | Issue 42: a daily-bar trade open across a session with no bar for that stock is dropped, never given an exit from a later bar |
 | 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |

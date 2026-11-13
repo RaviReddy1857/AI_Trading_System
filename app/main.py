@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import uvicorn
 from dotenv import load_dotenv
@@ -19,7 +20,12 @@ from .history import BreezeHistorySource, HistoryLoader, seed_sim_history
 from .hub import MarketHub
 from .manual_data import KINDS, MAX_IMPORT_BYTES, ManualData
 from .models import utcnow
-from .page import BACKTEST_HTML, PAGE_HTML
+from .options.analytics import OptionDesk
+from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
+from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
+from .options.margin import import_margins, load_margin_file
+from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML
+from .quality import IST
 from .regime import RegimeService
 from .store import Store
 
@@ -35,6 +41,7 @@ def build_feed(settings: Settings):
 
 
 SAFE_METHODS = {"GET", "HEAD"}
+_CHAIN_KEEP = timedelta(days=2)      # option-chain snapshots older than this are deleted
 
 
 def allowed_hosts(port: int) -> set[str]:
@@ -80,6 +87,70 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     regime = RegimeService(settings, store, hub, calendar, manual)
     stop = threading.Event()
 
+    # ---- phase 4: options (read-only) ----
+    margin_errors = load_margin_file(settings, store)
+
+    def live_price(symbol: str):
+        q = hub.live_quote(symbol)
+        return q["last"] if q else None
+
+    def regime_name() -> str:
+        try:
+            return regime.evaluate()["regime"]
+        except Exception:
+            log.exception("regime evaluation failed")
+            return "UNKNOWN"
+
+    desk = OptionDesk(settings, store, feed.name, live_price, regime_name)
+    book = InstrumentBook(store, feed.name)
+    if feed.name == "breeze":
+        chain_source = BreezeChainSource(feed)
+    else:
+        chain_source = SimChainSource(live_price, lambda: live_price(settings.options.iv_reference_symbol),
+                                      settings.options.risk_free_rate_pct / 100)
+    chains = ChainLoader(settings, store, chain_source, book)
+
+    def load_instruments() -> int:
+        """Lot sizes, expiries and strikes: ICICI's instrument list (breeze) or fake sim contracts."""
+        if feed.name == "breeze":
+            n = refresh_from_broker(store, settings.watchlist)
+        else:
+            prices = {r["symbol"]: r["last"] for r in hub.snapshot() if r["last"]}
+            for inst in settings.watchlist:
+                if inst.symbol not in prices:
+                    bars = store.history_bars("bars_1d", inst.symbol, "sim", limit=1)
+                    if bars:
+                        prices[inst.symbol] = bars[0].close
+            weekly = {s for s, c in settings.options.underlyings.items() if "weekly" in c.expiries}
+            n = book.save(sim_specs({k: v for k, v in prices.items() if settings.option_underlying(k)},
+                                    utcnow().astimezone(IST).date(), calendar, utcnow(), weekly))
+        desk.book = InstrumentBook(store, feed.name)
+        chains.book = desk.book
+        log.info("instrument list loaded: %d contract expiries", n)
+        return n
+
+    def load_chains() -> dict:
+        symbols = None if feed.name == "breeze" else desk.underlyings()
+        res = chains.load(symbols)
+        store.prune_option_chain(feed.name, utcnow() - _CHAIN_KEEP)
+        return res
+
+    def options_loop() -> None:
+        loaded_on = None
+        while not stop.is_set():
+            try:
+                today = utcnow().astimezone(IST).date()
+                if loaded_on != today:
+                    load_instruments()
+                    loaded_on = today
+                if feed.name == "sim" or calendar.is_open(utcnow()):
+                    bad = [k for k, v in load_chains().items() if "error" in v]
+                    if bad:
+                        log.warning("option chains failed: %s", bad)
+            except Exception:
+                log.exception("option chain refresh failed")
+            stop.wait(settings.options.chain.refresh_seconds if loaded_on else 15)
+
     def history_job() -> None:
         try:
             summary = HistoryLoader(settings, store, BreezeHistorySource(feed, settings.history.request_timeout_seconds), calendar).update()
@@ -112,6 +183,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             if feed.name == "breeze" and hasattr(feed, "historical"):
                 threading.Thread(target=history_job, name="history", daemon=True).start()
             threading.Thread(target=regime_loop, name="regime", daemon=True).start()
+            threading.Thread(target=options_loop, name="options", daemon=True).start()
         yield
         stop.set()
         feed.stop()
@@ -130,6 +202,9 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     app.state.regime = regime
     app.state.store = store
     app.state.manual = manual
+    app.state.options = desk
+    app.state.load_instruments = load_instruments
+    app.state.load_chains = load_chains
 
     @app.get("/health")
     def health():
@@ -162,8 +237,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     @app.post("/data/import/{kind}")
     async def data_import(kind: str, request: Request):
         """Body: JSON {"text": "<pasted CSV>"}. Writes only the user's own data files."""
-        if kind not in KINDS:
-            raise HTTPException(404, f"unknown kind; use one of {list(KINDS)}")
+        if kind not in KINDS and kind != "margins":
+            raise HTTPException(404, f"unknown kind; use one of {list(KINDS) + ['margins']}")
         body = await request.body()
         if len(body) > MAX_IMPORT_BYTES + 1000:
             raise HTTPException(413, "pasted text is too large")
@@ -174,7 +249,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             raise HTTPException(400, 'body must be JSON like {"text": "..."}')
         text = payload["text"].lstrip("﻿")
-        result = manual.import_text(kind, text)
+        result = import_margins(settings, store, text) if kind == "margins" else manual.import_text(kind, text)
         return JSONResponse(result, status_code=200 if result["ok"] else 400)
 
     @app.get("/", response_class=HTMLResponse)
@@ -191,6 +266,23 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         if run is None:
             raise HTTPException(404, "unknown run_id")
         return run
+
+    @app.get("/api/options")
+    def options_index():
+        return {"underlyings": desk.underlyings(), "feed": feed.name, "margin_file_errors": margin_errors,
+                "instruments_as_of_utc": desk.book.as_of().isoformat() if desk.book.as_of() else None}
+
+    @app.get("/api/options/{underlying}")
+    def options_view(underlying: str):
+        """Option chain analytics and the option strategies' current ideas for one underlying. Read-only."""
+        sym = underlying.upper()
+        if sym not in desk.underlyings():
+            raise HTTPException(404, "unknown underlying; see /api/options")
+        return desk.view(sym)
+
+    @app.get("/options", response_class=HTMLResponse)
+    def options_page():
+        return OPTIONS_HTML
 
     @app.get("/backtests", response_class=HTMLResponse)
     def backtest_page():

@@ -65,7 +65,10 @@ class Signal:
     why_now: tuple[str, ...]
     data_as_of: datetime            # UTC: newest data the strategy saw
     entry_zone: tuple[float, float] | None = None
-    legs: tuple | None = None       # options only (phase 4)
+    legs: tuple | None = None       # options only (phase 4): OptionLeg (action, right, strike, expiry, lots, price)
+    # options only (phase 4): figures computed by code for ONE lot - premium, lot size, total cost,
+    # max loss in rupees and % of capital, max profit, breakevens, costs, margin, warnings
+    details: dict | None = None
 
     def __post_init__(self):
         problems = signal_problems(self)
@@ -85,7 +88,8 @@ class Signal:
             "entry_zone": list(self.entry_zone) if self.entry_zone else None,
             "valid_until": self.valid_until.isoformat(), "regime": self.regime,
             "why_now": list(self.why_now), "data_as_of": self.data_as_of.isoformat(),
-            "legs": list(self.legs) if self.legs else None,
+            "legs": [leg.to_dict() if hasattr(leg, "to_dict") else leg for leg in self.legs] if self.legs else None,
+            "details": self.details,
         }
 
 
@@ -128,4 +132,9 @@ def signal_problems(s: "Signal") -> list[str]:
         out.append("why_now must list at least one reason")
     if times_ok and s.data_as_of > s.created_at:
         out.append("data_as_of is later than created_at (look-ahead)")
+    if s.asset_class in ("INDEX_OPTION", "STOCK_OPTION"):
+        if not s.legs:
+            out.append("an option signal must list its legs")
+        if not isinstance(s.details, dict):
+            out.append("an option signal must carry its computed figures (details)")
     return out

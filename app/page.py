@@ -28,6 +28,7 @@ PAGE_HTML = """<!doctype html>
 <header><h1>Trading Research System</h1>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
  <a class="tag" href="/backtests">Backtest reports</a>
+ <a class="tag" href="/options">Options view</a>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
 <main>
  <div class="card" id="regime-card"><h2>Today's market type</h2>
@@ -133,7 +134,7 @@ BACKTEST_HTML = """<!doctype html>
 </style></head><body>
 <header><h1>Backtest reports</h1>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
- <a class="tag" href="/">Back to prices</a></header>
+ <a class="tag" href="/">Back to prices</a> <a class="tag" href="/options">Options view</a></header>
 <main>
  <div class="card"><h2>Latest run per strategy</h2>
   <div class="mute">Net results are after brokerage, taxes, charges and slippage. Entries fill at the next bar's open.
@@ -157,12 +158,26 @@ async function show(id){
  const h=rep.holdout; const hold=h.evaluated?row('holdout',h.result,h.from+' .. '+h.to):`<tr><td colspan="11" class="mute">${esc(h.from)} .. ${esc(h.to)}: ${esc(h.result)}</td></tr>`;
  document.getElementById('detail').innerHTML=`<div class="card"><h2>${esc(rep.strategy_id)} ${esc(rep.strategy_version)}</h2>
  <div class="badges">${stat(rep)}<span class="tag warn">${esc(rep.cost_label)}</span><span class="tag">${esc(rep.costs.plan)}</span>
- <span class="tag">source ${esc(rep.data_source)}</span>${rep.data_note?`<span class="tag warn">${esc(rep.data_note)}</span>`:''}</div>
- <div class="mute">${esc(rep.overall.sample_note)}.${rep.exposure?` Peak exposure: ${rep.exposure.max_open_trades} trades open, Rs ${fmt(rep.exposure.max_position_value_inr,0)} (${rep.exposure.max_position_value_pct_of_capital}% of capital).`:''} Regimes: ${esc(rep.allowed_regimes.join(', '))}. Skipped signals: ${esc(JSON.stringify(rep.skipped_signals))}${rep.data_exclusions&&rep.horizon==='INTRADAY'?` Data exclusions: ${rep.data_exclusions.sessions_incomplete} incomplete and ${rep.data_exclusions.sessions_without_bars} empty symbol-sessions not traded; trades dropped ${rep.data_exclusions.trades_dropped_missing_bar} (missing bar), ${rep.data_exclusions.trades_dropped_session_ended} (session ended early).`:''}</div>
+ <span class="tag">source ${esc(rep.data_source)}</span>${rep.kind==='option'?`<span class="tag ${rep.payoff_simulation?'warn':''}">${rep.payoff_simulation?'PAYOFF SIMULATION':'real option prices'}</span>`:''}${rep.data_note?`<span class="tag warn">${esc(rep.data_note)}</span>`:''}</div>
+ <div class="mute">${esc(rep.overall.sample_note)}.${rep.exposure?` Peak exposure: ${rep.exposure.max_open_trades} trades open, Rs ${fmt(rep.exposure.max_position_value_inr,0)} (${rep.exposure.max_position_value_pct_of_capital}% of capital).`:''} Regimes: ${esc(rep.allowed_regimes.join(', '))}. Skipped signals: ${esc(JSON.stringify(rep.skipped_signals))}${rep.data_exclusions&&rep.horizon==='INTRADAY'?` Data exclusions: ${rep.data_exclusions.sessions_incomplete} incomplete and ${rep.data_exclusions.sessions_without_bars} empty symbol-sessions not traded; trades dropped ${rep.data_exclusions.trades_dropped_missing_bar} (missing bar), ${rep.data_exclusions.trades_dropped_session_ended} (session ended early).`:''}${rep.data_exclusions&&rep.horizon!=='INTRADAY'&&rep.data_exclusions.trades_dropped_missing_daily_bar!==undefined?` Data exclusions: ${rep.data_exclusions.trades_dropped_missing_daily_bar} trade(s) dropped because the stock had no daily bar for a session while the trade was open.`:''}</div>
+${optionBlock(rep)}
  <h2 style="margin-top:12px">By regime</h2><table><thead><tr><th>Regime</th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${reg}</tbody></table>
  <h2 style="margin-top:12px">Walk-forward windows (fixed rules)</h2><table><thead><tr><th>Window</th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${wf}</tbody></table>
  <h2 style="margin-top:12px">Holdout</h2><table><tbody>${hold}</tbody></table>
  <ul>${rep.notes.map(n=>`<li class="mute">${esc(n)}</li>`).join('')}</ul></div>`;
+}
+function optionBlock(rep){
+ if(rep.kind!=='option') return '';
+ const b=rep.baseline, c=rep.comparison;
+ const variants=Object.entries(b.by_variant||{}).map(([k,o])=>row(esc(k),o,'')).join('');
+ const unders=Object.entries(rep.by_underlying||{}).map(([k,o])=>row('strategy on '+esc(k),o,'')).join('');
+ return `<div class="mute" style="margin-top:8px">Option prices: <b>${esc(rep.price_source_label)}</b>. Underlyings: ${esc((rep.underlyings||[]).join(', '))}. One lot per trade at today's lot size ${esc(JSON.stringify(rep.lot_sizes))}.</div>
+ <h2 style="margin-top:12px">Strategy against its no-filter baseline (same structure on a fixed schedule, no entry rules)</h2>
+ <div class="badges"><span class="badge ${c.verdict.startsWith('beats')?'TRENDING_UP':'VOLATILE'}">${esc(c.verdict.toUpperCase())}</span>
+ <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
+ <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead>
+ <tbody>${row('strategy',rep.overall,'')}${row('baseline (all)',b.overall,'')}${variants}${unders}</tbody></table>
+ <div class="mute">Baseline skipped: ${esc(JSON.stringify(b.skipped_signals))}; dropped for missing data: ${esc(JSON.stringify(b.data_exclusions))}. Strategy dropped for missing data: ${esc(JSON.stringify(rep.data_exclusions))}.${rep.download&&rep.download.contracts_wanted_but_not_stored?` <b class="down">INCOMPLETE: ${rep.download.contracts_wanted_but_not_stored} option contracts were wanted but are not stored (run with --download).</b>`:''}</div>`;
 }
 function stat(rep){
  const s=rep.strategy_status; if(!s) return '';
@@ -171,9 +186,109 @@ function stat(rep){
 async function load(){
  const r=await (await fetch('/api/backtests')).json(); const seen=new Set(); let html='';
  for(const run of r.runs){ if(seen.has(run.strategy_id))continue; seen.add(run.strategy_id); const rep=run.report;
-  html+=row(`<a href="#" onclick="show('${esc(run.run_id)}');return false">${esc(run.strategy_id)}</a><div>${stat(rep)}</div><div class="mute">${esc(rep.cost_label)}</div>`,
+  html+=row(`<a href="#" onclick="show('${esc(run.run_id)}');return false">${esc(run.strategy_id)}</a><div>${stat(rep)}</div><div class="mute">${esc(rep.cost_label)}</div>${rep.kind==='option'?`<div class="mute">${rep.payoff_simulation?'PAYOFF SIMULATION':'real option prices'}; baseline net Rs ${fmt(rep.baseline.overall.net_pnl_inr)} in ${rep.baseline.overall.trades} trades: <b>${esc(rep.comparison.verdict)}</b></div>`:''}`,
             rep.overall,(rep.period.from||'-')+' .. '+(rep.period.to||'-'));}
  document.getElementById('runs').innerHTML=html||'<tr><td colspan="11" class="mute">No backtests yet. Run python -m app.backtest</td></tr>';
 }
 load();
+</script></body></html>"""
+
+
+
+OPTIONS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Options View</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#16202a;--mute:#5b6875;--line:#dde2e8;--ok:#0a7a45;--bad:#b3261e;--warn:#9a6200}
+ @media (prefers-color-scheme:dark){:root{--bg:#11161c;--card:#1a212a;--ink:#e8edf2;--mute:#9aa7b4;--line:#2c3743;--ok:#4cc38a;--bad:#ff8a80;--warn:#f0b849}}
+ body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+ h1{font-size:18px;margin:0} h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600} h3{font-size:14px;margin:10px 0 4px}
+ .tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:2px 8px;color:var(--mute)}
+ .warn{color:var(--warn);border-color:var(--warn)}
+ main{padding:16px 20px;display:grid;gap:16px;max-width:1100px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+ table{border-collapse:collapse;width:100%} th,td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+ th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
+ .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
+ .badge{font-weight:700;font-size:13px;border-radius:6px;padding:3px 9px;border:2px solid currentColor}
+ .SIGNAL{color:var(--ok)} .NO_TRADE{color:var(--mute)} .mute{color:var(--mute);font-size:13px} .atm td{font-weight:700}
+ ul{margin:4px 0 0;padding-left:20px} li{margin:2px 0} .mid{text-align:center !important;font-weight:700}
+ textarea{width:100%;box-sizing:border-box;min-height:70px;font:13px ui-monospace,Consolas,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px}
+ select,button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+ details summary{cursor:pointer;color:var(--mute);font-size:13px;font-weight:600}
+ .idea{border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px}
+</style></head><body>
+<header><h1>Options view</h1>
+ <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
+ <a class="tag" href="/">Back to prices</a> <a class="tag" href="/backtests">Backtest reports</a>
+ <span class="tag" id="feed"></span></header>
+<main>
+ <div class="card"><h2>Underlying</h2>
+  <select id="sym"></select> <span class="mute" id="asof"></span>
+  <div class="kv" id="top" style="margin-top:8px"></div>
+  <div id="problems"></div>
+  <div class="mute" id="expiries" style="margin-top:6px"></div></div>
+ <div class="card"><h2>Option ideas (figures for ONE lot, computed by code)</h2><div id="ideas" class="mute">loading...</div></div>
+ <div class="card"><h2>Option chain: open interest, implied volatility and delta</h2><div id="chains" class="mute">loading...</div></div>
+ <div class="card"><h2>Margin for one lot (you enter it from ICICI Direct's margin calculator)</h2>
+  <table><thead><tr><th>Underlying</th><th>Structure</th><th>Width</th><th>Margin per lot (Rs)</th><th>As of</th><th>Usable</th></tr></thead><tbody id="margins"></tbody></table>
+  <p class="mute">A spread signal needs its margin here, otherwise it shows MARGIN_UNKNOWN. Paste CSV rows:
+  <code>underlying,structure,width,margin_per_lot_inr,as_of</code> with structure CREDIT_SPREAD or IRON_CONDOR and width = distance between the sold and bought strike.</p>
+  <textarea id="mtext" placeholder="underlying,structure,width,margin_per_lot_inr,as_of&#10;NIFTY,CREDIT_SPREAD,250,38500,2026-11-13"></textarea>
+  <button id="mbtn" type="button">Save margins</button> <span class="mute" id="mresult"></span></div>
+ <div class="card"><ul id="notes" class="mute"></ul></div>
+</main>
+<script>
+const f=(v,d=2)=>v===null||v===undefined?"-":Number(v).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d});
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function j(u){const r=await fetch(u);return r.json()}
+const sel=document.getElementById("sym");
+function side(x){return x?`<td>${f(x.oi,0)}</td><td>${f(x.oi_change,0)}</td><td>${f(x.iv_pct,1)}</td><td>${f(x.delta,2)}</td><td>${f(x.bid)}</td><td>${f(x.ask)}</td>`:"<td colspan=6 class=mute>no usable quote</td>"}
+function idea(i){
+ let h=`<div class="idea"><span class="badge ${i.status}">${i.status==="SIGNAL"?"SIGNAL":"NO TRADE"}</span> <b>${esc(i.strategy_id)}</b> <span class="mute">${esc(i.strategy_version)}</span>
+  <span class="tag warn">${esc(i.label)}</span><span class="tag">${i.alerts?"alerts on":"no alerts"}</span>`;
+ if(i.status!=="SIGNAL") return h+`<ul>${i.reasons.map(r=>`<li>${esc(r)}</li>`).join("")}</ul></div>`;
+ for(const s of i.signals){const d=s.details;
+  h+=`<h3>${esc(s.symbol)} ${esc(d.structure.replace("_"," "))}, expiry ${esc(d.expiry)} (${d.days_to_expiry} days, ${esc(d.expiry_kind)})</h3>
+  <table><thead><tr><th>Leg</th><th>Strike</th><th>Price</th><th>Bid</th><th>Ask</th><th>IV %</th><th>Delta</th><th>OI</th></tr></thead><tbody>
+  ${d.legs.map(l=>`<tr><td>${esc(l.action)} ${esc(l.right)}</td><td>${f(l.strike,0)}</td><td>${f(l.price)}</td><td>${f(l.bid)}</td><td>${f(l.ask)}</td><td>${f(l.iv_pct,1)}</td><td>${f(l.delta,2)}</td><td>${f(l.open_interest,0)}</td></tr>`).join("")}</tbody></table>
+  <div class="kv" style="margin-top:6px"><span>${d.net_credit!==undefined?"Net credit":"Premium"} per share: <b>${f(d.premium)}</b></span><span>Lot size: <b>${d.lot_size}</b></span>
+  <span>${d.net_premium_inr<0?"Total cost":"Credit received"}: <b>&#8377;${f(Math.abs(d.net_premium_inr))}</b></span>
+  <span>Max loss: <b class="down">&#8377;${f(d.max_loss_inr)}</b> (${f(d.max_loss_pct_of_capital)}% of capital)</span>
+  <span>Max profit: <b class="up">${d.max_profit_inr===null?"unlimited":"&#8377;"+f(d.max_profit_inr)}</b></span>
+  <span>Breakeven: <b>${d.breakevens.map(b=>f(b)).join(" / ")}</b></span>
+  <span>Margin blocked: <b>${d.margin_inr===null?"unknown":"&#8377;"+f(d.margin_inr)}</b> <span class="mute">${esc(d.margin_note)}</span></span>
+  <span>Est. costs: <b>&#8377;${f(d.costs_inr)}</b></span><span>IV rank: <b>${f(d.iv_rank,0)}</b></span></div>
+  ${d.warnings.map(w=>`<div class="down">${esc(w)}</div>`).join("")}
+  <ul>${s.why_now.map(r=>`<li>${esc(r)}</li>`).join("")}</ul>
+  <div class="mute">Entry reference ${f(s.entry)}, stop ${f(s.stop)}, target ${f(s.target)} (per share of the ${d.net_credit!==undefined?"spread":"option"}). Valid until ${new Date(s.valid_until).toLocaleTimeString()}. Estimate, not a forecast.</div>`;}
+ return h+"</div>";
+}
+async function load(){
+ const sym=sel.value; if(!sym) return;
+ try{
+  const v=await j("/api/options/"+encodeURIComponent(sym));
+  document.getElementById("asof").textContent="As of "+new Date(v.as_of_utc).toLocaleTimeString();
+  const feed=document.getElementById("feed"); feed.textContent=v.feed==="sim"?"SIMULATED option chain, not market data":"Feed: ICICI Breeze"; feed.className="tag"+(v.feed==="sim"?" warn":"");
+  document.getElementById("top").innerHTML=`<span>Spot: <b>${f(v.spot)}</b> <span class="${v.spot?"up":"down"}">${esc(v.spot_status)}</span></span><span>Regime: <b>${esc(v.regime)}</b></span>
+   <span>IV measure: <b>${f(v.iv.value_pct)}</b></span><span>IV rank: <b>${v.iv.rank===null?"unknown":f(v.iv.rank,0)}</b></span><span class="mute">${esc(v.iv.basis)} ${esc(v.iv.note)}</span>`;
+  document.getElementById("problems").innerHTML=v.problems.map(p=>`<div class="down">${esc(p)}</div>`).join("");
+  document.getElementById("expiries").innerHTML="Lot size and expiries from the instrument list"+(v.instruments_as_of_utc?" (read "+new Date(v.instruments_as_of_utc).toLocaleString()+")":"")+": "+(v.expiries.map(e=>`${esc(e.expiry)} ${esc(e.kind)} lot ${e.lot_size}`).join("; ")||"none");
+  document.getElementById("ideas").innerHTML=v.ideas.map(idea).join("")||"no option strategies for this symbol";
+  document.getElementById("chains").innerHTML=v.chains.map(c=>`<h3>${esc(c.expiry)} (${esc(c.kind)}, ${c.days_to_expiry} days, lot ${c.lot_size}) ${c.stale?'<span class="down">STALE or not loaded</span>':'<span class="up">fresh</span>'} <span class="mute">${c.as_of_utc?"snapshot "+new Date(c.as_of_utc).toLocaleTimeString():""}</span></h3>
+   <div class="kv"><span>Put-call ratio: <b>${f(c.put_call_ratio)}</b></span><span>Support (highest-OI put): <b>${f(c.support_highest_oi_put,0)}</b></span><span>Resistance (highest-OI call): <b>${f(c.resistance_highest_oi_call,0)}</b></span>
+   <span>OI change today: calls <b>${f(c.oi_change.calls,0)}</b>, puts <b>${f(c.oi_change.puts,0)}</b></span><span>ATM IV: <b>${f(c.atm_iv_pct,1)}%</b></span></div>
+   <details><summary>Strikes near the money (${c.rows_stored} quotes stored)</summary><table><thead><tr><th>Call OI</th><th>OI chg</th><th>IV %</th><th>Delta</th><th>Bid</th><th>Ask</th><th class="mid">Strike</th><th>Put OI</th><th>OI chg</th><th>IV %</th><th>Delta</th><th>Bid</th><th>Ask</th></tr></thead>
+   <tbody>${c.table.map(r=>`<tr>${side(r.ce)}<td class="mid">${f(r.strike,0)}</td>${side(r.pe)}</tr>`).join("")}</tbody></table></details>`).join("")||"no chain loaded";
+  document.getElementById("margins").innerHTML=v.margins.map(m=>`<tr><td>${esc(m.underlying)}</td><td>${esc(m.structure)}</td><td>${f(m.width,0)}</td><td>${f(m.margin_per_lot_inr)}</td><td>${esc(m.as_of)}</td><td class="${m.usable?"up":"down"}">${m.usable?"yes":"out of date"}</td></tr>`).join("")||"<tr><td colspan=6 class=mute>none entered for this underlying</td></tr>";
+  document.getElementById("notes").innerHTML=v.notes.map(n=>`<li>${esc(n)}</li>`).join("");
+ }catch(e){document.getElementById("asof").textContent="Server not reachable"}
+}
+document.getElementById("mbtn").onclick=async()=>{const out=document.getElementById("mresult");
+ try{const r=await fetch("/data/import/margins",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:document.getElementById("mtext").value})});
+  const x=await r.json();out.textContent=x.ok?`Saved ${x.rows_saved} row(s)`:("Not saved: "+(x.errors||[x.detail]).join("; "));out.className=x.ok?"up":"down";if(x.ok)load();
+ }catch(e){out.textContent="Import failed";out.className="down"}};
+(async()=>{const o=await j("/api/options");sel.innerHTML=o.underlyings.map(u=>`<option>${esc(u)}</option>`).join("");sel.onchange=load;load();setInterval(load,30000)})();
 </script></body></html>"""

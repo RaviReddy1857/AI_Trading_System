@@ -173,11 +173,30 @@ class BreezeFeed:
 
     def option_chain(self, breeze_code: str, expiry_iso: str, right: str) -> list[dict]:
         """right: call | put. expiry_iso like 2026-11-17T06:00:00.000Z"""
+        self.connect()
         resp = self._sdk.get_option_chain_quotes(
             stock_code=breeze_code, exchange_code="NFO", product_type="options",
             expiry_date=expiry_iso, right=right,
         )
-        return resp.get("Success") or []
+        return (resp or {}).get("Success") or []
+
+    def option_historical_raw(self, breeze_code: str, expiry_iso: str, strike: float, right: str,
+                              interval: str, from_iso: str, to_iso: str) -> dict:
+        """Historical bars of ONE option contract (read-only data call), the whole reply, so a caller
+        can tell 'no data' from an error. right: call | put."""
+        self.connect()
+        strike_text = str(int(strike)) if float(strike).is_integer() else str(strike)
+        resp = self._sdk.get_historical_data_v2(
+            interval=interval, from_date=from_iso, to_date=to_iso,
+            stock_code=breeze_code, exchange_code="NFO", product_type="options",
+            expiry_date=expiry_iso, right=right, strike_price=strike_text,
+        )
+        return resp if isinstance(resp, dict) else {"Success": None, "Error": f"unexpected reply: {resp!r}"}
+
+    def option_historical(self, breeze_code: str, expiry_iso: str, strike: float, right: str,
+                          interval: str, from_iso: str, to_iso: str) -> list[dict]:
+        return self.option_historical_raw(breeze_code, expiry_iso, strike, right, interval,
+                                          from_iso, to_iso).get("Success") or []
 
 
 # ---- instrument list (no login needed) ----
@@ -210,3 +229,15 @@ def nse_scrip_master() -> list[dict[str, str]]:
     name = sdk_config.ISEC_NSE_CODE_MAP_FILE["nse"]
     with sdk_module.zip.open(name) as f:
         return parse_scrip_master(io.TextIOWrapper(f, encoding="utf-8"))
+
+
+def nfo_scrip_master_lines() -> list[str]:
+    """Raw lines of ICICI's NSE F&O instrument list (FONSEScripMaster.txt in the same public
+    SecurityMaster.zip): every listed future and option contract with its expiry, strike, right
+    and lot size. No login, no order call. Parsed by app/options/instruments.py."""
+    from breeze_connect import breeze_connect as sdk_module
+    from breeze_connect import config as sdk_config
+
+    name = sdk_config.ISEC_NSE_CODE_MAP_FILE["nfo"]
+    with sdk_module.zip.open(name) as f:
+        return list(io.TextIOWrapper(f, encoding="utf-8"))

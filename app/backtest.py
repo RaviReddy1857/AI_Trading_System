@@ -14,6 +14,10 @@ Rules (CLAUDE.md, architecture.md section 14):
   required. Other sessions are not traded (counted in data_exclusions). A trade whose holding period
   crosses a missing bar, or whose session ends before the exit bar, is dropped, never closed at a
   made-up EOD price (a guard: with complete sessions it cannot happen).
+- Daily-bar (swing) trades: a session the index traded but the stock has no daily bar for is a
+  missing bar. A trade whose holding period crosses one is dropped (DROPPED_MISSING_DAILY_BAR_DURING_TRADE,
+  under data_exclusions): its stop or target may have been hit that day, so the outcome is unknown.
+  A signal whose next stock bar is not the next index session is not entered (NEXT_BAR_NOT_NEXT_SESSION).
 - Every trade pays brokerage, taxes and charges from config.yaml (app/costs.py). Empty rates stop
   the run with an error naming them.
 - The regime at each moment comes from PointInTimeRegime: only data available at that moment.
@@ -58,7 +62,7 @@ SESSION_OPEN = time(9, 15)
 # Counter keys that describe data removed by the completeness rules, not skipped signals. They are
 # reported under "data_exclusions" instead of "skipped_signals".
 DATA_EXCLUSION_KEYS = ("SESSIONS_NO_BARS", "SESSIONS_INCOMPLETE", "DROPPED_MISSING_BAR_DURING_TRADE",
-                       "DROPPED_SESSION_ENDED_BEFORE_EXIT")
+                       "DROPPED_SESSION_ENDED_BEFORE_EXIT", "DROPPED_MISSING_DAILY_BAR_DURING_TRADE")
 
 
 def required_bar_starts(exit_time: time) -> tuple[time, ...]:
@@ -129,6 +133,7 @@ class Engine:
         self._five_days: dict[str, list[date]] = {}
         self._daily: dict[str, list[Bar]] = {}
         self._daily_dates: dict[str, list[date]] = {}
+        self._session_dates: list[date] | None = None
 
     # ---- data ----
     def five(self, sym: str) -> dict[date, list[Bar]]:
@@ -175,6 +180,23 @@ class Engine:
         if strategy.interval == "5minute":
             return sorted(self.five(idx))
         return [bar_date(b) for b in self.daily(idx)]
+
+    def session_dates(self) -> list[date]:
+        """Every date the index has a daily bar for: the sessions that took place."""
+        if self._session_dates is None:
+            self._session_dates = sorted({bar_date(b) for b in self.daily(self.s.regime.index_symbol)})
+        return self._session_dates
+
+    def sessions_between(self, a: date, b: date) -> int:
+        """Number of sessions strictly between dates a and b. Above zero between two consecutive bars
+        of a symbol means that symbol has no bar for a day the market traded."""
+        dates = self.session_dates()
+        return max(0, bisect.bisect_left(dates, b) - bisect.bisect_right(dates, a))
+
+    def next_session(self, d: date) -> date | None:
+        dates = self.session_dates()
+        i = bisect.bisect_right(dates, d)
+        return dates[i] if i < len(dates) else None
 
     def session_usable(self, bars: list[Bar]) -> bool:
         """An intraday session can be traded only if no required 5-minute bar is missing."""
@@ -323,6 +345,11 @@ class Engine:
                     # prices after the break are in different units: the outcome is unknowable
                     skipped["DROPPED_DATA_BREAK_DURING_TRADE"] += 1
                     pos = None
+            if pos is not None and i > 0 and self.sessions_between(bar_date(bars[i - 1]), d) > 0:
+                # the market traded on a day this stock has no bar for: its stop or target may have
+                # been hit then, so the trade is dropped rather than given an exit from a later bar
+                skipped["DROPPED_MISSING_DAILY_BAR_DURING_TRADE"] += 1
+                pos = None
             if pos is not None:
                 sig, fill, qty, et, ei = pos
                 hit = self._hit(sig.direction, bar, sig.stop, sig.target, i == ei)
@@ -346,6 +373,9 @@ class Engine:
                     continue
                 if i + 1 in brk:
                     skipped["DATA_BREAK_AT_ENTRY"] += 1
+                    continue
+                if self.sessions_between(d, bar_date(nxt)) > 0:
+                    skipped["NEXT_BAR_NOT_NEXT_SESSION"] += 1
                     continue
                 got = self._open(sig, nxt, seg, skipped)
                 if got:
@@ -458,6 +488,9 @@ def data_exclusions(skipped: Counter, settings: Settings) -> dict:
         "sessions_incomplete": skipped.get("SESSIONS_INCOMPLETE", 0),
         "trades_dropped_missing_bar": skipped.get("DROPPED_MISSING_BAR_DURING_TRADE", 0),
         "trades_dropped_session_ended": skipped.get("DROPPED_SESSION_ENDED_BEFORE_EXIT", 0),
+        "daily_rule": "a daily-bar trade is dropped if the stock has no bar for a session the index traded "
+                      "while the trade was open",
+        "trades_dropped_missing_daily_bar": skipped.get("DROPPED_MISSING_DAILY_BAR_DURING_TRADE", 0),
     }
 
 
@@ -611,6 +644,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  data exclusions: {x['sessions_incomplete']} incomplete and {x['sessions_without_bars']} empty "
                   f"symbol-sessions; trades dropped: {x['trades_dropped_missing_bar']} missing bar, "
                   f"{x['trades_dropped_session_ended']} session ended early")
+        else:
+            print(f"  data exclusions: trades dropped for a missing daily bar while open: "
+                  f"{r['data_exclusions']['trades_dropped_missing_daily_bar']}")
         print(f"  saved {r['run_id']}")
     return 0
 

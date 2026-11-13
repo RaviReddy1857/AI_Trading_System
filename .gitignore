@@ -13,3 +13,6 @@ data/backtests/
 
 # diagnostic output (scripts/diagnostics)
 data/diagnostics/
+
+# SQLite rollback journals (left behind when a process is stopped mid-write)
+*.db-journal

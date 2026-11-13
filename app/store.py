@@ -52,6 +52,40 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 CREATE TABLE IF NOT EXISTS backtest_trades (
     run_id TEXT NOT NULL, n INTEGER NOT NULL, trade_json TEXT NOT NULL, PRIMARY KEY (run_id, n)
 );
+CREATE TABLE IF NOT EXISTS instruments (
+    underlying TEXT NOT NULL, source TEXT NOT NULL, expiry TEXT NOT NULL, lot_size INTEGER NOT NULL,
+    kind TEXT NOT NULL, strikes_json TEXT NOT NULL, as_of_utc TEXT NOT NULL,
+    PRIMARY KEY (underlying, source, expiry)
+);
+CREATE TABLE IF NOT EXISTS option_chain (
+    underlying TEXT NOT NULL, source TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
+    right TEXT NOT NULL, as_of_utc TEXT NOT NULL, bid REAL, ask REAL, last REAL, oi REAL,
+    oi_change REAL, volume REAL, spot REAL,
+    PRIMARY KEY (underlying, source, expiry, strike, right, as_of_utc)
+);
+CREATE TABLE IF NOT EXISTS option_bars (
+    underlying TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, right TEXT NOT NULL,
+    interval TEXT NOT NULL, source TEXT NOT NULL, start_utc TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL, oi REAL,
+    PRIMARY KEY (underlying, expiry, strike, right, interval, source, start_utc)
+);
+CREATE TABLE IF NOT EXISTS option_fetch_log (
+    underlying TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, right TEXT NOT NULL,
+    interval TEXT NOT NULL, source TEXT NOT NULL, fetched_utc TEXT NOT NULL, rows INTEGER NOT NULL,
+    PRIMARY KEY (underlying, expiry, strike, right, interval, source)
+);
+CREATE TABLE IF NOT EXISTS option_expiries (
+    underlying TEXT NOT NULL, source TEXT NOT NULL, expiry TEXT NOT NULL, kind TEXT NOT NULL,
+    found_utc TEXT NOT NULL, PRIMARY KEY (underlying, source, expiry)
+);
+CREATE TABLE IF NOT EXISTS option_expiry_misses (
+    underlying TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, period TEXT NOT NULL,
+    checked_utc TEXT NOT NULL, PRIMARY KEY (underlying, source, kind, period)
+);
+CREATE TABLE IF NOT EXISTS margins (
+    underlying TEXT NOT NULL, structure TEXT NOT NULL, width REAL NOT NULL,
+    margin_per_lot_inr REAL NOT NULL, as_of TEXT NOT NULL, PRIMARY KEY (underlying, structure, width)
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -314,3 +348,145 @@ class Store:
                 "SELECT regime,bias,basis,rules_version FROM regime_log WHERE session_date=?"
                 " ORDER BY id DESC LIMIT 1", (session_date.isoformat(),)).fetchone()
         return dict(zip(["regime", "bias", "basis", "rules_version"], r)) if r else None
+
+    # ---------------- phase 4: instruments, option chain, option history, margins ----------------
+    def replace_instruments(self, source: str, rows: list[tuple]) -> None:
+        """rows: (underlying, expiry iso, lot_size, kind, strikes list, as_of_utc iso). Replaces the
+        whole list for `source`: the broker's list only holds current contracts."""
+        self._guard(source)
+        with self._lock:
+            self._db.execute("DELETE FROM instruments WHERE source=?", (source,))
+            self._db.executemany(
+                "INSERT INTO instruments (underlying,source,expiry,lot_size,kind,strikes_json,as_of_utc)"
+                " VALUES (?,?,?,?,?,?,?)",
+                [(u, source, e, lot, kind, json.dumps(strikes), asof) for u, e, lot, kind, strikes, asof in rows])
+            self._db.commit()
+
+    def instruments(self, source: str, underlying: str | None = None) -> list[dict]:
+        sql = "SELECT underlying,expiry,lot_size,kind,strikes_json,as_of_utc FROM instruments WHERE source=?"
+        args: list = [source]
+        if underlying is not None:
+            sql += " AND underlying=?"
+            args.append(underlying)
+        with self._lock:
+            rows = self._db.execute(sql + " ORDER BY underlying, expiry", args).fetchall()
+        return [{"underlying": r[0], "expiry": date.fromisoformat(r[1]), "lot_size": r[2], "kind": r[3],
+                 "strikes": json.loads(r[4]), "as_of": _ts(r[5])} for r in rows]
+
+    def save_option_chain(self, source: str, rows: list[tuple]) -> int:
+        """rows: (underlying, expiry iso, strike, right, as_of_utc iso, bid, ask, last, oi, oi_change, volume, spot)."""
+        self._guard(source)
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO option_chain (underlying,source,expiry,strike,right,as_of_utc,bid,ask,"
+                "last,oi,oi_change,volume,spot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r[0], source, *r[1:]) for r in rows])
+            self._db.commit()
+        return len(rows)
+
+    def latest_option_chain(self, source: str, underlying: str, expiry: date) -> list[dict]:
+        """Rows of the newest stored snapshot for one underlying and expiry."""
+        with self._lock:
+            r = self._db.execute("SELECT MAX(as_of_utc) FROM option_chain WHERE underlying=? AND source=? AND expiry=?",
+                                 (underlying, source, expiry.isoformat())).fetchone()
+            if not r or not r[0]:
+                return []
+            rows = self._db.execute(
+                "SELECT strike,right,as_of_utc,bid,ask,last,oi,oi_change,volume,spot FROM option_chain"
+                " WHERE underlying=? AND source=? AND expiry=? AND as_of_utc=? ORDER BY strike, right",
+                (underlying, source, expiry.isoformat(), r[0])).fetchall()
+        keys = ["strike", "right", "as_of", "bid", "ask", "last", "oi", "oi_change", "volume", "spot"]
+        return [{**dict(zip(keys, x)), "as_of": _ts(x[2])} for x in rows]
+
+    def prune_option_chain(self, source: str, keep_after: datetime) -> int:
+        self._guard(source)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM option_chain WHERE source=? AND as_of_utc < ?",
+                                   (source, keep_after.isoformat()))
+            self._db.commit()
+        return cur.rowcount
+
+    def save_option_bars(self, source: str, underlying: str, expiry: date, strike: float, right: str,
+                         interval: str, bars: list[tuple], fetched: datetime) -> int:
+        """bars: (start_utc iso, open, high, low, close, volume, oi). Also records that this contract
+        was asked for (even when nothing came back), so it is not asked for again."""
+        self._guard(source)
+        key = (underlying, expiry.isoformat(), float(strike), right, interval, source)
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO option_bars VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(*key, *b) for b in bars])
+            self._db.execute("INSERT OR REPLACE INTO option_fetch_log VALUES (?,?,?,?,?,?,?,?)",
+                             (*key, fetched.isoformat(), len(bars)))
+            self._db.commit()
+        return len(bars)
+
+    def option_bars(self, source: str, underlying: str, interval: str = "1day") -> dict[tuple, list[tuple]]:
+        """Every stored bar of an underlying: (expiry, strike, right) -> [(start_utc, o, h, l, c, volume, oi)]."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT expiry,strike,right,start_utc,open,high,low,close,volume,oi FROM option_bars"
+                " WHERE underlying=? AND source=? AND interval=? ORDER BY start_utc",
+                (underlying, source, interval)).fetchall()
+        out: dict[tuple, list[tuple]] = {}
+        for r in rows:
+            out.setdefault((date.fromisoformat(r[0]), r[1], r[2]), []).append((_ts(r[3]), *r[4:]))
+        return out
+
+    def option_fetch_log(self, source: str, underlying: str, interval: str = "1day") -> dict[tuple, int]:
+        """(expiry, strike, right) -> rows received, for every contract already asked for."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT expiry,strike,right,rows FROM option_fetch_log WHERE underlying=? AND source=? AND interval=?",
+                (underlying, source, interval)).fetchall()
+        return {(date.fromisoformat(r[0]), r[1], r[2]): r[3] for r in rows}
+
+    def option_history_summary(self, source: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT underlying, interval, COUNT(DISTINCT expiry||'|'||strike||'|'||right), COUNT(*),"
+                " MIN(start_utc), MAX(start_utc), MIN(expiry), MAX(expiry) FROM option_bars WHERE source=?"
+                " GROUP BY underlying, interval ORDER BY underlying", (source,)).fetchall()
+        keys = ["underlying", "interval", "contracts", "bars", "first_bar", "last_bar", "first_expiry", "last_expiry"]
+        return [dict(zip(keys, r)) for r in rows]
+
+    def save_option_expiry(self, source: str, underlying: str, expiry: date, kind: str, found: datetime) -> None:
+        self._guard(source)
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO option_expiries VALUES (?,?,?,?,?)",
+                             (underlying, source, expiry.isoformat(), kind, found.isoformat()))
+            self._db.commit()
+
+    def option_expiries(self, source: str, underlying: str) -> list[tuple[date, str]]:
+        with self._lock:
+            rows = self._db.execute("SELECT expiry, kind FROM option_expiries WHERE underlying=? AND source=?"
+                                    " ORDER BY expiry", (underlying, source)).fetchall()
+        return [(date.fromisoformat(e), k) for e, k in rows]
+
+    def save_expiry_miss(self, source: str, underlying: str, kind: str, period: str, checked: datetime) -> None:
+        """A week or month in which no expiry was found (so it is not searched again)."""
+        self._guard(source)
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO option_expiry_misses VALUES (?,?,?,?,?)",
+                             (underlying, source, kind, period, checked.isoformat()))
+            self._db.commit()
+
+    def expiry_misses(self, source: str, underlying: str, kind: str) -> set[str]:
+        with self._lock:
+            rows = self._db.execute("SELECT period FROM option_expiry_misses WHERE underlying=? AND source=? AND kind=?",
+                                    (underlying, source, kind)).fetchall()
+        return {r[0] for r in rows}
+
+    def replace_margins(self, rows: list[tuple[str, str, float, float, str]]) -> None:
+        """rows: (underlying, structure, width, margin_per_lot_inr, as_of iso date)."""
+        with self._lock:
+            self._db.execute("DELETE FROM margins")
+            self._db.executemany("INSERT INTO margins VALUES (?,?,?,?,?)", rows)
+            self._db.commit()
+
+    def margins(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT underlying,structure,width,margin_per_lot_inr,as_of FROM margins"
+                                    " ORDER BY underlying, structure, width").fetchall()
+        return [{"underlying": r[0], "structure": r[1], "width": r[2], "margin_per_lot_inr": r[3],
+                 "as_of": date.fromisoformat(r[4])} for r in rows]
