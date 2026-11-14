@@ -178,8 +178,15 @@ function optionBlock(rep){
  <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
  <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead>
  <tbody>${row('strategy',rep.overall,'')}${row('baseline (all)',b.overall,'')}${variants}${unders}</tbody></table>
- ${bothWays(rep)}${policies(rep)}${effects(rep)}
+ ${bothWays(rep)}${policies(rep)}${effects(rep)}${reversals(rep)}
  <div class="mute">Baseline skipped: ${esc(JSON.stringify(b.skipped_signals))}; dropped for missing data: ${esc(JSON.stringify(b.data_exclusions))}. Strategy dropped for missing data: ${esc(JSON.stringify(rep.data_exclusions))}.${rep.download&&rep.download.contracts_wanted_but_not_stored?` <b class="down">INCOMPLETE: ${rep.download.contracts_wanted_but_not_stored} option contracts were wanted but are not stored (run with --download).</b>`:''}</div>`;
+}
+function reversals(rep){
+ const o=rep.reversal_outcomes; if(!o) return '';
+ const nl=o.new_low_afterwards;
+ return `<h2 style="margin-top:12px">Every confirmed reversal: what happened next <span class="tag warn">${esc(o.label)}</span></h2>
+ <div class="mute">${o.confirmations} confirmations in ${o.stocks} stocks (daily prices from 2019-01-22, development period). New low within ${nl.within_sessions} sessions: <b>${fmt(nl.share_pct,1)}%</b> of ${nl.cases} cases${nl.low_sample?' <b class="STALE">LOW SAMPLE</b>':''}.</div>
+ <table><thead><tr><th>Sessions later</th><th>Cases</th><th>Median %</th><th>Mean %</th><th>25th pct</th><th>75th pct</th><th>Worst %</th><th>Best %</th><th>Up in % of cases</th><th>Sample</th></tr></thead><tbody>${o.outcomes.map(r=>`<tr><td>${r.sessions}</td><td>${r.cases}</td><td>${fmt(r.median_pct)}</td><td>${fmt(r.mean_pct)}</td><td>${fmt(r.p25_pct)}</td><td>${fmt(r.p75_pct)}</td><td>${fmt(r.worst_pct)}</td><td>${fmt(r.best_pct)}</td><td>${fmt(r.up_pct_of_cases,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}</tbody></table>`;
 }
 function policies(rep){
  const pc=rep.exit_policy_comparison; if(!pc) return '';
@@ -356,6 +363,9 @@ SHORTLIST_HTML = """<!doctype html>
  <div class="card"><h2>Stock profile and scenario history <span class="tag warn">history, not a forecast</span></h2>
   <select id="psym"></select> <span class="mute">daily bars from 2019-01-22 only</span>
   <div id="prof" class="mute" style="margin-top:8px">Pick a stock.</div></div>
+ <div class="card"><h2>Reversal watch <span class="tag warn">watch only, never a signal</span></h2>
+  <div class="mute" id="revnote"></div>
+  <table><thead><tr><th>Stock</th><th>State</th><th>Close</th><th>Below 52-week high</th><th>Base low</th><th>Stall zones (prior breakdown levels)</th><th style="text-align:left">Detail</th></tr></thead><tbody id="rev"></tbody></table></div>
  <div class="card"><h2>Campaigns (an original trade and its rolls)</h2>
   <table><thead><tr><th>Stock</th><th>Side</th><th>Rolls</th><th>Realised P&amp;L</th><th>Hedge cost paid</th><th>Charges</th><th>Best possible outcome</th><th style="text-align:left">Note</th></tr></thead><tbody id="camps"></tbody></table></div>
  <div class="card"><h2>Not on the list today, and why</h2>
@@ -384,6 +394,10 @@ async function profile(sym){
  document.getElementById("asof").textContent=r.session_date?`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`:"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
  document.getElementById("note").textContent=r.note+" Weights: "+JSON.stringify(r.weights)+".";
  const top=r.rows.filter(x=>x.status==="SHORTLISTED"), rest=r.rows.filter(x=>x.status!=="SHORTLISTED");
+ const rv=await (await fetch("/api/stock-option-selling/reversals")).json();
+ document.getElementById("revnote").textContent=rv.note+(rv.alerts_approved?"":" Alerts: not approved.")+(rv.session_date?` Session ${rv.session_date}.`:"");
+ const cand=c=>c.trade?`<b>${esc(c.candidate)}</b>: ${esc(c.trade.why_now.slice(1,3).join("; "))}`:`<b>${esc(c.candidate)}</b>: no trade (${esc((c.reasons||[]).join("; "))})`;
+ document.getElementById("rev").innerHTML=rv.rows.map(x=>`<tr><td>${esc(x.stock)}</td><td><span class="tag ${x.state==="REVERSAL_CONFIRMED"?"warn":""}">watch: ${esc(x.state.replace(/_/g," ").toLowerCase())}</span></td><td>${f(x.close)}</td><td>${f(x.drawdown_pct)}%</td><td>${f(x.base_low)}</td><td>${(x.stall_zones||[]).map(f).join(", ")||"-"}</td><td style="text-align:left;white-space:normal">${x.confirmed_on?`REVERSAL_CONFIRMED on ${esc(x.confirmed_on)}: ${x.reasons.map(esc).join("; ")}<br>${x.candidates.map(cand).join("<br>")}`:""}</td></tr>`).join("")||'<tr><td colspan="7" class="mute">no stock is washed out today</td></tr>';
  const cs=await (await fetch("/api/stock-option-selling/campaigns")).json();
  document.getElementById("camps").innerHTML=cs.campaigns.map(c=>`<tr><td>${esc(c.stock)}</td><td>${side(c.side)}</td><td>${c.rolls}</td><td>${f(c.realised_pnl_inr)}</td><td>${f(c.hedge_cost_inr)}</td><td>${f(c.charges_inr)}</td><td>${f(c.best_possible_outcome_inr)}</td><td style="text-align:left" class="${c.message?'down':''}">${esc(c.message||(c.open?'open':'closed'))}</td></tr>`).join("")||`<tr><td colspan="8" class="mute">${esc(cs.note)}</td></tr>`;
  const ps=document.getElementById("psym"); ps.innerHTML='<option value="">-</option>'+(r.stocks||[]).map(s=>`<option>${esc(s)}</option>`).join(""); ps.onchange=()=>ps.value&&profile(ps.value);

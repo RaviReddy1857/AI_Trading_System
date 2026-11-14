@@ -599,6 +599,43 @@ def test_a_breeze_error_stops_all_downloading_and_is_never_stored_as_no_data():
     assert store.option_fetch_log("breeze", "RELIANCE") == {}
 
 
+def test_a_request_with_no_reply_is_repeated_but_an_error_reply_from_breeze_is_not():
+    import app.options.option_history as oh
+
+    class Flaky:
+        def __init__(self, fail):
+            self.fail, self.calls = fail, 0
+
+        def option_historical_raw(self, *a):
+            self.calls += 1
+            if self.calls <= self.fail:
+                raise TimeoutError("no reply within 60 s")
+            return {"Success": [{"datetime": "2025-07-10 00:00:00", "open": 1, "high": 2, "low": 1, "close": 2,
+                                 "volume": 1, "open_interest": 1}], "Status": 200, "Error": None}
+
+    sleeps = []
+    feed = Flaky(2)
+    f = oh.BreezeOptionFetcher(feed, {"RELIANCE": "RELIND"}, 0, 5, 1, 3.0, 100, sleep=sleeps.append)
+    assert len(f.fetch("RELIANCE", date(2025, 7, 29), 1100, "PE")) == 1
+    assert feed.calls == 3 and f.requests == 3 and sleeps == [3.0, 3.0]        # two timeouts, then the reply; all counted
+    dead = Flaky(99)
+    f2 = oh.BreezeOptionFetcher(dead, {"RELIANCE": "RELIND"}, 0, 5, 1, 0, 100, sleep=lambda x: None)
+    hist = OptionHistory(Store(":memory:"), "breeze", f2, now=NOW)
+    assert hist.contract("RELIANCE", date(2025, 7, 29), 1100, "PE") is None
+    assert dead.calls == 3 and "TimeoutError" in hist.error and "after 3 attempts" in hist.error
+    # an error reply (expired session) is not asked again: one request, and the download stops
+    expired = PagedFeed([], 1000, error_after=0)
+    f3 = oh.BreezeOptionFetcher(expired, {"RELIANCE": "RELIND"}, 0, 5, 1, 0, 100, sleep=lambda x: None)
+    hist3 = OptionHistory(Store(":memory:"), "breeze", f3, now=NOW)
+    assert hist3.contract("RELIANCE", date(2025, 7, 29), 1100, "PE") is None
+    assert len(expired.calls) == 1 and "Session key is expired" in hist3.error
+    # the retries never go past the request budget
+    f4 = oh.BreezeOptionFetcher(Flaky(99), {"RELIANCE": "RELIND"}, 0, 5, 1, 0, 2, sleep=lambda x: None)
+    with pytest.raises(oh.RequestBudgetUsed):
+        f4.fetch("RELIANCE", date(2025, 7, 29), 1100, "PE")
+    assert f4.requests == 2
+
+
 def test_the_daily_request_budget_is_counted_across_runs_and_resets_the_next_day(s):
     store = Store(":memory:")
     small = settings(options={"backtest": {**s.options.backtest.model_dump(), "daily_request_budget": 5}})

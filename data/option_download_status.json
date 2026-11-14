@@ -13,9 +13,23 @@
       "stock_years_completed_this_run": 1,
       "requests_this_run": 150,
       "requests_used_today": 150
+    },
+    {
+      "at": "2026-11-14T01:42:47+00:00",
+      "stopped": "Breeze error: TimeoutError: no reply within 60 s",
+      "stock_years_completed_this_run": 0,
+      "requests_this_run": 1,
+      "requests_used_today": 700
+    },
+    {
+      "at": "2026-11-14T01:51:52+00:00",
+      "stopped": "request budget used",
+      "stock_years_completed_this_run": 1,
+      "requests_this_run": 40,
+      "requests_used_today": 740
     }
   ],
-  "updated": "2026-11-14T01:13:06+00:00",
+  "updated": "2026-11-14T01:51:52+00:00",
   "stocks": [
     "HDFCBANK",
     "RELIANCE",
@@ -47,5 +61,6 @@
     "NTPC",
     "TITAN",
     "ULTRACEMCO"
-  ]
+  ],
+  "plan": 3
 }

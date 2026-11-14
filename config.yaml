@@ -192,6 +192,9 @@ strategies:
     iron_condor: {alerts: false, mode: paper_only, label: "UNPROVEN: 1 backtest trade, no track record"}
     # Phase 9 (core only so far): no alerts until the cards and paper tracking exist (after phase 6)
     stock_option_selling: {alerts: false, mode: paper_only, label: "UNPROVEN: no track record yet"}
+    # Reversal candidates: watch only. Nothing alerts until you approve it (also stock_option_selling.reversal.alerts_approved)
+    reversal_put_spread: {alerts: false, mode: paper_only, label: "WATCH ONLY: awaiting your approval"}
+    reversal_bull_call_spread: {alerts: false, mode: paper_only, label: "WATCH ONLY: awaiting your approval"}
   orb:                          # opening-range breakout, intraday
     range_minutes: 15           # opening range = 09:15-09:30
     breakout_buffer_pct: 0.05   # close must clear the range by this %
@@ -365,6 +368,31 @@ stock_option_selling:
     stuck_time_value_pct: 10    # stuck: sold option in the money with time value under 10% of its price (ASSUMPTION)
     pre_expiry_window_days: 10  # stuck: this close to expiry (ASSUMPTION)
     max_days_to_expiry: 65      # a roll may use the next monthly expiry up to this far away (a new entry stops at 35) (ASSUMPTION)
+  reversal:                     # reversal detector for washed-out stocks: a watch list and candidates, never a signal
+    enabled: true
+    alerts_approved: false      # no reversal alert is produced until you set this to true
+    drawdown_pct: 30            # washed out: more than 30% below the 52-week high ... (ASSUMPTION)
+    min_months: 3               # ... on every session for 3 months, and below the 200-day average (ASSUMPTION)
+    high_lookback_sessions: 252
+    base_no_new_low_sessions: 15     # base forming: no new low for 15 sessions ... (ASSUMPTION)
+    range_sessions: 10               # ... and the average daily high-low range of the last 10 sessions
+    range_compare_sessions: 30       # compared with the 30 sessions before those
+    range_shrink_ratio: 0.85         # at most 85% of that earlier average (ASSUMPTION)
+    base_valid_sessions: 10          # the confirmation must come within 10 sessions of a base-forming day
+    confirm_sma_days: 20             # confirmed: close above the 20-day average and above the last swing high,
+    volume_sma_days: 20              # volume above its 20-day average,
+    relative_return_sessions: 10     # and the 10-session return ahead of NIFTY
+    swing_pct: 5                     # a swing high / breakdown level needs a 5% move (ASSUMPTION)
+    lift_sessions: 20                # the falling-stock block is lifted for 20 sessions, only for put spreads below the base low
+    rearm_sessions: 40               # one confirmation per stock in 40 sessions
+    outcome_sessions: [10, 20, 40]
+    bull_call:                       # candidate 1: buy the call nearest the money, sell the call 2 strikes higher
+      width_strikes: 2
+      entry_min_dte: 20
+      entry_max_dte: 65
+      target_pct_of_max_profit: 60   # (ASSUMPTION)
+      stop_pct_of_debit: 50          # (ASSUMPTION)
+      exit_days_before_expiry: 7
   profile:                      # range and speed profile, scenario history, alert levels (data from 2019-01-22 only)
     windows_years: [2, 5]
     swing_pct: 8                # a swing low/high needs a move of at least 8%

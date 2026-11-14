@@ -51,6 +51,7 @@ INTRADAY = "5minute"
 # A day outside the window is UNKNOWN for the 5-minute source, never "no trades".
 INTRADAY_WINDOW_DAYS = (40, 5)
 PAGE_ROWS = 1000              # Breeze returns at most about 1000 candles per call
+NETWORK_RETRIES = 2           # a request with no reply (timeout, dropped connection) is repeated this many times
 MAX_PAGES = 6
 BREEZE_RIGHT = {"CE": "call", "PE": "put"}
 LOOKBACK_DAYS = 100           # a contract's bars are requested from this many days before its expiry
@@ -143,15 +144,27 @@ class BreezeOptionFetcher:
                 self._sleep(self._retry_pause)
             elif self.requests and self._pause:
                 self._sleep(self._pause)
-            self.requests += 1
-            if self._on_request is not None:
-                self._on_request()
-            try:
-                resp = call_with_timeout(lambda: self._feed.option_historical_raw(
-                    code, expiry.isoformat() + "T06:00:00.000Z", strike, BREEZE_RIGHT[right], interval, a, b),
-                    self._timeout)
-            except Exception as e:      # noqa: BLE001 - network, SDK or timeout
-                raise OptionHistoryError(f"{type(e).__name__}: {e}") from e
+            resp = None
+            for net_try in range(1 + NETWORK_RETRIES):
+                # A reply that never comes (timeout, dropped connection) is asked for again; every attempt
+                # counts against the request budget. An ERROR REPLY from Breeze (expired session, bad
+                # login, rate limit) is never retried: it stops the download at once (below).
+                if self.requests >= self.max_requests:
+                    raise RequestBudgetUsed(f"request limit of {self.max_requests} for this run reached")
+                if net_try:
+                    self._sleep(self._retry_pause)
+                self.requests += 1
+                if self._on_request is not None:
+                    self._on_request()
+                try:
+                    resp = call_with_timeout(lambda: self._feed.option_historical_raw(
+                        code, expiry.isoformat() + "T06:00:00.000Z", strike, BREEZE_RIGHT[right], interval, a, b),
+                        self._timeout)
+                    break
+                except Exception as e:      # noqa: BLE001 - network, SDK or timeout
+                    if net_try == NETWORK_RETRIES:
+                        raise OptionHistoryError(f"{type(e).__name__}: {e} (after {1 + NETWORK_RETRIES} attempts)") from e
+                    log.warning("option history request failed (%s: %s); trying again", type(e).__name__, e)
             if not isinstance(resp, dict) or resp.get("Error") or resp.get("Status") not in (200, "200"):
                 raise OptionHistoryError(f"Breeze error for {underlying} {expiry} {strike:g} {right}: "
                                          f"{(resp or {}).get('Error') if isinstance(resp, dict) else resp!r}")

@@ -24,7 +24,7 @@ from .options.analytics import OptionDesk
 from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
-from .options.shortlist import stock_view
+from .options.shortlist import reversal_watch, stock_view
 from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
 from .regime import RegimeService
@@ -301,6 +301,12 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                     "note": "Research only. A shortlist row is a candidate, not a signal: signal cards, alerts and "
                             "manual positions arrive after phase 6."})
         return out
+
+    @app.get("/api/stock-option-selling/reversals")
+    def stock_option_selling_reversals():
+        """Reversal watch list: washed-out stocks, bases forming and confirmed reversals with their two
+        candidate trades. Watch only, never a signal. Read-only."""
+        return reversal_watch(settings, store, feed.name)
 
     @app.get("/api/stock-option-selling/campaigns")
     def stock_option_selling_campaigns():

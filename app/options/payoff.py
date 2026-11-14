@@ -133,6 +133,30 @@ def credit_spread(right: str, short_strike, long_strike, credit, lot_size: int, 
                   (be,) if received > c else (), width)
 
 
+def debit_spread(right: str, long_strike, short_strike, debit, lot_size: int, lots: int = 1, costs=0) -> Payoff:
+    """Vertical debit spread: buy `long_strike` nearer the money, sell `short_strike` further out
+    (bull call spread: bought call below the sold call; bear put spread: bought put above the sold
+    put). `debit` is the net premium paid per share. Max loss = debit + costs; max profit =
+    (width - debit) - costs."""
+    if right not in ("CE", "PE"):
+        raise InvalidStructure(f"right must be CE or PE (got {right})")
+    _positive("strikes and debit", long_strike, short_strike, debit)
+    kl, ks, db = _d(long_strike), _d(short_strike), _d(debit)
+    if right == "CE" and not kl < ks:
+        raise InvalidStructure("bull call spread: the bought call must be below the sold call")
+    if right == "PE" and not kl > ks:
+        raise InvalidStructure("bear put spread: the bought put must be above the sold put")
+    width = abs(ks - kl)
+    if db >= width:
+        raise InvalidStructure(f"debit {db} is not below the strike width {width}: check the prices")
+    q, c = _qty(lots, lot_size), _costs(costs)
+    paid = money(db * q)
+    per_share_cost = c / q
+    best = money(width * q) - paid - c
+    be = kl + db + per_share_cost if right == "CE" else kl - db - per_share_cost
+    return Payoff("DEBIT_SPREAD", -paid, c, paid + c, best, (be,) if best > 0 else (), width)
+
+
 def iron_condor(put_short, put_long, call_short, call_long, credit, lot_size: int, lots: int = 1,
                 costs=0) -> Payoff:
     """Bull put spread plus bear call spread, same expiry. `credit` is the total net premium per

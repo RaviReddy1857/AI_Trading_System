@@ -39,7 +39,7 @@ SHORT = leg("SELL", "PE", 24000, 50)
     [SHORT],                                                       # a sold option alone
     [SHORT, leg("BUY", "CE", 23800, 20)],                          # bought option of the other right
     [SHORT, leg("BUY", "PE", 23800, 20, expiry=EXP_W)],            # bought option of another expiry
-    [SHORT, leg("BUY", "PE", 24100, 20)],                          # not further out of the money
+    [SHORT, leg("BUY", "PE", 24000, 20)],                          # the same strike is not a hedge
     [leg("SELL", "PE", 24000, 50, lots=2), leg("BUY", "PE", 23800, 20)],          # hedge too small
     [SHORT, leg("SELL", "PE", 23900, 40), leg("BUY", "PE", 23700, 15)],           # one hedge, two sold options
     [SHORT, leg("BUY", "PE", 23800, 20), leg("SELL", "CE", 24600, 30)],           # condor missing its call hedge

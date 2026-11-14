@@ -58,8 +58,11 @@ def _leg_value(leg, name, default=None):
 
 def unhedged_short_legs(legs, expiry=None, lots=None, lot_size=None) -> list:
     """The sold legs that are NOT covered. A sold option is covered only by a bought option of the same
-    right and expiry, further out of the money (puts: lower strike; calls: higher), with at least as
-    many shares; each bought option covers one sold option. All legs of one signal or trade belong to
+    right and expiry, at a DIFFERENT strike, with at least as many shares; each bought option covers
+    one sold option. The bought strike may be further out of the money (a credit spread: the loss is
+    limited to the width less the credit) or nearer the money (a debit spread such as a bull call
+    spread: the bought option gains at least what the sold one loses, so the loss is limited to the
+    debit paid). The same strike is not a hedge. All legs of one signal or trade belong to
     one underlying. Legs may be OptionLeg objects or dicts (stored backtest trades); `expiry`, `lots`
     and `lot_size` are the trade-level values used when a leg dict does not carry its own.
     A leg whose action, right, strike or size cannot be read counts as uncovered: unknown is never
@@ -86,8 +89,7 @@ def unhedged_short_legs(legs, expiry=None, lots=None, lot_size=None) -> list:
             out.append(leg)
             continue
         for b in bought:
-            further = b[2] < strike if right == "PE" else b[2] > strike
-            if b[1] == right and b[3] == exp and further and b[4] >= need:
+            if b[1] == right and b[3] == exp and b[2] != strike and b[4] >= need:
                 b[4] -= need
                 break
         else:

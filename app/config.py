@@ -389,7 +389,8 @@ class Strategies(StrictModel):
         bad = [x for x in self.inactive if x not in known]
         if bad:
             raise ValueError(f"strategies.inactive has unknown ids {bad}")
-        bad = [x for x in self.status if x not in known | {"stock_option_selling"}]   # phase 9 has its own section
+        phase9 = {"stock_option_selling", "reversal_put_spread", "reversal_bull_call_spread"}   # own config section
+        bad = [x for x in self.status if x not in known | phase9]
         if bad:
             raise ValueError(f"strategies.status has unknown ids {bad}")
         return self
@@ -541,6 +542,52 @@ class RollRules(StrictModel):
     max_days_to_expiry: int = Field(65, ge=8, le=120)
 
 
+class BullCallParams(StrictModel):
+    """The bull call spread candidate of a confirmed reversal: buy the call nearest the money, sell the
+    call `width_strikes` strikes higher, same expiry. One lot; the loss is limited to the debit."""
+    width_strikes: int = Field(2, ge=1, le=10)
+    entry_min_dte: int = Field(20, ge=8, le=90)
+    entry_max_dte: int = Field(65, ge=8, le=120)
+    target_pct_of_max_profit: float = Field(60.0, gt=0, le=100)   # sell when the spread is worth debit + this % of the max profit
+    stop_pct_of_debit: float = Field(50.0, gt=0, lt=100)          # sell when it has lost this % of the debit
+    exit_days_before_expiry: int = Field(7, ge=7, le=30)          # stock options settle physically
+
+    @model_validator(mode="after")
+    def window(self) -> "BullCallParams":
+        if self.entry_min_dte > self.entry_max_dte or self.exit_days_before_expiry >= self.entry_min_dte:
+            raise ValueError("reversal.bull_call: need exit_days_before_expiry < entry_min_dte <= entry_max_dte")
+        return self
+
+
+class Reversal(StrictModel):
+    """Reversal detector for washed-out stocks. Watch list and candidates only: nothing here alerts
+    until `alerts_approved` is set by the user."""
+    enabled: bool = True
+    alerts_approved: bool = False                                  # no reversal alert is produced while this is false
+    drawdown_pct: float = Field(30.0, gt=0, lt=100)                # washed out: this far below the 52-week high ...
+    min_months: int = Field(3, ge=1, le=24)                        # ... on every session for this many months (21 sessions each) ...
+    high_lookback_sessions: int = Field(252, ge=60, le=400)        # ... and below the trend block's long average
+    base_no_new_low_sessions: int = Field(15, ge=3, le=120)        # base: the low is at least this many sessions old ...
+    range_sessions: int = Field(10, ge=3, le=60)                   # ... and the average daily range of the last N sessions
+    range_compare_sessions: int = Field(30, ge=3, le=120)          # is at most `range_shrink_ratio` of the average of
+    range_shrink_ratio: float = Field(0.85, gt=0, le=1)            # the `range_compare_sessions` sessions before them
+    base_valid_sessions: int = Field(10, ge=1, le=60)              # a confirmation must come this soon after a base-forming day
+    confirm_sma_days: int = Field(20, ge=5, le=100)
+    volume_sma_days: int = Field(20, ge=5, le=100)
+    relative_return_sessions: int = Field(10, ge=2, le=60)         # return ahead of NIFTY over these sessions
+    swing_pct: float = Field(5.0, gt=0, le=50)                     # zigzag size for "the last swing high" and breakdown levels
+    lift_sessions: int = Field(20, ge=1, le=120)                   # the falling-stock block stays lifted this long (put spreads below the base low only)
+    rearm_sessions: int = Field(40, ge=1, le=250)                  # no second confirmation of the same stock sooner than this
+    outcome_sessions: list[int] = [10, 20, 40]
+    bull_call: BullCallParams = BullCallParams()
+
+    @model_validator(mode="after")
+    def horizons(self) -> "Reversal":
+        if not self.outcome_sessions or any(not (1 <= n <= 250) for n in self.outcome_sessions):
+            raise ValueError("stock_option_selling.reversal.outcome_sessions must list sessions between 1 and 250")
+        return self
+
+
 class StockProfile(StrictModel):
     """Range and speed profile, scenario history and the levels the open-position alerts use."""
     windows_years: list[int] = [2, 5]
@@ -586,6 +633,7 @@ class StockOptionSelling(StrictModel):
     trend_block: TrendBlock = TrendBlock()
     campaign_limit: CampaignLimit = CampaignLimit()
     roll: RollRules = RollRules()
+    reversal: Reversal = Reversal()
     profile: StockProfile = StockProfile()
     backtest: StockSellingBacktest = StockSellingBacktest()
 

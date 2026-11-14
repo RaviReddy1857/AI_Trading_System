@@ -46,13 +46,14 @@ from . import build_option_strategies
 from .backtest import (OptionEngine, baseline_variants, prepare_history, print_report, run_option_backtest)
 from .campaign import campaigns_from_trades
 from .option_history import OptionHistory, OptionIntraday, budgeted_fetcher
+from .reversal import build_reversal_strategies, reversal_outcomes
 from .stock_selling import StockOptionSelling, build_stock_selling
 
 log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
-PLAN_VERSION = 2
+PLAN_VERSION = 3        # 3: the reversal candidates (bull call spread, put spread below the base low)
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
 
@@ -268,6 +269,35 @@ def print_effects(rep: dict) -> None:
                   f"stopped or strike passed {r['closed_beyond_sold_strike_or_stopped_pct']}%")
 
 
+def print_reversal(out: dict) -> None:
+    print(f"\nreversal detector ({out['label']}): {out['confirmations']} confirmed reversals in {out['stocks']} stocks")
+    for r in out["outcomes"]:
+        print(f"  {r['sessions']:3d} sessions later: cases {r['cases']:4d}  median {r['median_pct']}%  mean {r['mean_pct']}%  "
+              f"up in {r['up_pct_of_cases']}%  worst {r['worst_pct']}%  best {r['best_pct']}%"
+              + ("  LOW SAMPLE" if r["low_sample"] else ""))
+    nl = out["new_low_afterwards"]
+    print(f"  made a new low within {nl['within_sessions']} sessions: {nl['share_pct']}% of {nl['cases']} cases"
+          + ("  LOW SAMPLE" if nl["low_sample"] else ""))
+
+
+def run_reversal_reports(settings: Settings, store: Store, eng: OptionEngine, option_stocks: list[str],
+                         study_stocks: list[str], dev: list[date], first: date | None, note: str, save: bool = True) -> dict:
+    """The reversal study: the outcome of every confirmed reversal (daily prices of `study_stocks`;
+    no option prices needed), and both candidate trades against their no-filter baselines on
+    `option_stocks` (the stocks whose option history is stored). Daily exit check."""
+    sessions = [d for d in dev if first is None or d >= first]
+    outcomes = reversal_outcomes({s: eng.reversal_scanner(s) for s in study_stocks}, dev,
+                                 settings.stock_option_selling.reversal.outcome_sessions, settings.backtest.min_trades)
+    reports = {}
+    for st in build_reversal_strategies(settings):
+        res = run_option_backtest(settings, store, eng.source, st, eng.prices, option_stocks, engine=eng, save=save,
+                                  exit_checks=("daily",), first_session=first, coverage_note=note,
+                                  extra=lambda e, syms, d, by_mode: {"reversal_outcomes": outcomes,
+                                                                     "tested_sessions": len(sessions)})
+        reports[st.id] = res["report"]
+    return {"outcomes": outcomes, "reports": reports}
+
+
 def read_status(settings: Settings) -> dict:
     p = settings.path(STATUS_FILE)
     try:
@@ -322,6 +352,9 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
                 for name in names:                           # the rule-effect rows need no other contracts than these
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
             policy_runs(settings, engine, sym, block)        # the spreads the roll policies open
+            for st in build_reversal_strategies(settings):   # the two reversal candidates and their baselines
+                for name in ["strategy"] + baseline_variants(st):
+                    engine.run_stream(st, sym, block, name, Counter(), exit_check="daily")
             if missing() == before and hist.error is None:
                 done.setdefault(sym, set()).add(year)
                 newly += 1
@@ -444,8 +477,10 @@ def main(argv: list[str] | None = None) -> int:
     years, covered = coverage(status, stocks, sorted({d.year for d in dev}))
     if args.all_data or not covered:
         use_stocks, first, note = stocks, None, ""
-        if not covered:
-            print("\nNo (stock, year) is completely downloaded yet: this report runs on whatever is stored and is INCOMPLETE.")
+        if not covered and not args.all_data:
+            print("\nNo (stock, year) is completely downloaded yet, so there is nothing to report. "
+                  "Run with --download (or --all-data for an INCOMPLETE report on whatever is stored).")
+            return 0
     else:
         use_stocks, first = covered, date(years[0], 1, 1)
         eng.set_expiry_floor(date(years[0] - 1, 1, 1))        # as downloaded: one earlier year for the IV rank
@@ -459,6 +494,10 @@ def main(argv: list[str] | None = None) -> int:
                                                                  **policy_comparison(settings, e, syms, d)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
+    rev = run_reversal_reports(settings, store, eng, use_stocks, [r["stock"] for r in ranked], dev, first, note)
+    print_reversal(rev["outcomes"])
+    for rep in rev["reports"].values():
+        print_report(rep, "breeze")
     return 0
 
 

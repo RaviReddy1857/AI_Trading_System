@@ -332,10 +332,12 @@ class Snapshot:
     vix_change_pct: float | None = None   # India VIX close against the previous close
     regime: str | None = None
     news_tags: tuple[str, ...] = ()       # from the phase 8 news tagging, e.g. EVENT_RISK
+    reversal: bool = False                # a reversal was confirmed for this stock on this session (reversal.py)
 
 
 def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None = None,
-             vix_change_pct: float | None = None, regime: str | None = None, news_tags: Sequence[str] = ()) -> Snapshot | None:
+             vix_change_pct: float | None = None, regime: str | None = None, news_tags: Sequence[str] = (),
+             reversal: bool = False) -> Snapshot | None:
     """The snapshot at the close of the last bar given."""
     if not daily:
         return None
@@ -347,13 +349,14 @@ def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None 
     return Snapshot(bar_date(daily[-1]), closes[-1],
                     min(b.low for b in recent) if recent else None, max(b.high for b in recent) if recent else None,
                     min(b.low for b in before) if before else None, max(b.high for b in before) if before else None,
-                    avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags))
+                    avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags), reversal)
 
 
 ALERT_KINDS = ("BELOW_SUPPORT", "NEW_52W_LOW", "BROKE_LONG_AVERAGE", "FII_STREAK", "VIX_SPIKE", "REGIME_TURN", "EVENT_RISK")
 
 
-def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spike_pct: float) -> list[dict]:
+def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spike_pct: float,
+                reversal_alerts: bool = False) -> list[dict]:
     """What changed against an open spread between two closes. For a bull put spread (PE): the stock
     closed below the support it was above, below its 52-week low, or fell through its long average;
     an FII selling streak began; India VIX spiked; the regime turned VOLATILE or EVENT; news tagged
@@ -392,4 +395,10 @@ def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spi
         add("REGIME_TURN", f"market regime turned {now.regime} (was {prev.regime})")
     if "EVENT_RISK" in now.news_tags and "EVENT_RISK" not in prev.news_tags:
         add("EVENT_RISK", "news tagged the stock EVENT_RISK")
+    # The same alert for every open position in the stock, put or call spread, from a signal or entered
+    # by hand. Produced only once the user has approved reversal alerts (reversal.alerts_approved).
+    if reversal_alerts and now.reversal and not prev.reversal:
+        add("REVERSAL_CONFIRMED", f"a reversal was confirmed: close {fmt(now.close)} above the 20-day average and the "
+                                  f"last swing high, on higher volume and ahead of the index"
+                                  + (" (against this bear call spread)" if not put else ""))
     return out

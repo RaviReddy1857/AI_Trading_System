@@ -190,7 +190,9 @@ def test_ACCEPTANCE_a_short_leg_without_its_hedge_is_rejected():
     assert check_hedged([short, leg("BUY", "PE", 23800, 20)]) == []
     assert check_hedged([short, leg("BUY", "CE", 23800, 20)]) == ["UNHEDGED_SHORT"]             # wrong right
     assert check_hedged([short, leg("BUY", "PE", 23800, 20, expiry=EXP_W)]) == ["UNHEDGED_SHORT"]  # other expiry
-    assert check_hedged([short, leg("BUY", "PE", 24100, 20)]) == ["UNHEDGED_SHORT"]             # not further out
+    assert check_hedged([short, leg("BUY", "PE", 24000, 20)]) == ["UNHEDGED_SHORT"]             # the same strike is no hedge
+    assert check_hedged([short, leg("BUY", "PE", 24100, 20)]) == []                             # debit spread: bought nearer the money
+    assert check_hedged([leg("SELL", "CE", 24200, 30), leg("BUY", "CE", 24000, 90)]) == []      # bull call spread
     assert check_hedged([leg("SELL", "PE", 24000, 50, lots=2), leg("BUY", "PE", 23800, 20)]) == ["UNHEDGED_SHORT"]
     two_shorts = [short, leg("SELL", "PE", 23900, 40), leg("BUY", "PE", 23700, 15)]
     assert check_hedged(two_shorts) == ["UNHEDGED_SHORT"]                                       # one hedge covers one short

@@ -57,7 +57,7 @@ from .credit_spread import SIDE_NAME, CreditSpread
 from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (STOCK_LOSS_LIMIT, Snapshot, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, STOCK_LOSS_LIMIT, Snapshot, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -151,6 +151,7 @@ class StockOptionSelling(CreditSpread):
     alert_exits: frozenset = frozenset()
 
     exit_policy = "stop"                 # backtest comparison: stop | roll_rules | roll_always
+    below_base_low = False               # reversal candidate: the sold strike always sits below the base low
 
     def applies(self, rule: str, ctx: OptionContext) -> bool:
         if ctx.rolling:
@@ -275,11 +276,21 @@ class StockOptionSelling(CreditSpread):
             return stop()
         out.side = right
         today = ctx.asof.astimezone(IST).date()
+        rev = ctx.market.get("reversal") or {}
+        base_low = rev.get("base_low") if (rev.get("lift_active") or rev.get("confirmed_today")) and right == "PE" else None
+        below = base_low if self.below_base_low and not ctx.no_filter else None
         if self.applies("trend_block", ctx):
             code, why_block = trend_block(ctx.daily, ctx.index_daily, right, p.trend_block)
-            if code:
+            if code == DOWNTREND_BLOCK and base_low is not None and p.reversal.enabled:
+                below = base_low              # REVERSAL_CONFIRMED lifts the block, only for a put spread below the base low
+                out.reasons.append(f"REVERSAL_CONFIRMED ({rev.get('confirmed_on')}): the falling-stock block is lifted "
+                                   f"for a put spread sold below the base low {fmt(base_low)}")
+            elif code:
                 self.no(code, "; ".join(why_block))
                 return stop()
+        if self.below_base_low and not ctx.no_filter and below is None:
+            self.no("NO_REVERSAL", "no confirmed reversal with a base low for this stock")
+            return stop()
         if self.applies("campaign_limit", ctx):
             limit = stock_loss_limit(ctx.closed_trades, today, p.campaign_limit, ctx.capital_inr)
             if limit:
@@ -306,6 +317,8 @@ class StockOptionSelling(CreditSpread):
                 return stop()
         support, resistance = support_resistance(ctx.daily, p.support_resistance_lookback_days)
         level = support if right == "PE" else resistance
+        if level is not None and below is not None:
+            level = min(level, below)
         if level is None:
             self.no("INSUFFICIENT_HISTORY", f"fewer than {p.support_resistance_lookback_days} daily bars for support/resistance")
             return stop()
@@ -315,7 +328,7 @@ class StockOptionSelling(CreditSpread):
         gap = (ctx.spot - level) if right == "PE" else (level - ctx.spot)
         if ok(a) and a > 0:
             out.scores["distance"] = round(max(0.0, min(1.0, gap / (5 * a))), 3)
-        level_name = "support" if right == "PE" else "resistance"
+        level_name = ("the base low" if below is not None and level == below else "support") if right == "PE" else "resistance"
         out.reasons.append(f"{level_name} {fmt(level)} ({p.support_resistance_lookback_days}-session "
                            f"{'low' if right == 'PE' else 'high'}), {fmt(gap)} from the price {fmt(ctx.spot)}")
         lctx = replace(ctx, max_spread_pct=p.max_bid_ask_spread_pct, min_oi_lots=p.min_open_interest)
@@ -349,6 +362,9 @@ class StockOptionSelling(CreditSpread):
             why = [f"roll of an open {SIDE_NAME[right]}"]
         elif ctx.no_filter:
             why = [f"no-filter baseline: {SIDE_NAME[right]} on a fixed schedule"]
+        elif self.below_base_low:
+            why = ["REVERSAL_CONFIRMED: " + "; ".join(rev.get("reasons", [])[:3]),
+                   f"{SIDE_NAME[right]} with the sold strike below the base low {fmt(below)}"]
         else:
             why = [f"{trend_text}: {SIDE_NAME[right]}",
                    f"IV rank {ctx.iv_rank:.0f} at or above {p.min_iv_rank:g} (premium is rich)"]
@@ -369,6 +385,8 @@ class StockOptionSelling(CreditSpread):
         floor_closes = closes[-504:]                         # about two years, all on or before today
         s.details.update({"side": right, "trend": direction, "support": support, "resistance": resistance,
                           "hedge_strikes_out": n_out,
+                          "reversal": ({"base_low": below, "confirmed_on": rev.get("confirmed_on"),
+                                        "stall_zones": rev.get("stall_zones", [])} if below is not None else None),
                           # what is left of the premium after paying for the hedge and every charge, one lot
                           "sold_premium_inr": round(legs[0].price * exp.lot_size, 2),
                           "hedge_cost_inr": round(legs[1].price * exp.lot_size, 2),
@@ -598,7 +616,8 @@ def position_alerts(strategy: StockOptionSelling, ctx: OptionContext, pos: Sprea
     """Alerts for an open spread: what changed since the previous close (stock_profile.alert_kinds),
     each with the exit and roll choices in numbers. With no usable price for the legs the choices
     say so instead of showing numbers. Phase 6 sends these (Telegram) and repeats them."""
-    changes = list(alert_kinds(prev, now, pos.right, strategy.params.profile.vix_spike_pct))
+    changes = list(alert_kinds(prev, now, pos.right, strategy.params.profile.vix_spike_pct,
+                               strategy.params.reversal.alerts_approved))
     q = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
     stuck = stuck_position(pos, q.price(ctx.historical) if q is not None else None, ctx.spot,
                            ctx.asof.astimezone(IST).date(), strategy.params.roll)

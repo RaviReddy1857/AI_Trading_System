@@ -58,6 +58,7 @@ from ..backtest import Engine, dev_holdout, load_calendar, stats, windows
 from ..config import Settings
 from ..costs import CostBreakdown, money
 from ..history import bar_date, daily_start
+from ..indicators import gap_breaks
 from ..models import Bar, Signal, utcnow
 from ..quality import IST
 from ..regime import fii_bias
@@ -238,6 +239,7 @@ class OptionEngine:
         self._iv: dict[str, tuple[list[date], list[float]]] = {}
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
         self._market: dict[date, dict] = {}
+        self._reversal: dict[str, object] = {}
         self._trigger = None
         self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
         # Last session a run tests. A stock's IV history then leaves out the at-the-money calls of
@@ -310,6 +312,18 @@ class OptionEngine:
                                "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None}
         return self._market[d]
 
+    def reversal_scanner(self, sym: str):
+        """The stock's reversal states for every day of its history (point in time; cached)."""
+        if sym not in self._reversal:
+            from .reversal import ReversalScanner
+            sos = self.s.stock_option_selling
+            floor = self.s.backtest.test_start.get("1day")       # post-2019 data only: older Breeze bars are unreliable
+            bars = [b for b in self.base.daily(sym) if floor is None or bar_date(b) >= floor]
+            breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], self.s.history.max_overnight_gap_pct)
+            self._reversal[sym] = ReversalScanner(bars, self.base.daily(self.s.regime.index_symbol), sos.reversal,
+                                                  sos.trend_block.long_sma_days, breaks)
+        return self._reversal[sym]
+
     def snapshot_at(self, sym: str, bars: tuple, d: date) -> Snapshot | None:
         sos = self.s.stock_option_selling
         m = self.market_at(d)
@@ -339,7 +353,8 @@ class OptionEngine:
             min_oi_lots=self.o.chain.min_open_interest_lots, search_steps=self.o.backtest.strike_search_steps,
             no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None,
             daily=daily, index_daily=self.base.index_daily(d)[-400:] if daily else (),
-            closed_trades=closed_trades, market=self.market_at(d) if daily else {})
+            closed_trades=closed_trades,
+            market={**self.market_at(d), "reversal": self.reversal_scanner(sym).info_on(d)} if daily else {})
 
     # ---- fills ----
     def _leg_bars(self, sym: str, legs, d: date):
@@ -493,6 +508,22 @@ class OptionEngine:
                 held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
                 pos.pending_roll = roll_choices(strategy, roll_ctx(), held, value, pos.roll_no, pos.realised,
                                                 unlimited=never_stop)["roll_signal"]
+            return ("hold",)
+        if len(pos.legs) > 1:
+            # A debit spread (bull call spread): judged on the closing value of its legs (bought minus
+            # sold), like a credit spread; the exit is filled at the next session's open.
+            basis = "rule at the close"
+            if d >= expiry or nxt is None or nxt > expiry:
+                return ("trade", self._close(pos, sym, d, closes, False, "EXPIRY_EXIT", strategy, exit_check, basis))
+            if d >= last_allowed:
+                return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check, basis))
+            worth = sum(b.close * (1 if leg.action == "BUY" else -1) for leg, b in zip(pos.legs, bars))
+            if worth >= sig.target:
+                pos.pending_exit, pos.pending_basis = "TARGET", "daily close"
+            elif worth <= sig.stop:
+                pos.pending_exit, pos.pending_basis = "STOP", "daily close"
+            elif (expiry - nxt).days <= exit_days:
+                pos.pending_exit, pos.pending_basis = "TIME", basis
             return ("hold",)
         b = bars[0]
         hit = Engine._hit("LONG", Bar(sym, daily_start(d), b.open, b.high, b.low, b.close), sig.stop, sig.target,
@@ -751,6 +782,8 @@ def compare(strategy_stats: dict, baseline_stats: dict) -> dict:
 
 
 def baseline_variants(strategy: OptionStrategy) -> list[str]:
+    if strategy.id == "reversal_put_spread":
+        return ["baseline:PE"]
     return ["baseline:PE", "baseline:CE"] if strategy.id in ("credit_spread", "stock_option_selling") else ["baseline"]
 
 

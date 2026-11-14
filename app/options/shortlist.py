@@ -26,7 +26,7 @@ from datetime import date, datetime, time, timezone
 from ..config import Settings
 from ..costs import CostModel
 from ..history import bar_date
-from ..indicators import after_last_break
+from ..indicators import after_last_break, gap_breaks
 from ..manual_data import Event
 from ..models import utcnow
 from ..quality import IST
@@ -37,6 +37,7 @@ from .chain import stored_quotes, wanted_specs
 from .greeks import days_to_expiry, years_to_expiry
 from .instruments import InstrumentBook
 from .margin import MarginBook
+from .reversal import ReversalScanner, build_reversal_strategies
 from .stock_profile import HISTORY_LABEL, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
 from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling
 
@@ -89,7 +90,9 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         allowed_kinds=("monthly",), margin=lambda structure, width: margins.lookup(sym, structure, width, session),
         require_margin=True, historical=False, max_spread_pct=sos.max_bid_ask_spread_pct,
         min_oi_lots=sos.min_open_interest, search_steps=o.backtest.strike_search_steps, events=events,
-        daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct))), None
+        daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct)),
+        index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
+        market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session)}), None
 
 
 # What to fill in when a scenario has no input data. Nothing is ever invented for a missing file.
@@ -169,6 +172,75 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
     out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv)
     out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
                                                                 bar_date(bars[-1])), sos.profile, floor)
+    return out
+
+
+def reversal_scanner(settings: Settings, store: Store, source: str, sym: str) -> ReversalScanner:
+    """The stock's reversal states from its stored daily bars on or after backtest.test_start."""
+    floor = settings.backtest.test_start.get("1day")
+    bars = [b for b in store.history_bars("bars_1d", sym, source) if floor is None or bar_date(b) >= floor]
+    breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], settings.history.max_overnight_gap_pct)
+    sos = settings.stock_option_selling
+    return ReversalScanner(bars, store.history_bars("bars_1d", settings.regime.index_symbol, source), sos.reversal,
+                           sos.trend_block.long_sma_days, breaks)
+
+
+WATCH_NOTE = "Watch list only, never a signal. Reversal candidates do not alert until you approve them."
+
+
+def reversal_watch(settings: Settings, store: Store, source: str, now: datetime | None = None) -> dict:
+    """Washed-out stocks, stocks forming a base and confirmed reversals at the newest stored session.
+    For a confirmed reversal (while the base low holds, for `lift_sessions`) the two candidate trades
+    are worked out from the option chain stored that session; without one the row says so. Read-only."""
+    now = now or utcnow()
+    sos = settings.stock_option_selling
+    session = session_date(settings, store, source)
+    out = {"session_date": session.isoformat() if session else None, "note": WATCH_NOTE, "rows": [],
+           "alerts_approved": sos.reversal.alerts_approved, "enabled": sos.reversal.enabled}
+    if session is None or not sos.reversal.enabled:
+        return out
+    put_st, call_st = build_reversal_strategies(settings)
+    made = None
+    for inst in settings.watchlist:
+        if inst.kind != "stock":
+            continue
+        sc = reversal_scanner(settings, store, source, inst.symbol)
+        if not sc.bars or sc.dates[-1] != session:
+            out.setdefault("stocks_without_a_bar_for_the_session", []).append(inst.symbol)
+            continue                                     # no bar for the session: unknown, not listed
+        info = sc.info(len(sc.bars) - 1)
+        if info["state"] is None:
+            continue
+        row = {"stock": inst.symbol, "state": info["state"], "label": "watch", "close": sc.bars[-1].close,
+               "drawdown_pct": info["drawdown_pct"], "high_52w": info["high_52w"], "base_low": info["base_low"],
+               "confirmed_on": info["confirmed_on"], "reasons": info["reasons"], "stall_zones": info["stall_zones"],
+               "candidates": []}
+        if info["lift_active"]:
+            if made is None:
+                costs = CostModel(settings.costs)
+                costs.require("options")
+                made = (InstrumentBook(store, source), OptionDesk(settings, store, source, lambda s: None, lambda: "UNKNOWN",
+                                                                   lambda: now),
+                        costs, MarginBook.from_store(store, settings.options.margin.max_age_days))
+            ctx, why = stock_context(settings, store, source, made[0], made[1], made[2], made[3], inst.symbol, session, now)
+            if ctx is None:
+                row["candidates"] = [{"candidate": "bull call spread", "status": "NO_TRADE", "reasons": [why]},
+                                     {"candidate": "put credit spread below the base low", "status": "NO_TRADE", "reasons": [why]}]
+            else:
+                from dataclasses import replace
+                live = replace(ctx, market={**ctx.market, "reversal": {**info, "confirmed_today": True}})
+                for name, st in (("bull call spread", call_st), ("put credit spread below the base low", put_st)):
+                    sigs = st.evaluate(live)
+                    row["candidates"].append({"candidate": name, "status": "CANDIDATE" if sigs else "NO_TRADE",
+                                              "label": st.status_label, "reasons": list(st.last_no_trade),
+                                              "trade": sigs[0].to_dict() if sigs else None})
+        out["rows"].append(row)
+    stale = out.get("stocks_without_a_bar_for_the_session")
+    if stale:
+        out["note"] += (f" {len(stale)} stock(s) have no daily bar for {session:%d-%b-%Y} and are not assessed "
+                        f"(run python -m app.history).")
+    order = {"REVERSAL_CONFIRMED": 0, "BASE_FORMING": 1, "WASHED_OUT": 2}
+    out["rows"].sort(key=lambda r: (order[r["state"]], r["stock"]))
     return out
 
 
