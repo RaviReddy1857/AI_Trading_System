@@ -34,7 +34,8 @@ from ..strategies.base import fmt
 from .base import OptionContext, OptionStrategy, leg_view, liquidity_problem, metrics, pick_expiry, round_trip_costs
 from .greeks import days_to_expiry
 from .payoff import InvalidStructure, OptionLeg, debit_spread
-from .stock_selling import StockOptionSelling
+from ..quality import IST
+from .stock_selling import EVENT_COVERAGE_UNKNOWN, StockOptionSelling, event_coverage, events_before_expiry
 
 REVERSAL_CONFIRMED = "REVERSAL_CONFIRMED"
 MONTH_SESSIONS = 21
@@ -306,6 +307,15 @@ class BullCallSpread(OptionStrategy):
         exp = self.pick(ctx)
         if exp is None:
             return []
+        if not ctx.no_filter:
+            today = ctx.asof.astimezone(IST).date()
+            ev = events_before_expiry(ctx.events, ctx.underlying, today, exp.expiry)
+            if ev:
+                return self.no("EVENT_BEFORE_EXPIRY", ", ".join(f"{e.type} on {e.date:%d-%b-%Y}" for e in ev[:3]))
+            if not ctx.historical:
+                covered, text = event_coverage(ctx.events, ctx.underlying, today, exp.expiry, sos.event_coverage_max_age_days)
+                if not covered:
+                    return self.no(EVENT_COVERAGE_UNKNOWN, text)
         lctx = replace(ctx, max_spread_pct=sos.max_bid_ask_spread_pct, min_oi_lots=sos.min_open_interest)
         bought = None
         for k in ctx.quotes.atm_candidates(exp.expiry):

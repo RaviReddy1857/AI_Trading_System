@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from ..config import Settings
 from ..costs import CostModel
@@ -82,7 +82,7 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
     iv = desk.iv_measure(sym, session, atm_now)
     sos = settings.stock_option_selling
     events = tuple(Event(e["date"], e["type"], e["note"] or "", e["symbol"] or "")
-                   for e in store.events_between(session, max(chains)))
+                   for e in store.events_between(session - timedelta(days=sos.event_coverage_max_age_days), max(chains)))
     return OptionContext(
         underlying=sym, kind="stock", asof=asof, regime=regime, spot=spot, expiries=tuple(expiries),
         quotes=ChainQuotes(spot, chains), costs=costs, capital_inr=settings.account.capital_inr, rate=rate,

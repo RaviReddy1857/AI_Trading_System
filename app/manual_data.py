@@ -92,19 +92,47 @@ def parse_events(text: str) -> tuple[list[Event], list[str]]:
         return [], []
     head, body = rows[0], rows[1:]
     di, ti, ni, si = _find(head, "date"), _find(head, "type"), _find(head, "note"), _find(head, "symbol")
+    src_i, ret_i, cov_i = _find(head, "source"), _find(head, "retrievedat"), _find(head, "coveredthrough")
     if di is None or ti is None:
-        return [], ["events header must contain 'date' and 'type' (optional 'note', 'symbol')"]
+        return [], ["events header must contain 'date' and 'type' (optional 'note', 'symbol', and for COVERAGE rows "
+                    "'source', 'retrieved_at', 'covered_through')"]
     out, errors = [], []
     for n, r in enumerate(body, start=2):
         try:
-            d = parse_date(_cell(r, di))
             t = _cell(r, ti).upper()
+            # a COVERAGE row may give its date in retrieved_at instead of the date column
+            d = parse_date(_cell(r, ret_i) if t == "COVERAGE" and not _cell(r, di).strip() else _cell(r, di))
             if t not in EVENT_TYPES:
                 raise ValueError(f"type '{t}' is not one of {list(EVENT_TYPES)}")
-            out.append(Event(d, t, _cell(r, ni), _cell(r, si).upper()))
+            note, sym = _cell(r, ni), _cell(r, si).upper()
+            if t == "COVERAGE":
+                # symbol, source, retrieved_at (or the date column), covered_through: the stock's announced events
+                # were checked at `source` on `retrieved_at` and are known through `covered_through`
+                src, through = _cell(r, src_i).strip(), _cell(r, cov_i).strip()
+                if _cell(r, ret_i).strip():
+                    d = parse_date(_cell(r, ret_i))
+                if not (src and through):
+                    got = coverage_fields(note)
+                    if got is None:
+                        raise ValueError("a COVERAGE row needs symbol, source, retrieved_at and covered_through")
+                    src, through = got[0], got[1].isoformat()
+                if not sym:
+                    raise ValueError("a COVERAGE row needs the stock's symbol")
+                note = f"source={src}; covered_through={parse_date(through).isoformat()}"
+            out.append(Event(d, t, note, sym))
         except ValueError as e:
             errors.append(f"line {n}: {e}")
     return sorted(set(out), key=lambda e: (e.date, e.type, e.symbol, e.note)), errors
+
+
+def coverage_fields(note: str) -> tuple[str, date] | None:
+    """(source, covered_through) of a COVERAGE row's note, or None if it cannot be read."""
+    parts = dict(x.strip().split("=", 1) for x in (note or "").split(";") if "=" in x)
+    try:
+        src = parts["source"].strip()
+        return (src, parse_date(parts["covered_through"])) if src else None
+    except (KeyError, ValueError):
+        return None
 
 
 def events_to_csv(events: list[Event]) -> str:

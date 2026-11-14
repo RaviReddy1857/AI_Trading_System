@@ -95,6 +95,34 @@ def support_resistance(daily, lookback: int) -> tuple[float | None, float | None
     return min(b.low for b in recent), max(b.high for b in recent)
 
 
+EVENT_COVERAGE_UNKNOWN = "EVENT_COVERAGE_UNKNOWN"
+
+
+def event_coverage(events, symbol: str, today: date, expiry: date, max_age_days: int) -> tuple[bool, str]:
+    """(covered, text). Covered = events.csv holds a COVERAGE row for the stock that was retrieved on or
+    before today, at most `max_age_days` ago, and covers the option's expiry. The absence of an
+    announced event is only meaningful with such a row; without it the event rule is unknown."""
+    from ..manual_data import coverage_fields
+    best = None
+    for e in events or ():
+        if getattr(e, "type", "") != "COVERAGE" or getattr(e, "symbol", "") != symbol:
+            continue
+        got = coverage_fields(e.note)
+        if got is None or e.date > today:
+            continue
+        if best is None or (e.date, got[1]) > (best[0], best[2]):
+            best = (e.date, got[0], got[1])
+    if best is None:
+        return False, (f"no event coverage row for {symbol} in events.csv (type COVERAGE: symbol, source, retrieved_at, "
+                       f"covered_through)")
+    retrieved, source, through = best
+    if (today - retrieved).days > max_age_days:
+        return False, (f"event coverage from {source} was retrieved {retrieved:%d-%b-%Y}, more than {max_age_days} days ago")
+    if through < expiry:
+        return False, f"event coverage from {source} runs to {through:%d-%b-%Y}, before the expiry {expiry:%d-%b-%Y}"
+    return True, f"events checked at {source} on {retrieved:%d-%b-%Y}, covered through {through:%d-%b-%Y}"
+
+
 def events_before_expiry(events, symbol: str, today: date, expiry: date) -> list:
     """The stock's own results, board meetings and corporate actions from today to expiry."""
     return [e for e in events or () if getattr(e, "symbol", "") == symbol and today <= e.date <= expiry
@@ -305,11 +333,20 @@ class StockOptionSelling(CreditSpread):
         if exp is None:
             return stop()
         out.expiry = exp.expiry
+        coverage_missing = None
         if not ctx.no_filter and ctx.rolling != "any":
             ev = events_before_expiry(ctx.events, ctx.underlying, today, exp.expiry)
             if ev:
                 self.no("EVENT_BEFORE_EXPIRY", ", ".join(f"{e.type} on {e.date:%d-%b-%Y}" for e in ev[:3]))
                 return stop()
+            if not ctx.historical:
+                # Live and research: no announced event is only a pass with verified, fresh coverage through expiry.
+                # (Backtests cannot know past coverage: the report lists the event check as not available historically.)
+                covered, text = event_coverage(ctx.events, ctx.underlying, today, exp.expiry, p.event_coverage_max_age_days)
+                if covered:
+                    out.reasons.append(text)
+                else:
+                    coverage_missing = text
         support, resistance = support_resistance(ctx.daily, p.support_resistance_lookback_days)
         level = support if right == "PE" else resistance
         if level is not None and below is not None:
@@ -369,6 +406,12 @@ class StockOptionSelling(CreditSpread):
                    f"{p.max_loss_per_stock_spread_pct:g}% of capital")
         setup = (f"{SIDE_NAME[right]} {ks:g}/{kl:g} {exp.expiry:%d-%b-%Y}: credit {fmt(credit)}, "
                  f"max loss Rs {fmt(float(pay.max_loss_inr))} per lot")
+        if coverage_missing is not None:
+            # a research candidate stays visible with the reason; it is never an actionable signal
+            self.no(EVENT_COVERAGE_UNKNOWN, coverage_missing)
+            out.status = "CANDIDATE"
+            out.reasons.append(setup)
+            return stop()
         sig = self.finish(ctx, exp, legs, views, credit, abs(ks - kl), pay, why, SIDE_NAME[right])
         if not sig:
             if self.last_no_trade and self.last_no_trade[-1].startswith(MARGIN_UNKNOWN):

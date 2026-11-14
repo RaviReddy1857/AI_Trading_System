@@ -365,6 +365,7 @@ def watch_store(with_chain: bool):
         store.save_option_chain("sim", [("RELIANCE", EXP.isoformat(), q.strike, q.right, NOW.isoformat(), q.bid, q.ask, q.last,
                                          q.oi, 0.0, 100.0, spot) for q in chain(spot, lo=350, hi=900, iv=0.6)])
         store.replace_margins([("RELIANCE", "CREDIT_SPREAD", w, 30000.0, "2026-11-13") for w in (10.0, 20.0, 30.0)])
+        store.replace_events([("2026-11-13", "COVERAGE", "RELIANCE", "source=NSE corporate filings; covered_through=2026-12-31")])
     return store
 
 

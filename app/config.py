@@ -74,7 +74,9 @@ class Storage(StrictModel):
 
 
 # BOARD_MEETING and CORPORATE_ACTION (with a symbol) keep a stock off the phase 9 shortlist until they pass.
-EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT", "BOARD_MEETING", "CORPORATE_ACTION")
+# COVERAGE: a row saying that a stock's announced events were checked at a source, on a date, through a date.
+EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT", "BOARD_MEETING", "CORPORATE_ACTION",
+               "COVERAGE")
 
 
 class Regime(StrictModel):
@@ -494,6 +496,8 @@ class StockSellingBacktest(StrictModel):
     # closes with fills at the next session's open. The first one is the main result; reports show both.
     exit_checks: list[Literal["intraday", "daily"]] = ["intraday", "daily"]
     exit_on_strike_breach: bool = True                  # close (next open) when the stock closes beyond the sold strike
+    # Capital the Phase 9 backtests are run at (the user's stock-option capital). Every limit stays a % of it.
+    capital_inr: float = Field(1000000.0, gt=0)
     # Exit policies compared on the SAME entries (daily exit check): "stop" = close at the stop; "roll_rules" =
     # roll a threatened spread when the roll rules allow it, else close; "roll_always" = never stop, roll a
     # losing spread into the next month at the forced exit, without limit.
@@ -542,7 +546,7 @@ class BullCallParams(StrictModel):
     call `width_strikes` strikes higher, same expiry. One lot; the loss is limited to the debit."""
     width_strikes: int = Field(2, ge=1, le=10)
     entry_min_dte: int = Field(20, ge=8, le=90)
-    entry_max_dte: int = Field(65, ge=8, le=120)
+    entry_max_dte: int = Field(35, ge=8, le=120)              # the same 20-35 days as the put spread (user, 2026-11-14)
     target_pct_of_max_profit: float = Field(60.0, gt=0, le=100)   # sell when the spread is worth debit + this % of the max profit
     stop_pct_of_debit: float = Field(50.0, gt=0, lt=100)          # sell when it has lost this % of the debit
     exit_days_before_expiry: int = Field(7, ge=7, le=30)          # stock options settle physically
@@ -613,13 +617,18 @@ class StockOptionSelling(StrictModel):
     hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
     max_loss_per_stock_spread_pct: float = Field(2.5, gt=0, le=100)    # max_risk_per_position_pct: a position's max loss, % of capital
     # Net credit after the hedge and all charges must be at least this % of the max loss (CREDIT_TOO_SMALL). 0 = off.
-    min_net_credit_pct_of_max_loss: float = Field(20.0, ge=0, le=100)   # min_credit_to_max_loss 0.20
+    # min_credit_to_max_loss. NOT APPLIED (0) until the user sets it once, after seeing the distribution of
+    # net credit / max loss on stored data (user, 2026-11-14). The specification's starting value was 0.20.
+    min_net_credit_pct_of_max_loss: float = Field(0.0, ge=0, le=100)
     entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
     entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
     profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)
     stop_multiple_of_credit: float = Field(2.0, gt=1, le=10)
     exit_days_before_expiry: int = Field(10, ge=7, le=30)     # time_exit_dte: out this many calendar days before expiry
     forced_exit_trading_days_before_expiry: int = Field(5, ge=1, le=15)   # no position inside this window, whatever else
+    # EVENT_COVERAGE_UNKNOWN: a live or research candidate needs a COVERAGE row in events.csv for the stock, retrieved
+    # at most this many days ago and covering the option's expiry.
+    event_coverage_max_age_days: int = Field(7, ge=1, le=60)
     trend_fast_sma: int = Field(20, ge=2, le=200)             # the swing trend rule: close and fast average vs slow average
     trend_slow_sma: int = Field(50, ge=3, le=400)
     atr_days: int = Field(14, ge=2, le=100)

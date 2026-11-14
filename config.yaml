@@ -337,13 +337,14 @@ stock_option_selling:
   max_short_delta: 0.20
   hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
   max_loss_per_stock_spread_pct: 2.5  # max_risk_per_position_pct (spec section 2): a position's max loss, % of capital
-  min_net_credit_pct_of_max_loss: 20  # min_credit_to_max_loss 0.20 (spec section 2): CREDIT_TOO_SMALL below it
+  min_net_credit_pct_of_max_loss: 0   # min_credit_to_max_loss: NOT APPLIED until you set it once (spec starting value 0.20); see docs/STATUS.md
   entry_min_days_to_expiry: 20
   entry_max_days_to_expiry: 35
   profit_target_pct_of_credit: 50
   stop_multiple_of_credit: 2.0  # close when buying the spread back costs 2x the credit
   exit_days_before_expiry: 10   # time_exit_dte (spec section 2): out at the open of the first session within 10 calendar days of expiry
   forced_exit_trading_days_before_expiry: 5   # no position inside the last 5 trading days, whatever else
+  event_coverage_max_age_days: 7 # EVENT_COVERAGE_UNKNOWN unless events.csv has a COVERAGE row for the stock, retrieved within 7 days, covering expiry
   trend_fast_sma: 20            # swing trend rule: close above the 50-day average and 20-day above 50-day = up trend
   trend_slow_sma: 50
   atr_days: 14
@@ -388,7 +389,7 @@ stock_option_selling:
     bull_call:                       # candidate 1: buy the call nearest the money, sell the call 2 strikes higher
       width_strikes: 2
       entry_min_dte: 20
-      entry_max_dte: 65
+      entry_max_dte: 35              # same 20-35 day window as the put spread
       target_pct_of_max_profit: 60   #
       stop_pct_of_debit: 50          #
       exit_days_before_expiry: 7
@@ -406,6 +407,7 @@ stock_option_selling:
     liquidity_lookback_days: 60
     exit_checks: [intraday, daily]   # first = main result. intraday = synchronized 5-minute bars of every leg; daily = daily closes
     exit_on_strike_breach: true      # close at the next open when the stock closes beyond the sold strike
+    capital_inr: 1000000             # capital the Phase 9 backtests run at (your stock-option capital); limits stay a % of it
     exit_policies: [stop, roll_rules, roll_always]   # compared on the same entries: stop at 2x credit / roll by the rules / roll every month
 
 # ---- Phase 3: backtest and walk-forward ----

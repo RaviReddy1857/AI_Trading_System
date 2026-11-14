@@ -53,9 +53,16 @@ log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
-PLAN_VERSION = 4        # 4: section 2 defaults (other strikes) and the exit policies on synchronized 5-minute bars
+PLAN_VERSION = 5        # 5: capital 10,00,000, bull call window 20-35 days, minimum credit not applied
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
+
+
+def phase9_settings(settings: Settings) -> Settings:
+    """The settings the Phase 9 backtests run with: the same file, with the capital set to the user's
+    stock-option capital (stock_option_selling.backtest.capital_inr). Every limit stays a % of it."""
+    cap = settings.stock_option_selling.backtest.capital_inr
+    return settings.model_copy(update={"account": settings.account.model_copy(update={"capital_inr": cap})})
 
 
 def liquid_stocks(settings: Settings, engine: OptionEngine, before: date | None = None) -> list[dict]:
@@ -455,7 +462,9 @@ def main(argv: list[str] | None = None) -> int:
                                                             "also where contracts are missing (marked INCOMPLETE)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    settings = load_settings()
+    settings = phase9_settings(load_settings())
+    print(f"capital for the Phase 9 backtests: Rs {settings.account.capital_inr:,.0f} "
+          f"(stock_option_selling.backtest.capital_inr)")
     store = Store(settings.path(settings.storage.db_path_live), live=True)
     base = Engine(settings, store, "breeze", calendar=load_calendar(settings, store))
     strategy = build_stock_selling(settings)

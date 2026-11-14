@@ -83,6 +83,16 @@ PRICE_SOURCE_LABEL = {
 DATA_EXCLUSION_KEYS = ("DROPPED_MISSING_OPTION_BAR", "DROPPED_MISSING_DAILY_BAR_DURING_TRADE",
                        "DROPPED_DATA_BREAK_DURING_TRADE", "NO_OPTION_BAR_AT_ENTRY")
 ELIGIBILITY_LABEL = "excludes margin and bid/ask eligibility checks"
+# Checks a live signal must pass that history cannot answer. They are NOT counted as passed: the results
+# simply do not include them, and every report says so.
+BYPASSED_CHECKS = [
+    "margin: past margins are not known (a live signal needs a current margin entry)",
+    "bid/ask: option history has traded prices only (a live signal needs a bid and an ask within the width limit on every leg)",
+    "highest-OI strike: history has open interest per contract, not across the chain",
+    "events before expiry and event coverage: not available historically (announcements known at each past decision "
+    "time are not stored); live and research candidates need a fresh COVERAGE row in events.csv",
+    "lot sizes: today's lot size is used for every past date (past lot sizes are not in the instrument list)",
+]
 IV_EXPIRY_REACH_DAYS = 75     # stock IV history: an at-the-money call is used at most 70 days before its expiry
 EXIT_CHECK_LABEL = {
     "daily": "target and stop checked on the legs' daily closes, filled at the next session's open",
@@ -1037,6 +1047,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "price_source": label, "price_source_label": PRICE_SOURCE_LABEL[label],
         "payoff_simulation": label == "model",
         "eligibility_label": ELIGIBILITY_LABEL, "eligibility_note": ELIGIBILITY_NOTE,
+        "bypassed_checks": BYPASSED_CHECKS,
         "exit_check": exit_checks[0], "exit_check_label": EXIT_CHECK_LABEL[exit_checks[0]],
         "exit_check_comparison": both_ways,
         "symbols": len(syms), "underlyings": syms, "lot_sizes": notes_lot,

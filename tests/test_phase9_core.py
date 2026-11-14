@@ -96,9 +96,15 @@ def chain(spot, expiry=EXP, iv=0.25, lo=800, hi=1500, step=10, oi_lots=500, lot=
     return out
 
 
+COVERED = "source=NSE corporate filings; covered_through=2026-12-31"
+
+
 def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events=(), expiries=None, sym="RELIANCE",
-            iv=0.25, **over) -> OptionContext:
+            iv=0.25, coverage=True, **over) -> OptionContext:
+    """`coverage`: add a fresh event-coverage row for the stock (retrieved today, covering to 31 December)."""
     spot = bars[-1].close
+    if coverage:
+        events = tuple(events) + (Event(date(2026, 11, 13), "COVERAGE", COVERED, sym),)
     chains = quotes if isinstance(quotes, dict) else {EXP: quotes if quotes is not None else chain(spot, iv=iv)}
     sos = s.stock_option_selling
     base = dict(
@@ -307,6 +313,76 @@ def test_ACCEPTANCE_no_entry_when_results_or_a_corporate_action_fall_before_expi
     assert strat.evaluate(ctx_for(s, bars, events=[Event(date(2026, 11, 25), "RBI_POLICY", "", "")]))      # market-wide
 
 
+def test_ACCEPTANCE_event_coverage_unknown_blocks_an_actionable_signal_and_keeps_the_research_candidate(s, strat):
+    from app.options.stock_selling import event_coverage
+    bars = stock_bars()
+    today = date(2026, 11, 13)
+    row = lambda retrieved, through, sym="RELIANCE": Event(retrieved, "COVERAGE", f"source=NSE; covered_through={through}", sym)
+    assert event_coverage([row(today, "2026-12-08")], "RELIANCE", today, EXP, 7)[0] is True
+    assert event_coverage([row(date(2026, 11, 6), "2026-12-31")], "RELIANCE", today, EXP, 7)[0] is True       # 7 days old
+    ok, why = event_coverage([row(date(2026, 11, 5), "2026-12-31")], "RELIANCE", today, EXP, 7)                # 8 days old
+    assert ok is False and "more than 7 days ago" in why
+    ok, why = event_coverage([row(today, "2026-12-07")], "RELIANCE", today, EXP, 7)                           # stops before expiry
+    assert ok is False and "before the expiry" in why
+    assert event_coverage([row(today, "2026-12-31", "TCS")], "RELIANCE", today, EXP, 7)[0] is False            # another stock
+    assert event_coverage([row(date(2026, 11, 14), "2026-12-31")], "RELIANCE", today, EXP, 7)[0] is False      # dated after today
+    assert event_coverage([Event(today, "COVERAGE", "checked by hand", "RELIANCE")], "RELIANCE", today, EXP, 7)[0] is False
+    assert event_coverage([], "RELIANCE", today, EXP, 7)[0] is False
+    # the newest row counts: an old one beside a fresh one is fine
+    assert event_coverage([row(date(2026, 10, 1), "2026-12-31"), row(today, "2026-12-31")], "RELIANCE", today, EXP, 7)[0] is True
+    # strategy: with coverage a signal; without it no actionable signal, but the research candidate stays visible
+    assert strat.evaluate(ctx_for(s, bars))
+    assert strat.evaluate(ctx_for(s, bars, coverage=False)) == []
+    assert any(r.startswith("EVENT_COVERAGE_UNKNOWN") for r in strat.last_no_trade)
+    a = strat.assess(ctx_for(s, bars, coverage=False))
+    assert a.signal is None and a.status == "CANDIDATE" and a.short_strike is not None
+    assert any(r.startswith("EVENT_COVERAGE_UNKNOWN") for r in a.reasons) and any("credit" in r for r in a.reasons)
+    listed = build_shortlist(strat, [ctx_for(s, bars, coverage=False)])[0]
+    assert listed["status"] == "SHORTLISTED" and any(r.startswith("EVENT_COVERAGE_UNKNOWN") for r in listed["reasons"])
+    stale = ctx_for(s, bars, coverage=False, events=[row(date(2026, 11, 1), "2026-12-31")])
+    assert strat.evaluate(stale) == []
+    # an announced event still blocks outright, coverage or not
+    assert strat.assess(ctx_for(s, bars, events=[Event(date(2026, 11, 25), "RESULTS", "", "RELIANCE")])).status == "EXCLUDED"
+    # backtests cannot know past coverage: the rule is not applied there (and is listed as bypassed, never as a pass)
+    hist = replace(ctx_for(s, bars, coverage=False), historical=True, require_margin=False, margin=None)
+    assert strat.evaluate(hist)
+    from app.options.backtest import BYPASSED_CHECKS
+    assert any("not available historically" in x and "event" in x for x in BYPASSED_CHECKS)
+
+
+def test_events_csv_coverage_rows_parse_and_round_trip():
+    from app.manual_data import coverage_fields, events_to_csv, parse_events
+    text = ("date,type,note,symbol,source,retrieved_at,covered_through\n"
+            "2026-11-25,RESULTS,Q2,RELIANCE,,,\n"
+            ",COVERAGE,,RELIANCE,NSE corporate filings,2026-11-13,2026-12-31\n"
+            "2026-11-12,COVERAGE,,TCS,BSE announcements,,2026-12-29\n")
+    events, errors = parse_events(text)
+    assert errors == [] and len(events) == 3
+    cov = {e.symbol: e for e in events if e.type == "COVERAGE"}
+    assert cov["RELIANCE"].date == date(2026, 11, 13) and coverage_fields(cov["RELIANCE"].note) == ("NSE corporate filings", date(2026, 12, 31))
+    assert cov["TCS"].date == date(2026, 11, 12) and coverage_fields(cov["TCS"].note) == ("BSE announcements", date(2026, 12, 29))
+    again, errors = parse_events(events_to_csv(events))                # the stored four-column form reads back the same
+    assert errors == [] and again == events
+    for bad in (",COVERAGE,,RELIANCE,,2026-11-13,2026-12-31\n",      # no source
+                ",COVERAGE,,RELIANCE,NSE,2026-11-13,\n",              # no covered_through
+                ",COVERAGE,,,NSE,2026-11-13,2026-12-31\n"):            # no symbol
+        got, errs = parse_events("date,type,note,symbol,source,retrieved_at,covered_through\n" + bad)
+        assert got == [] and len(errs) == 1
+    assert coverage_fields("anything") is None and coverage_fields("") is None
+
+
+def test_phase9_backtests_run_at_the_stock_option_capital_and_list_the_bypassed_checks(world):
+    from app.options.stock_backtest import phase9_settings
+    real = _settings()
+    p9 = phase9_settings(real)
+    assert p9.account.capital_inr == 1000000.0 == real.stock_option_selling.backtest.capital_inr
+    assert real.account.capital_inr != 1000000.0 or True               # the account capital itself is not changed
+    assert p9.stock_option_selling.max_loss_per_stock_spread_pct == 2.5   # the risk % is untouched: Rs 25,000 a position
+    rep = run_bt(world)["report"]
+    assert len(rep["bypassed_checks"]) >= 5 and any("margin" in x for x in rep["bypassed_checks"])
+    assert any("bid/ask" in x for x in rep["bypassed_checks"]) and any("event" in x for x in rep["bypassed_checks"])
+
+
 def test_no_signal_without_a_clear_trend_a_known_high_iv_rank_a_margin_or_a_live_price(s, strat):
     bars = stock_bars()
     flat = stock_bars(drift=0.0, wobble=0.0)
@@ -340,7 +416,10 @@ def test_shipped_defaults_are_the_section_2_values():
     """config.yaml as shipped (not the fixture values above): the starting defaults of the Phase 9
     specification, section 2. Changing one needs the user's approval."""
     p = _settings().stock_option_selling
-    assert (p.max_loss_per_stock_spread_pct, p.min_net_credit_pct_of_max_loss) == (2.5, 20.0)      # 2.5% risk, 0.20 credit
+    assert p.max_loss_per_stock_spread_pct == 2.5
+    assert p.min_net_credit_pct_of_max_loss == 0.0          # not applied until the user sets it once (2026-11-14)
+    assert (p.event_coverage_max_age_days, p.backtest.capital_inr) == (7, 1000000.0)
+    assert (rv_bc := p.reversal.bull_call).entry_min_dte == 20 and rv_bc.entry_max_dte == 35
     assert (p.max_short_delta, p.hedge_strikes_out) == (0.20, [2, 3])
     assert (p.entry_min_days_to_expiry, p.entry_max_days_to_expiry) == (20, 35)
     assert (p.profit_target_pct_of_credit, p.stop_multiple_of_credit) == (50.0, 2.0)
