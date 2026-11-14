@@ -295,7 +295,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         out = store.shortlist()
         sos = settings.stock_option_selling
         status = settings.strategies.status_of("stock_option_selling")
-        out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.weights.model_dump(),
+        out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.score.weights.model_dump(),
+                    "score_note": "0-100, six equal-weight factors (app/options/score.py); a ranking aid, never a probability",
                     "stocks": [i.symbol for i in settings.watchlist if i.kind == "stock"],
                     "label": status.label, "alerts": status.alerts,
                     "note": "Research only. Every row is a research candidate from the last session's snapshot, not a "

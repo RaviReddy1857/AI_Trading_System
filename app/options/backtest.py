@@ -297,6 +297,8 @@ class OptionEngine:
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
         self._market: dict[date, dict] = {}
         self._breadth: dict[date, float | None] = {}
+        self._close_map: dict[str, dict] = {}
+        self._score_in: dict[tuple, dict] = {}
         self._vix_spike: dict | None = None
         self._stock_closes: dict | None = None
         self._reversal: dict[str, object] = {}
@@ -376,6 +378,35 @@ class OptionEngine:
                                "vix_spike": self._vix_spike.get(d)}
         return self._market[d]
 
+    def _close_on(self, sym: str, d: date) -> float | None:
+        if sym not in self._close_map:
+            self._close_map[sym] = {bar_date(b): b.close for b in self.base.daily(sym)}
+        return self._close_map[sym].get(d)
+
+    def score_inputs(self, sym: str, d: date) -> dict:
+        """What the score needs that the strategy cannot compute from the stock's own bars, known at the
+        close of day d: the IV window before d, and the rel_strength_lookback returns of the stock, the
+        index and the stock's sector peers. The statistics floor (backtest.test_start) is passed too."""
+        key = (sym, d)
+        if key not in self._score_in:
+            sos = self.s.stock_option_selling
+            ds, vs = self.iv_series(sym)
+            i = bisect.bisect_left(ds, d)
+            window = vs[max(0, i - sos.score.iv_peak_sessions):i]
+            sessions = self.base.session_dates()
+            k = bisect.bisect_left(sessions, d)
+            n = sos.trend_block.rel_strength_lookback
+            ret = lambda s: (None if k < n or not self._close_on(s, sessions[k - n]) or self._close_on(s, d) is None
+                             else (self._close_on(s, d) / self._close_on(s, sessions[k - n]) - 1) * 100)
+            sector = next((x.sector for x in self.s.watchlist if x.symbol == sym), None)
+            peers = [x.symbol for x in self.s.watchlist if x.kind == "stock" and x.symbol != sym and sector and x.sector == sector]
+            floor = self.s.backtest.test_start.get("1day")
+            self._score_in[key] = {"iv_window": tuple(window), "stock_ret_pct": ret(sym),
+                                   "index_ret_pct": ret(self.s.regime.index_symbol),
+                                   "peer_rets_pct": tuple(r for r in (ret(x) for x in peers) if r is not None),
+                                   "stats_floor": daily_start(floor) if floor else None}
+        return self._score_in[key]
+
     def breadth_at(self, d: date) -> float | None:
         """Market breadth known at the close of day d: share of the watchlist stocks above their
         sma_mid average, from each stock's bars up to and including d (cached)."""
@@ -443,7 +474,7 @@ class OptionEngine:
             daily=daily, index_daily=self.base.index_daily(d)[-400:] if daily else (),
             closed_trades=closed_trades,
             market={**self.market_at(d), "reversal": self.reversal_scanner(sym).info_on(d),
-                    "breadth_pct": self.breadth_at(d)} if daily else {})
+                    "breadth_pct": self.breadth_at(d), **self.score_inputs(sym, d)} if daily else {})
 
     # ---- fills ----
     def _leg_bars(self, sym: str, legs, d: date):

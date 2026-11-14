@@ -352,7 +352,12 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
   swing_pivot_bars: 5           # a pivot needs 5 sessions on each side and is usable only after the 5 later ones completed
   pivot_lookback_sessions: 252  # support = nearest confirmed pivot low below the close, resistance = nearest pivot high above it
   shortlist_size: 10
-  weights: {iv_rank: 0.35, trend_clarity: 0.25, distance: 0.20, liquidity: 0.20}
+  score:                        # 0-100 candidate score (spec section 4): a ranking aid, never a probability
+    weights: {iv_rank: 1, iv_falling: 1, rel_strength: 1, strike_distance: 1, range_profile: 1, liquidity: 1}   # equal
+    iv_peak_sessions: 20        # iv_falling: IV at or below 90% of its 20-session peak gets full points
+    iv_falling_ratio: 0.9
+    hist_fall_sessions: 21      # hist_fall_percentile: the 90th percentile of 21-session falls since 2019-01-22
+    hist_fall_percentile: 90
   trend_block:                  # DOWNTREND_BLOCK: no put selling in a falling stock (mirrored for calls in a strong uptrend)
     enabled: true
     new_low_lookback: 20        # a 52-week low (lowest close of low_52w_sessions) made within the last 20 sessions blocks

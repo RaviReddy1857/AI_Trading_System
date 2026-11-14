@@ -54,7 +54,7 @@ log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
-PLAN_VERSION = 5        # 5: capital 10,00,000, bull call window 20-35 days, minimum credit not applied
+PLAN_VERSION = 6        # 6: M1 rules (pivots, sizing, portfolio limits, open at cutoff): other strikes are wanted
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
 
@@ -364,17 +364,13 @@ def incomplete_sensitivity(settings: Settings, eng: OptionEngine, syms: list[str
 EXPECTED_PER_MONTH = (3, 8)        # a reporting expectation (section 8.8), never a tuning target
 
 
-def monthly_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], trades: list) -> dict:
-    """Per month: the candidates that passed every block and the trades taken (section 8.8). A
-    candidate is a setup (stock, expiry, side) that passed every entry block on some day of the month,
-    counted once, in the month it first passed; every stock is scanned every day, whether or not a
-    position is open. The per-stock campaign limit and the portfolio limits depend on positions and
-    results, so they are not part of the candidate count; the trades taken are the main result's
-    (all blocks, the portfolio limits included). Months with fewer candidates or trades than 3 are
-    reported as a shortage; no rule is loosened for it."""
+def scan_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> list[dict]:
+    """Every setup that passes every entry block, on every day, for every stock, whether or not a
+    position is open: {stock, date, expiry, side, score, factors}. The per-stock campaign limit and the
+    portfolio limits depend on positions and results, so they are left out. No outcome is read."""
     scan = variant(settings, off=("campaign_limit",))
     allowed = set(dev)
-    first_seen: dict[tuple, str] = {}
+    out = []
     for sym in syms:
         bars = eng.base.daily(sym)
         brk = set(eng.base.breaks(sym))
@@ -387,20 +383,128 @@ def monthly_candidates(settings: Settings, eng: OptionEngine, syms: list[str], d
                 continue
             ctx = eng.context(scan, sym, d, bar.close, "strategy", None, tuple(bars[max(start, i - 1299):i + 1]), ())
             for sig in scan.evaluate(ctx):
-                first_seen.setdefault((sym, sig.details["expiry"], sig.details["side"]), d.strftime("%Y-%m"))
+                sc = sig.details.get("score") or {}
+                out.append({"stock": sym, "date": d, "expiry": sig.details["expiry"], "side": sig.details["side"],
+                            "score": sc.get("total"), "factors": sc.get("factors", {})})
+    return out
+
+
+def monthly_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], trades: list,
+                       scanned: list[dict] | None = None) -> dict:
+    """Per month: the candidates that passed every block and the trades taken (section 8.8). A
+    candidate is a setup (stock, expiry, side) that passed every entry block on some day of the month,
+    counted once, in the month it first passed (scan_candidates). The trades taken are the main result's
+    (all blocks, the portfolio limits included). Months with fewer than 3 candidates or trades are
+    reported as a shortage; no rule is loosened for it."""
+    rows = scanned if scanned is not None else scan_candidates(settings, eng, syms, dev)
+    first_seen: dict[tuple, str] = {}
+    for r in rows:
+        first_seen.setdefault((r["stock"], r["expiry"], r["side"]), r["date"].strftime("%Y-%m"))
     months = sorted({d.strftime("%Y-%m") for d in dev})
     taken = Counter(datetime.fromisoformat(t.entry_time).astimezone(IST).strftime("%Y-%m") for t in trades
                     if t.variant == "strategy" and t.roll_no == 0)
     cands = Counter(first_seen.values())
     stocks = {m: sorted({k[0] for k, v in first_seen.items() if v == m}) for m in months}
     lo, hi = EXPECTED_PER_MONTH
-    rows = [{"month": m, "candidates": cands.get(m, 0), "stocks": stocks[m], "trades_taken": taken.get(m, 0),
-             "shortage": cands.get(m, 0) < lo or taken.get(m, 0) < lo} for m in months]
+    out_rows = [{"month": m, "candidates": cands.get(m, 0), "stocks": stocks[m], "trades_taken": taken.get(m, 0),
+                 "shortage": cands.get(m, 0) < lo or taken.get(m, 0) < lo} for m in months]
     return {"monthly_candidates": {
         "expectation": f"{lo}-{hi} a month is a reporting expectation, never a tuning target",
         "not_in_candidate_count": ["per-stock campaign limit (depends on results)", "portfolio limits (depend on open positions)"],
-        "months": rows, "months_short": sum(1 for r in rows if r["shortage"]),
+        "months": out_rows, "months_short": sum(1 for r in out_rows if r["shortage"]),
         "total_candidates": sum(cands.values()), "total_trades_taken": sum(taken.values())}}
+
+
+SMALL_CROSS_SECTION = 3
+
+
+def band_of(position: int, n: int) -> str:
+    """Thirds of the day's ranked candidates (0 = the best): positions with 3 x position < n are the
+    top third, 3 x position >= 2 x n the bottom third, the rest the middle. Fewer than 3 candidates
+    that day: "small cross-section"."""
+    if n < SMALL_CROSS_SECTION:
+        return "small cross-section"
+    if 3 * position < n:
+        return "top"
+    if 3 * position >= 2 * n:
+        return "bottom"
+    return "middle"
+
+
+def daily_bands(scanned: list[dict]) -> dict[tuple, str]:
+    """(stock, date, expiry, side) -> score band among that day's candidates. Ranked by score, highest
+    first; ties by stock name, then expiry and side. A candidate whose score is incomplete is not ranked:
+    "score incomplete"."""
+    by_day: dict[date, list] = {}
+    for r in scanned:
+        by_day.setdefault(r["date"], []).append(r)
+    out = {}
+    for d, rows in by_day.items():
+        scored = sorted((r for r in rows if r["score"] is not None),
+                        key=lambda r: (-r["score"], r["stock"], r["expiry"], r["side"]))
+        for k, r in enumerate(scored):
+            out[(r["stock"], d, r["expiry"], r["side"])] = band_of(k, len(scored))
+        for r in rows:
+            if r["score"] is None:
+                out[(r["stock"], d, r["expiry"], r["side"])] = "score incomplete"
+    return out
+
+
+def factor_bin(points: float | None) -> str:
+    if points is None:
+        return "unknown"
+    return "low (under 33.3)" if points < 100 / 3 else ("high (66.7 or more)" if points >= 200 / 3 else "middle")
+
+
+def score_reports(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], by_mode: dict) -> dict:
+    """Score bands (section 8.5) and each score factor against the baseline (section 8.3), on the main
+    execution. Bands: the strategy's trades WITHOUT the portfolio limits (each stock trades whenever it is
+    flat), each placed in the top, middle or bottom third of the candidates available on its decision
+    day. Factors: the no-filter baseline's trades split by each factor's points."""
+    mode = next(iter(by_mode))
+    base_trades = by_mode[mode][1]
+    scanned = scan_candidates(settings, eng, syms, dev)
+    bands = daily_bands(scanned)
+    st = variant(settings)
+    free: list = []
+    for sym in syms:
+        free += eng.run_stream(st, sym, dev, "strategy", Counter(), exit_check=mode)
+    groups: dict[str, list] = {}
+    unmatched = 0
+    for tr in free:
+        if tr.roll_no:
+            continue
+        d = datetime.fromisoformat(tr.signal_time).astimezone(IST).date()
+        side = next(x["right"] for x in tr.legs if x["action"] == "SELL")
+        band = bands.get((tr.symbol, d, tr.expiry, side))
+        if band is None:
+            unmatched += 1
+            band = "not in the day's candidates"
+        groups.setdefault(band, []).append(tr)
+    cap, n = settings.account.capital_inr, settings.backtest.min_trades
+    order = ["top", "middle", "bottom", "small cross-section", "score incomplete", "not in the day's candidates"]
+    day_sizes = Counter(len([r for r in scanned if r["date"] == d]) for d in {r["date"] for r in scanned})
+    out = {"score_bands": {
+        "exit_check": mode,
+        "rule": "each day's candidates ranked by score (ties: stock, expiry, side); top third = 3 x position < n, bottom "
+                "third = 3 x position >= 2n, else middle; fewer than 3 candidates that day: small cross-section",
+        "trades": "the strategy's trades without the portfolio limits (each stock whenever it is flat)",
+        "candidate_days": len({r["date"] for r in scanned}),
+        "candidates_per_day": {str(k): v for k, v in sorted(day_sizes.items())},
+        "bands": [{"band": b, **_row(b, groups.get(b, []), Counter(), settings)} for b in order if b in groups],
+        "unmatched": unmatched}}
+    from .score import FACTORS
+    fac = {}
+    for f in ("total",) + FACTORS:
+        split: dict[str, list] = {}
+        for tr in base_trades:
+            ec = tr.entry_conditions or {}
+            pts = ec.get("score") if f == "total" else (ec.get("score_factors") or {}).get(f)
+            split.setdefault(factor_bin(pts), []).append(tr)
+        fac[f] = [{"bin": k, **_row(k, v, Counter(), settings)} for k, v in sorted(split.items())]
+    out["baseline_by_score_factor"] = {"exit_check": mode, "note": "the no-filter baseline's trades by each factor's points "
+                                       "at entry (fixed bins: under 33.3, 33.3-66.7, 66.7 and more)", "factors": fac}
+    return out
 
 
 def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
@@ -481,6 +585,17 @@ def print_effects(rep: dict) -> None:
     for mode, x in (rep.get("portfolio_limits") or {}).items():
         print(f"  portfolio limits ({mode}): {x['checks']} entries checked, refused {x['refused']}, "
               f"group size of the proposed positions {x['group_size_of_proposed_positions']}")
+    sb = rep.get("score_bands")
+    if sb:
+        print(f"  score bands ({sb['exit_check']} execution; {sb['trades']}): candidates per day {sb['candidates_per_day']}")
+        for r in sb["bands"]:
+            print(f"    {r['band']:28s} trades {r['trades']:4d}  win {r['win_rate_pct']}%  net Rs {r['net_pnl_inr']:>12,.2f}  "
+                  f"per trade Rs {r['per_trade_inr']}  PF {r['profit_factor']}" + ("  LOW SAMPLE" if r["low_sample"] else ""))
+    bf = rep.get("baseline_by_score_factor")
+    if bf:
+        print("  baseline by score factor at entry:")
+        for f, rows in bf["factors"].items():
+            print(f"    {f}: " + "; ".join(f"{r['bin']} {r['trades']} trades, per trade Rs {r['per_trade_inr']}" for r in rows))
     mc = rep.get("monthly_candidates")
     if mc:
         print(f"  monthly candidates and trades ({mc['expectation']}): {mc['total_candidates']} candidates, "
@@ -834,6 +949,7 @@ def main(argv: list[str] | None = None) -> int:
                                                                  **policy_comparison(settings, e, syms, d),
                                                                  **incomplete_sensitivity(settings, e, syms, d, by_mode),
                                                                  **monthly_candidates(settings, e, syms, d, by_mode[next(iter(by_mode))][0]),
+                                                                 **score_reports(settings, e, syms, d, by_mode),
                                                                  **groups_at_end(settings, e, syms, d)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])

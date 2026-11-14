@@ -120,7 +120,10 @@ def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events
         quotes=ChainQuotes(spot, chains), costs=CostModel(s.costs), capital_inr=s.account.capital_inr, rate=RATE,
         iv_reference_pct=iv * 100, iv_rank=iv_rank, margin=lambda structure, width: margin, require_margin=True,
         historical=False, max_spread_pct=sos.max_bid_ask_pct_of_mid, min_oi_lots=sos.min_open_interest_lots,
-        events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars), market={"breadth_pct": 60.0})
+        events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars),
+        # a healthy market and the score's inputs: IV a little under its 20-session peak, the stock 3 points ahead
+        market={"breadth_pct": 60.0, "iv_window": (iv * 100 * 1.05,) * 20, "stock_ret_pct": 5.0, "index_ret_pct": 2.0,
+                "peer_rets_pct": ()})
     base.update(over)
     return OptionContext(**base)
 
@@ -497,15 +500,16 @@ def test_ACCEPTANCE_shortlist_excludes_illiquid_stocks_and_events_and_shows_a_re
     by = {r["stock"]: r for r in rows}
     top = [r for r in rows if r["status"] == "SHORTLISTED"]
     assert [r["stock"] for r in top] == ["TCS", "RELIANCE"] and [r["rank"] for r in top] == [1, 2]
-    assert top[0]["score"] > top[1]["score"]                        # higher IV rank and a clearer trend rank first
+    assert top[0]["score"] > top[1]["score"]                        # the higher IV rank ranks first
+    from app.options.score import FACTORS
     for r in top:
         assert r["side"] == "PE" and r["expiry"] == EXP.isoformat() and len(r["reasons"]) >= 4
-        assert set(r["scores"]) == {"iv_rank", "trend_clarity", "distance", "liquidity"}
-        assert all(0 <= v <= 1 for v in r["scores"].values())
-    w = s.stock_option_selling.weights
-    sc = top[0]["scores"]
-    assert top[0]["score"] == pytest.approx(sc["iv_rank"] * w.iv_rank + sc["trend_clarity"] * w.trend_clarity
-                                            + sc["distance"] * w.distance + sc["liquidity"] * w.liquidity, abs=1e-3)
+        assert set(r["scores"]) == set(FACTORS) and all(0 <= v <= 100 for v in r["scores"].values())
+        assert r["score_missing"] == [] and 0 <= r["score"] <= 100
+        # equal weights: each factor contributes a sixth of its points, and the contributions add up to the score
+        assert all(r["contributions"][k] == pytest.approx(r["scores"][k] / 6, abs=0.01) for k in FACTORS)
+        assert r["score"] == pytest.approx(sum(r["contributions"].values()), abs=0.02)
+    assert top[0]["scores"]["iv_rank"] == 95.0 and top[1]["scores"]["iv_rank"] == 60.0
     assert by["INFY"]["status"] == "EXCLUDED" and any(x.startswith("ILLIQUID") for x in by["INFY"]["reasons"])
     assert by["HDFCBANK"]["status"] == "EXCLUDED" and any(x.startswith("EVENT_BEFORE_EXPIRY") for x in by["HDFCBANK"]["reasons"])
     assert by["ICICIBANK"]["status"] == "EXCLUDED" and any(x.startswith("NO_TREND") for x in by["ICICIBANK"]["reasons"])

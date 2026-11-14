@@ -61,6 +61,7 @@ from .base import (ExpiryInfo, OptionContext, OptionQuote, add_costs, leg_view, 
 from .credit_spread import SIDE_NAME, CreditSpread
 from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
+from .score import candidate_score
 from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
 from .stock_profile import (DOWNTREND_BLOCK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
@@ -158,6 +159,7 @@ class Assessment:
     scores: dict = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     signal: Signal | None = None
+    score: dict | None = None           # the 0-100 score (score.py) once a sold strike is chosen
     short_strike: float | None = None   # the sold strike the rules chose, if they got that far
     distance_pct: float | None = None   # its distance from the price, % of the price
 
@@ -285,8 +287,7 @@ class StockOptionSelling(CreditSpread):
         self.last_no_trade = []          # the reasons of THIS assessment only (roll decisions call assess directly)
         out = Assessment(ctx.underlying)
         direction, clarity, trend_text = trend_of(ctx.daily, p.sma_short, p.sma_mid, p.atr_days)
-        out.scores = {"iv_rank": None if ctx.iv_rank is None else round(ctx.iv_rank / 100.0, 3),
-                      "trend_clarity": clarity, "distance": None, "liquidity": None}
+        out.scores = {}
         out.reasons.append(trend_text)
         out.reasons.append("IV rank unknown" if ctx.iv_rank is None else f"IV rank {ctx.iv_rank:.0f}")
 
@@ -370,8 +371,6 @@ class StockOptionSelling(CreditSpread):
         a = last(atr([b.high for b in ctx.daily], [b.low for b in ctx.daily], closes, p.atr_days)) \
             if len(ctx.daily) > p.atr_days else None
         gap = (ctx.spot - level) if right == "PE" else (level - ctx.spot)
-        if ok(a) and a > 0:
-            out.scores["distance"] = round(max(0.0, min(1.0, gap / (5 * a))), 3)
         level_name = ("the base low" if below is not None and level == below else "support") if right == "PE" else "resistance"
         out.reasons.append(f"{level_name} {fmt(level)} (confirmed {p.swing_pivot_bars}-bar pivot "
                            f"{'low' if right == 'PE' else 'high'}), {fmt(gap)} from the price {fmt(ctx.spot)}")
@@ -387,8 +386,9 @@ class StockOptionSelling(CreditSpread):
         if lp:
             self.no("ILLIQUID", lp)
             return stop()
-        if qs.oi is not None and p.min_open_interest_lots:
-            out.scores["liquidity"] = round(min(1.0, qs.oi / exp.lot_size / (5.0 * p.min_open_interest_lots)), 3)
+        out.score = candidate_score(ctx, right, ks, None if qs.oi is None else qs.oi / exp.lot_size,
+                                    (exp.expiry - today).days, p.score, p)
+        out.scores = out.score["factors"]
         hedge = self.pick_hedge(lctx, exp, right, ks, qs)
         if hedge is None:
             return stop()
@@ -436,6 +436,7 @@ class StockOptionSelling(CreditSpread):
         floor_closes = closes[-504:]                         # about two years, all on or before today
         s.details.update({"side": right, "trend": direction, "support": support, "resistance": resistance,
                           "hedge_strikes_out": n_out,
+                          "score": out.score,
                           "reversal": ({"base_low": below, "confirmed_on": rev.get("confirmed_on"),
                                         "stall_zones": rev.get("stall_zones", [])} if below is not None else None),
                           # what is left of the premium after paying for the hedge and every charge, one lot
@@ -455,6 +456,8 @@ class StockOptionSelling(CreditSpread):
                                                                      p.profile.holding_sessions)["breached_pct"],
                               "iv_rank": ctx.iv_rank, "fii_bias": ctx.market.get("fii_bias"),
                               "vix_spike": ctx.market.get("vix_spike"),
+                              "score": out.score["total"] if out.score else None,
+                              "score_factors": out.score["factors"] if out.score else {},
                               "expected_move_inr": (None if (em := expected_move(ctx.spot, ctx.iv_reference_pct,
                                                                                  (exp.expiry - today).days)) is None
                                                     else round(em, 2)),
@@ -470,25 +473,24 @@ class StockOptionSelling(CreditSpread):
 
 
 # ---------------- shortlist ----------------
-def weighted_score(scores: dict, weights) -> float:
-    """Weighted sum of the four 0..1 scores; an unknown score counts as zero."""
-    return round(sum((scores.get(k) or 0.0) * getattr(weights, k)
-                     for k in ("iv_rank", "trend_clarity", "distance", "liquidity")), 4)
-
-
 def build_shortlist(strategy: StockOptionSelling, contexts: list[OptionContext], annotate=None) -> list[dict]:
-    """Assess every stock and rank the valid setups by weighted score. Returns rows for the `shortlist`
+    """Assess every stock and rank the valid setups by their 0-100 score (score.py), each factor's
+    contribution shown. Returns rows for the `shortlist`
     table: the top `shortlist_size` candidates ranked 1..n, then every other stock with the reason it
     is not on the list (illiquid, event before expiry, no trend, ...)."""
     p = strategy.params
     rows = []
     for ctx in contexts:
         a = strategy.assess(ctx)
+        sc = a.score or {}
         rows.append({"stock": a.stock, "expiry": a.expiry.isoformat() if a.expiry else None, "side": a.side,
-                     "status": a.status, "score": weighted_score(a.scores, p.weights) if a.status == "CANDIDATE" else None,
-                     "scores": a.scores, "reasons": a.reasons, "rank": None,
+                     "status": a.status, "score": sc.get("total") if a.status == "CANDIDATE" else None,
+                     "scores": a.scores, "contributions": sc.get("contributions", {}),
+                     "score_missing": sc.get("missing", []), "reasons": a.reasons, "rank": None,
                      **(annotate(ctx, a) if annotate is not None else {})})
-    good = sorted((r for r in rows if r["status"] == "CANDIDATE"), key=lambda r: (-r["score"], r["stock"]))
+    # fully scored candidates by score; a candidate whose score is incomplete after them, by name
+    good = sorted((r for r in rows if r["status"] == "CANDIDATE"),
+                  key=lambda r: (r["score"] is None, -(r["score"] or 0.0), r["stock"]))
     for n, r in enumerate(good, start=1):
         if n <= p.shortlist_size:
             r["rank"], r["status"] = n, "SHORTLISTED"

@@ -479,12 +479,23 @@ class Options(StrictModel):
 
 
 # ---------------- phase 9: stock option selling ----------------
-class ShortlistWeights(StrictModel):
-    """Ranking weights of the daily shortlist (each score is 0..1; the weights need not sum to 1)."""
-    iv_rank: float = Field(0.35, ge=0, le=1)
-    trend_clarity: float = Field(0.25, ge=0, le=1)
-    distance: float = Field(0.20, ge=0, le=1)          # room between the price and its support / resistance
-    liquidity: float = Field(0.20, ge=0, le=1)
+class ScoreWeights(StrictModel):
+    """Weights of the six score factors (app/options/score.py); equal by default."""
+    iv_rank: float = Field(1.0, ge=0, le=10)
+    iv_falling: float = Field(1.0, ge=0, le=10)
+    rel_strength: float = Field(1.0, ge=0, le=10)
+    strike_distance: float = Field(1.0, ge=0, le=10)
+    range_profile: float = Field(1.0, ge=0, le=10)
+    liquidity: float = Field(1.0, ge=0, le=10)
+
+
+class ScoreConfig(StrictModel):
+    """The 0-100 candidate score (section 4). A ranking aid, never a probability."""
+    weights: ScoreWeights = ScoreWeights()
+    iv_peak_sessions: int = Field(20, ge=2, le=120)                # iv_falling: IV against its peak of these sessions
+    iv_falling_ratio: float = Field(0.9, gt=0, lt=1)               # at or below 90% of the peak = falling (full points)
+    hist_fall_sessions: int = Field(21, ge=2, le=120)              # hist_fall_percentile: 21-session falls ...
+    hist_fall_percentile: float = Field(90.0, gt=0, lt=100)        # ... their 90th percentile, since 2019-01-22
 
 
 class StockSellingBacktest(StrictModel):
@@ -674,7 +685,7 @@ class StockOptionSelling(StrictModel):
     # among the pivots of the last `pivot_lookback_sessions` sessions (a new definition, recorded 2026-11-15).
     pivot_lookback_sessions: int = Field(252, ge=20, le=500)
     shortlist_size: int = Field(10, ge=1, le=100)
-    weights: ShortlistWeights = ShortlistWeights()
+    score: ScoreConfig = ScoreConfig()
     trend_block: TrendBlock = TrendBlock()
     campaign_limit: CampaignLimit = CampaignLimit()
     market_block: MarketBlock = MarketBlock()

@@ -25,7 +25,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from ..config import Settings
 from ..costs import CostModel
-from ..history import bar_date
+from ..history import bar_date, daily_start
 from ..indicators import after_last_break, gap_breaks
 from ..manual_data import Event
 from ..models import utcnow
@@ -39,6 +39,7 @@ from .instruments import InstrumentBook
 from .margin import MarginBook
 from .reversal import ReversalScanner, build_reversal_strategies
 from .actionable import RESEARCH_LABEL, actionable_check
+from .option_history import OptionHistory, stock_iv_series
 from .portfolio import Correlations, universe_groups
 from .stock_profile import HISTORY_LABEL, breadth_pct, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
 from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling, phase9_settings
@@ -98,7 +99,7 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
         market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session),
                 "breadth_pct": breadth_on(settings, store, source, session), "chain_as_of": chain_as_of,
-                "daily_bar_date": bar_date(bars[-1])}), None
+                "daily_bar_date": bar_date(bars[-1]), **score_inputs_from_store(settings, store, source, sym, session)}), None
 
 
 # What to fill in when a scenario has no input data. Nothing is ever invented for a missing file.
@@ -217,6 +218,36 @@ def correlation_groups(settings: Settings, store: Store, source: str) -> dict:
     sectors = {i.symbol: (i.sector or None) for i in settings.watchlist}
     return {"date": session.isoformat(), **universe_groups(stocks, sectors, lambda a, b: corr.at(session, a, b),
                                                            settings.stock_option_selling.portfolio.correlation_threshold)}
+
+
+def score_inputs_from_store(settings: Settings, store: Store, source: str, sym: str, session: date) -> dict:
+    """The score's market inputs at the close of `session` from stored data (OptionEngine.score_inputs
+    computes the same in backtests): the stock's at-the-money IV of the sessions before, and the
+    rel_strength_lookback returns of the stock, NIFTY and the sector peers."""
+    sos = settings.stock_option_selling
+    cfg = settings.option_underlying(sym)
+    closes = {bar_date(b): b.close for b in store.history_bars("bars_1d", sym, source, limit=400)}
+    hist_src = OptionHistory(store, source)
+    monthly = [e for e, k in hist_src.expiries(settings.regime.index_symbol) if k == "monthly"]
+    series = stock_iv_series(hist_src, sym, monthly, closes, cfg.backtest_strike_step if cfg else None,
+                             settings.options.risk_free_rate_pct / 100, (cfg.dividend_yield_pct if cfg else 0) / 100)
+    window = [v for d, v in sorted(series.items()) if d < session][-sos.score.iv_peak_sessions:]
+    sessions = [bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)]
+    n = sos.trend_block.rel_strength_lookback
+
+    def ret(s: str) -> float | None:
+        if session not in sessions or sessions.index(session) < n:
+            return None
+        c = {bar_date(b): b.close for b in store.history_bars("bars_1d", s, source, limit=400)}
+        d0 = sessions[sessions.index(session) - n]
+        return None if not c.get(d0) or c.get(session) is None else (c[session] / c[d0] - 1) * 100
+
+    sector = next((x.sector for x in settings.watchlist if x.symbol == sym), None)
+    peers = [x.symbol for x in settings.watchlist if x.kind == "stock" and x.symbol != sym and sector and x.sector == sector]
+    floor = settings.backtest.test_start.get("1day")
+    return {"iv_window": tuple(window), "stock_ret_pct": ret(sym), "index_ret_pct": ret(settings.regime.index_symbol),
+            "peer_rets_pct": tuple(r for r in (ret(x) for x in peers) if r is not None),
+            "stats_floor": daily_start(floor) if floor else None}
 
 
 _BREADTH: dict = {}
