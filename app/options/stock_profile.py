@@ -75,6 +75,40 @@ def trend_block(daily: Sequence, index_daily: Sequence, right: str, cfg) -> tupl
     return (UPTREND_BLOCK if why else None), why
 
 
+# ---------------- market block ----------------
+MARKET_WEAK, MARKET_UNKNOWN = "MARKET_WEAK", "MARKET_UNKNOWN"
+
+
+def breadth_pct(stocks: Sequence[Sequence[float]], sma_days: int, min_coverage_pct: float, total: int) -> float | None:
+    """Share (%) of stocks whose last close is above the average of their last `sma_days` closes.
+    `stocks`: each stock's closes up to the decision day (those without a bar that day are left out by
+    the caller). None when fewer than `min_coverage_pct` of the `total` stocks have enough closes."""
+    usable = [c for c in stocks if len(c) >= sma_days]
+    if total <= 0 or len(usable) / total * 100 < min_coverage_pct:
+        return None
+    above = sum(1 for c in usable if c[-1] > sum(c[-sma_days:]) / sma_days)
+    return round(above / len(usable) * 100, 1)
+
+
+def market_weak(index_daily: Sequence, breadth: float | None, cfg, long_sma_days: int) -> tuple[str | None, list[str]]:
+    """(MARKET_WEAK | MARKET_UNKNOWN | None, why). Weak = the index closed below its long average, or
+    breadth is below `min_breadth_pct`. Without enough index history or a breadth figure the state is
+    unknown, which blocks like weak: unknown never passes."""
+    if len(index_daily) < long_sma_days:
+        return MARKET_UNKNOWN, [f"{len(index_daily)} index bars, the market block needs {long_sma_days}"]
+    if breadth is None:
+        return MARKET_UNKNOWN, ["market breadth unknown (too few stocks with usable price history that day)"]
+    closes = [b.close for b in index_daily]
+    avg = sum(closes[-long_sma_days:]) / long_sma_days
+    why = []
+    if closes[-1] < avg:
+        why.append(f"the index closed at {fmt(closes[-1])}, below its {long_sma_days}-day average {fmt(avg)}")
+    if breadth < cfg.min_breadth_pct:
+        why.append(f"only {breadth:g}% of stocks are above their {cfg.breadth_sma_days}-session average "
+                   f"(minimum {cfg.min_breadth_pct:g}%)")
+    return (MARKET_WEAK if why else None), why
+
+
 # ---------------- 2. per-stock campaign limit ----------------
 @dataclass(frozen=True)
 class ClosedTrade:
@@ -333,11 +367,12 @@ class Snapshot:
     regime: str | None = None
     news_tags: tuple[str, ...] = ()       # from the phase 8 news tagging, e.g. EVENT_RISK
     reversal: bool = False                # a reversal was confirmed for this stock on this session (reversal.py)
+    market_weak: bool | None = None       # MARKET_WEAK applies at this close (None = unknown)
 
 
 def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None = None,
              vix_change_pct: float | None = None, regime: str | None = None, news_tags: Sequence[str] = (),
-             reversal: bool = False) -> Snapshot | None:
+             reversal: bool = False, market_weak: bool | None = None) -> Snapshot | None:
     """The snapshot at the close of the last bar given."""
     if not daily:
         return None
@@ -349,10 +384,11 @@ def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None 
     return Snapshot(bar_date(daily[-1]), closes[-1],
                     min(b.low for b in recent) if recent else None, max(b.high for b in recent) if recent else None,
                     min(b.low for b in before) if before else None, max(b.high for b in before) if before else None,
-                    avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags), reversal)
+                    avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags), reversal, market_weak)
 
 
-ALERT_KINDS = ("BELOW_SUPPORT", "NEW_52W_LOW", "BROKE_LONG_AVERAGE", "FII_STREAK", "VIX_SPIKE", "REGIME_TURN", "EVENT_RISK")
+ALERT_KINDS = ("BELOW_SUPPORT", "NEW_52W_LOW", "BROKE_LONG_AVERAGE", "FII_STREAK", "VIX_SPIKE", "REGIME_TURN", "MARKET_WEAK",
+               "EVENT_RISK")
 
 
 def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spike_pct: float,
@@ -393,6 +429,8 @@ def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spi
         add("VIX_SPIKE", f"India VIX rose {now.vix_change_pct:.1f}% in the session (spike level {vix_spike_pct:g}%)")
     if now.regime in ("VOLATILE", "EVENT") and prev.regime is not None and prev.regime != now.regime:
         add("REGIME_TURN", f"market regime turned {now.regime} (was {prev.regime})")
+    if put and now.market_weak is True and prev.market_weak is False:
+        add("MARKET_WEAK", "the market turned weak: the index below its long average or breadth under the minimum")
     if "EVENT_RISK" in now.news_tags and "EVENT_RISK" not in prev.news_tags:
         add("EVENT_RISK", "news tagged the stock EVENT_RISK")
     # The same alert for every open position in the stock, put or call spread, from a signal or entered

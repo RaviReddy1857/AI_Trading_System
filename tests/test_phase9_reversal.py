@@ -122,7 +122,7 @@ def reversal_ctx(cfg, after=0, iv=0.6, confirmed_today=None, **kw):
         info = {**info, "confirmed_today": confirmed_today}
     spot = bars[-1].close
     return ctx_for(cfg, bars, chain(spot, lo=350, hi=900, iv=iv), iv=iv, index_daily=tuple(idx),
-                   market={"reversal": info}, **kw), info
+                   market={"reversal": info, "breadth_pct": 60.0}, **kw), info
 
 
 def test_ACCEPTANCE_reversal_lifts_the_falling_stock_block_only_for_a_put_spread_below_the_base_low():

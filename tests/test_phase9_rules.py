@@ -460,11 +460,11 @@ def test_ACCEPTANCE_report_shows_the_effect_of_each_rule_and_alert_against_the_b
 
     out = rule_effects(cfg, eng, ["RELIANCE"], dev, {"intraday": split("intraday")})
     rows = {r["label"]: r for r in out["rule_effects"]["rows"]}
-    assert list(rows)[:8] == ["strategy: all rules", "strategy without the minimum net credit",
-                              "strategy without the trend block", "strategy without the campaign limit",
-                              "baseline: no rules", "baseline + trend block", "baseline + campaign limit",
-                              "baseline + minimum net credit"]
-    assert len(rows) == 8 + len(ALERT_SETS) + 1 and out["rule_effects"]["exit_check"] == "intraday"
+    assert list(rows)[:10] == ["strategy: all rules", "strategy without the minimum net credit",
+                               "strategy without the trend block", "strategy without the campaign limit",
+                               "strategy without the market block", "baseline: no rules", "baseline + trend block",
+                               "baseline + campaign limit", "baseline + minimum net credit", "baseline + market block"]
+    assert len(rows) == 10 + len(ALERT_SETS) + 1 and out["rule_effects"]["exit_check"] == "intraday"
     assert rows["strategy: all rules"]["net_pnl_inr"] == res["report"]["overall"]["net_pnl_inr"]
     assert rows["baseline: no rules"]["net_pnl_inr"] == res["report"]["baseline"]["overall"]["net_pnl_inr"]
     assert rows["baseline + trend block"]["trades"] < rows["baseline: no rules"]["trades"]
@@ -483,3 +483,60 @@ def test_ACCEPTANCE_report_shows_the_effect_of_each_rule_and_alert_against_the_b
     ec = t0["entry_conditions"]
     assert ec["state"] in ("TRENDING_UP", "TRENDING_DOWN", "RANGING") and ec["short_strike_distance_pct"] > 0
     assert ec["breach_history_pct"] is not None and ec["fii_bias"] is None and ec["vix_change_pct"] is not None
+
+
+# ---------------- MARKET_WEAK ----------------
+def test_ACCEPTANCE_market_weak_blocks_put_selling_and_unknown_market_data_blocks_too(s):
+    from app.options.stock_profile import MARKET_UNKNOWN, MARKET_WEAK, breadth_pct, market_weak
+    MB = s.stock_option_selling.market_block
+    bars = stock_bars()
+    flat, falling = index_bars(bars), index_bars(bars, 24000.0, -10.0)
+    assert market_weak(flat, 60.0, MB, 200) == (None, [])
+    code, why = market_weak(falling, 60.0, MB, 200)                  # the index is below its 200-day average
+    assert code == MARKET_WEAK and len(why) == 1 and "below its 200-day average" in why[0]
+    code, why = market_weak(flat, 39.9, MB, 200)                     # breadth under 40%
+    assert code == MARKET_WEAK and "39.9% of stocks" in why[0]
+    assert market_weak(flat, 40.0, MB, 200)[0] is None               # at the minimum is not below it
+    assert market_weak(flat, None, MB, 200)[0] == MARKET_UNKNOWN     # unknown breadth never passes
+    assert market_weak(flat[:150], 60.0, MB, 200)[0] == MARKET_UNKNOWN
+    # breadth by hand: 3 of 4 usable stocks above their 3-session average; a stock with too few closes is not usable
+    rows = [[1, 2, 3], [3, 2, 4], [5, 5, 6], [9, 8, 7], [1]]
+    assert breadth_pct(rows, 3, 80.0, 5) == 75.0 and breadth_pct(rows, 3, 90.0, 5) is None and breadth_pct([], 3, 80.0, 0) is None
+    # strategy: a weak or unknown market gives no put signal; the block can be switched off; calls are not blocked
+    strat = build_stock_selling(s)
+    assert strat.evaluate(ctx_for(s, bars))
+    for market, code in (({"breadth_pct": 30.0}, MARKET_WEAK), ({}, MARKET_UNKNOWN)):
+        assert strat.evaluate(ctx_for(s, bars, market=market)) == [] and any(r.startswith(code) for r in strat.last_no_trade)
+    assert strat.evaluate(ctx_for(s, bars, index_daily=falling)) == [] and any(r.startswith(MARKET_WEAK) for r in strat.last_no_trade)
+    off = build_stock_selling(settings(stock_option_selling={"market_block": {**MB.model_dump(), "enabled": False}}))
+    assert off.evaluate(ctx_for(s, bars, market={"breadth_pct": 30.0}))
+    down = stock_bars(start=1200, drift=-1.0)
+    calls = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 5}))
+    sig = calls.evaluate(ctx_for(s, down, chain(down[-1].close), market={"breadth_pct": 10.0}))
+    assert sig and sig[0].details["side"] == "CE"
+    # open-position guidance: MARKET_WEAK is reported for a put spread on the session it begins
+    k = lambda prev, now, right="PE": [a["kind"] for a in alert_kinds(prev, now, right, 15.0)]
+    assert k(snap(market_weak=False), snap(date(2026, 11, 13), market_weak=True)) == ["MARKET_WEAK"]
+    assert k(snap(market_weak=True), snap(date(2026, 11, 13), market_weak=True)) == []
+    assert k(snap(market_weak=None), snap(date(2026, 11, 13), market_weak=True)) == []       # unknown before: not a known change
+    assert k(snap(market_weak=False), snap(date(2026, 11, 13), market_weak=True), "CE") == []
+
+
+def test_backtest_market_block_uses_breadth_known_at_each_close(world):
+    cfg, store, base, _ = world
+    eng = engine_for(cfg, store, base, OptionHistory(store, "sim"))
+    d = date(2025, 7, 15)
+    assert eng.breadth_at(d) == 100.0                                # the one fixture stock is above its 50-session average
+    assert eng.breadth_at(date(2025, 7, 13)) is None                 # a Sunday: no stock traded, breadth unknown
+    thin = settings(backtest=cfg.backtest.model_dump(), options=cfg.options.model_dump(),
+                    stock_option_selling={"market_block": {"enabled": True, "breadth_sma_days": 50, "min_breadth_pct": 40.0,
+                                                           "min_coverage_pct": 80.0}})
+    eng2 = engine_for(thin, store, base, OptionHistory(store, "sim"))
+    assert eng2.breadth_at(d) is None                                # 1 of 5 watchlist stocks has data: under 80% coverage
+    blocked, sk = [], Counter()
+    eng2.set_expiry_floor(date(2025, 3, 1))
+    sessions = [x for x in base.session_dates() if date(2025, 6, 2) <= x < date(2025, 10, 1)]
+    blocked = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:PE", sk)
+    assert blocked == [] and sk["NO_SIGNAL:MARKET_UNKNOWN"] >= 3     # unknown breadth blocks every scheduled put spread
+    calls = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:CE", Counter())
+    assert calls                                                     # call spreads are not blocked by the market block

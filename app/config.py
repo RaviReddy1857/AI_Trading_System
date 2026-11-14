@@ -524,6 +524,15 @@ class TrendBlock(StrictModel):
     max_underperformance_pct: float = Field(5.0, gt=0, le=100)     # rel_strength_max_lag_pct: stock return minus NIFTY return, points
 
 
+class MarketBlock(StrictModel):
+    """MARKET_WEAK: no put-selling signal when NIFTY is below its long average (trend_block.long_sma_days) or
+    fewer than `min_breadth_pct` of the watchlist stocks are above their `breadth_sma_days` average."""
+    enabled: bool = True
+    breadth_sma_days: int = Field(50, ge=5, le=200)                # sma_mid
+    min_breadth_pct: float = Field(40.0, ge=0, le=100)             # market_breadth_min_pct
+    min_coverage_pct: float = Field(80.0, gt=0, le=100)            # share of stocks with usable data, else breadth is unknown
+
+
 class CampaignLimit(StrictModel):
     """Per-stock campaign limit (STOCK_LOSS_LIMIT): after repeated stops or a large loss in one stock,
     no new signal in that stock for a cooling-off period. Closed manual positions count too."""
@@ -637,6 +646,7 @@ class StockOptionSelling(StrictModel):
     weights: ShortlistWeights = ShortlistWeights()
     trend_block: TrendBlock = TrendBlock()
     campaign_limit: CampaignLimit = CampaignLimit()
+    market_block: MarketBlock = MarketBlock()
     roll: RollRules = RollRules()
     reversal: Reversal = Reversal()
     profile: StockProfile = StockProfile()

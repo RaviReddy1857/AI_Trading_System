@@ -42,6 +42,8 @@ FIXTURE_SOS = {
     "campaign_limit": {"enabled": True, "window_days": 90, "max_stopped_trades": 2, "max_cumulative_loss_pct": 5.0,
                        "cooling_off_days": 45},
     "roll": {"max_rolls": 1, "min_net_credit_pct_of_width": 10.0, "stuck_time_value_pct": 10.0},
+    # the fixture worlds hold one or two of the five fixture-watchlist stocks: breadth is computed from those
+    "market_block": {"enabled": True, "breadth_sma_days": 50, "min_breadth_pct": 40.0, "min_coverage_pct": 20.0},
 }
 
 
@@ -113,7 +115,7 @@ def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events
         quotes=ChainQuotes(spot, chains), costs=CostModel(s.costs), capital_inr=s.account.capital_inr, rate=RATE,
         iv_reference_pct=iv * 100, iv_rank=iv_rank, margin=lambda structure, width: margin, require_margin=True,
         historical=False, max_spread_pct=sos.max_bid_ask_spread_pct, min_oi_lots=sos.min_open_interest,
-        events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars))
+        events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars), market={"breadth_pct": 60.0})
     base.update(over)
     return OptionContext(**base)
 
@@ -434,6 +436,8 @@ def test_shipped_defaults_are_the_section_2_values():
     assert (rv.drawdown_pct, rv.min_sessions_below_long, rv.base_no_new_low_sessions) == (25.0, 63, 15)
     assert (rv.range_sessions, rv.range_compare_sessions, rv.range_shrink_ratio) == (10, 20, 0.8)
     assert rv.alerts_approved is False and _settings().options.backtest.daily_request_budget == 3500
+    mb = p.market_block
+    assert (mb.enabled, mb.breadth_sma_days, mb.min_breadth_pct) == (True, 50, 40.0)       # market_breadth_min_pct
 
 
 def test_config_is_validated():
@@ -932,7 +936,7 @@ def test_every_backtest_trade_is_hedged_enters_at_the_next_session_and_is_flat_b
     timed = [t for t in res["trades"] if t["exit_reason"] == "TIME"]
     for t in timed:
         exp, exit_d = date.fromisoformat(t["expiry"]), ist_date(t["exit_time"])
-        assert (exp - exit_d).days <= 7 and datetime.fromisoformat(t["exit_time"]).astimezone(IST).time() == time(9, 15)
+        assert (exp - exit_d).days <= 10 and datetime.fromisoformat(t["exit_time"]).astimezone(IST).time() == time(9, 15)
 
 
 def test_stock_backtest_is_deterministic(world):

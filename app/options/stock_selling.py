@@ -22,6 +22,9 @@ Entry rules (StockOptionSelling.assess; every number is computed here, none by a
 - falling-stock block (`trend_block`): no put selling when the stock is below its 200-day average, made
   a 52-week low in the last 20 sessions, or trails NIFTY over 3 months by more than the set margin
   (DOWNTREND_BLOCK); mirrored for call selling in a strong uptrend (UPTREND_BLOCK).
+- market block (`market_block`): no put selling when NIFTY is below its 200-day average or fewer than 40% of
+  the watchlist stocks are above their 50-session average (MARKET_WEAK); unknown market data blocks too
+  (MARKET_UNKNOWN). Call selling is not blocked by a weak market.
 - per-stock campaign limit (`campaign_limit`): after 2 stopped trades or a set net loss in one stock
   within 90 days, no new signal in it for the cooling-off period (STOCK_LOSS_LIMIT). The context's
   `closed_trades` carries signals and manual positions alike.
@@ -58,7 +61,7 @@ from .credit_spread import SIDE_NAME, CreditSpread
 from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (DOWNTREND_BLOCK, STOCK_LOSS_LIMIT, Snapshot, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -319,6 +322,13 @@ class StockOptionSelling(CreditSpread):
         if self.below_base_low and not ctx.no_filter and below is None:
             self.no("NO_REVERSAL", "no confirmed reversal with a base low for this stock")
             return stop()
+        if right == "PE" and self.applies("market_block", ctx):
+            # put selling is the side a weak market hurts; unknown market state blocks as well
+            code, why_mkt = market_weak(ctx.index_daily, ctx.market.get("breadth_pct"), p.market_block,
+                                        p.trend_block.long_sma_days)
+            if code:
+                self.no(code, "; ".join(why_mkt))
+                return stop()
         if self.applies("campaign_limit", ctx):
             limit = stock_loss_limit(ctx.closed_trades, today, p.campaign_limit, ctx.capital_inr)
             if limit:

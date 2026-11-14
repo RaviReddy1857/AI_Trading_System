@@ -100,6 +100,7 @@ ALERT_SETS = {
     "FII streak begins": {"FII_STREAK"},
     "India VIX spike": {"VIX_SPIKE"},
     "regime turns VOLATILE or EVENT": {"REGIME_TURN"},
+    "market turns weak": {"MARKET_WEAK"},
 }
 
 
@@ -118,7 +119,8 @@ def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict
     s = stats(trades, settings.account.capital_inr, settings.backtest.min_trades)
     blocked = {k.split(":", 1)[1]: v for k, v in skipped.items()
                if k.startswith("NO_SIGNAL:") and k.split(":", 1)[1] in ("DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT",
-                                                                         "INSUFFICIENT_HISTORY", "CREDIT_TOO_SMALL")}
+                                                                         "INSUFFICIENT_HISTORY", "CREDIT_TOO_SMALL", "MARKET_WEAK",
+                                                                         "MARKET_UNKNOWN")}
     return {"label": label, "trades": s["trades"], "win_rate_pct": s["win_rate_pct"], "net_pnl_inr": s["net_pnl_inr"],
             "per_trade_inr": round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None,
             "profit_factor": s["profit_factor"], "max_drawdown_inr": s["max_drawdown_inr"], "low_sample": s["low_sample"],
@@ -154,10 +156,12 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
             _row("strategy without the minimum net credit", *run(no_min, False), settings),
             _row("strategy without the trend block", *run(variant(settings, off=("trend_block",)), False), settings),
             _row("strategy without the campaign limit", *run(variant(settings, off=("campaign_limit",)), False), settings),
+            _row("strategy without the market block", *run(variant(settings, off=("market_block",)), False), settings),
             _row("baseline: no rules", base_trades, base_skipped, settings),
             _row("baseline + trend block", *run(variant(settings, baseline_rules=("trend_block",)), True), settings),
             _row("baseline + campaign limit", *run(variant(settings, baseline_rules=("campaign_limit",)), True), settings),
-            _row("baseline + minimum net credit", *run(variant(settings, baseline_rules=("min_credit",)), True), settings)]
+            _row("baseline + minimum net credit", *run(variant(settings, baseline_rules=("min_credit",)), True), settings),
+            _row("baseline + market block", *run(variant(settings, baseline_rules=("market_block",)), True), settings)]
     for name, kinds in ALERT_SETS.items():
         rows.append(_row(f"baseline + exit on alert: {name}", *run(variant(settings, alert_exits=kinds), True), settings))
     every = set().union(*ALERT_SETS.values())
@@ -511,7 +515,8 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
             no_min.params = no_min.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
             runs = [(strategy, ["strategy"] + baseline_variants(strategy)), (no_min, ["strategy"]),
                     (variant(settings, off=("trend_block",)), ["strategy"]),      # each rule-effect row enters its own trades
-                    (variant(settings, off=("campaign_limit",)), ["strategy"])]
+                    (variant(settings, off=("campaign_limit",)), ["strategy"]),
+                    (variant(settings, off=("market_block",)), ["strategy"])]
             for st, names in runs:
                 for name in names:
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")

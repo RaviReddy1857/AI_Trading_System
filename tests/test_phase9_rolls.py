@@ -295,7 +295,8 @@ def test_ACCEPTANCE_the_three_exit_policies_use_exactly_the_same_entries(drop_wo
 REFUSALS = {"STUCK_POSITION", "MAX_ROLLS", "OTHER_SIDE", "STRIKE_NOT_BETTER", "ROLL_PRICE_UNKNOWN",
             "ROLL_NET_CREDIT_TOO_SMALL", "NO_EXPIRY", "ROLL_NOT_FILLED", "NO_TREND", "IV_RANK_UNKNOWN", "IV_RANK_TOO_LOW",
             "DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT", "NO_STRIKE", "ILLIQUID", "UNHEDGED_SHORT",
-            "CREDIT_TOO_SMALL", "MAX_LOSS_ABOVE_LIMIT", "INSUFFICIENT_HISTORY", "NO_CREDIT", "NO_CREDIT_AFTER_COSTS"}
+            "CREDIT_TOO_SMALL", "MAX_LOSS_ABOVE_LIMIT", "INSUFFICIENT_HISTORY", "NO_CREDIT", "NO_CREDIT_AFTER_COSTS",
+            "MARKET_WEAK", "MARKET_UNKNOWN"}
 
 
 def test_roll_policy_refuses_a_roll_that_does_not_pay_for_closing_the_old_spread_and_records_the_rule(drop_world):

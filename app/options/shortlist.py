@@ -38,7 +38,7 @@ from .greeks import days_to_expiry, years_to_expiry
 from .instruments import InstrumentBook
 from .margin import MarginBook
 from .reversal import ReversalScanner, build_reversal_strategies
-from .stock_profile import HISTORY_LABEL, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
+from .stock_profile import HISTORY_LABEL, breadth_pct, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
 from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling
 
 log = logging.getLogger("shortlist")
@@ -92,7 +92,8 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         min_oi_lots=sos.min_open_interest, search_steps=o.backtest.strike_search_steps, events=events,
         daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct)),
         index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
-        market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session)}), None
+        market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session),
+                "breadth_pct": breadth_on(settings, store, source, session)}), None
 
 
 # What to fill in when a scenario has no input data. Nothing is ever invented for a missing file.
@@ -173,6 +174,26 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
     out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
                                                                 bar_date(bars[-1])), sos.profile, floor)
     return out
+
+
+_BREADTH: dict = {}
+
+
+def breadth_on(settings: Settings, store: Store, source: str, session: date) -> float | None:
+    """Market breadth at the close of `session` from the stored daily bars (stocks without a bar that
+    day are left out; too few usable stocks means unknown)."""
+    key = (id(store), source, session)
+    if key not in _BREADTH:
+        cfg = settings.stock_option_selling.market_block
+        stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
+        rows = []
+        for sym in stocks:
+            bars = store.history_bars("bars_1d", sym, source, limit=cfg.breadth_sma_days)
+            if bars and bar_date(bars[-1]) == session:
+                rows.append([b.close for b in bars])
+        _BREADTH.clear()
+        _BREADTH[key] = breadth_pct(rows, cfg.breadth_sma_days, cfg.min_coverage_pct, len(stocks))
+    return _BREADTH[key]
 
 
 def reversal_scanner(settings: Settings, store: Store, source: str, sym: str) -> ReversalScanner:

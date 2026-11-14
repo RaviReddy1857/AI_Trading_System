@@ -69,7 +69,8 @@ from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_co
 from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
-from .stock_profile import ClosedTrade, Snapshot, alert_kinds, snapshot
+from .stock_profile import (MARKET_UNKNOWN, MARKET_WEAK, ClosedTrade, Snapshot, alert_kinds, breadth_pct, market_weak,
+                            snapshot)
 from .stock_selling import SpreadPosition, roll_choices, roll_money
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
                              discover_expiries, simulated_expiries, stock_iv_series)
@@ -263,6 +264,8 @@ class OptionEngine:
         self._iv: dict[str, tuple[list[date], list[float]]] = {}
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
         self._market: dict[date, dict] = {}
+        self._breadth: dict[date, float | None] = {}
+        self._stock_closes: dict | None = None
         self._reversal: dict[str, object] = {}
         self._trigger = None
         self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
@@ -336,6 +339,25 @@ class OptionEngine:
                                "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None}
         return self._market[d]
 
+    def breadth_at(self, d: date) -> float | None:
+        """Market breadth known at the close of day d: share of the watchlist stocks above their
+        `breadth_sma_days` average, from each stock's bars up to and including d (cached)."""
+        if d not in self._breadth:
+            cfg = self.s.stock_option_selling.market_block
+            if self._stock_closes is None:
+                self._stock_closes = {}
+                for inst in self.s.watchlist:
+                    if inst.kind == "stock":
+                        bars = self.base.daily(inst.symbol)
+                        self._stock_closes[inst.symbol] = ([bar_date(b) for b in bars], [b.close for b in bars])
+            rows = []
+            for dates, closes in self._stock_closes.values():
+                k = bisect.bisect_right(dates, d)
+                if k and dates[k - 1] == d:                      # the stock traded that day
+                    rows.append(closes[max(0, k - cfg.breadth_sma_days):k])
+            self._breadth[d] = breadth_pct(rows, cfg.breadth_sma_days, cfg.min_coverage_pct, len(self._stock_closes))
+        return self._breadth[d]
+
     def reversal_scanner(self, sym: str):
         """The stock's reversal states for every day of its history (point in time; cached)."""
         if sym not in self._reversal:
@@ -351,8 +373,11 @@ class OptionEngine:
     def snapshot_at(self, sym: str, bars: tuple, d: date) -> Snapshot | None:
         sos = self.s.stock_option_selling
         m = self.market_at(d)
+        code, _ = market_weak(self.base.index_daily(d)[-400:], self.breadth_at(d), sos.market_block,
+                              sos.trend_block.long_sma_days)
         return snapshot(bars, sos.support_resistance_lookback_days, sos.trend_block, m["fii_bias"], m["vix_change_pct"],
-                        self.base.regime.at_close(d).regime)
+                        self.base.regime.at_close(d).regime,
+                        market_weak=None if code == MARKET_UNKNOWN else code == MARKET_WEAK)
 
     def trigger_strategy(self):
         if self._trigger is None:
@@ -378,7 +403,8 @@ class OptionEngine:
             no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None,
             daily=daily, index_daily=self.base.index_daily(d)[-400:] if daily else (),
             closed_trades=closed_trades,
-            market={**self.market_at(d), "reversal": self.reversal_scanner(sym).info_on(d)} if daily else {})
+            market={**self.market_at(d), "reversal": self.reversal_scanner(sym).info_on(d),
+                    "breadth_pct": self.breadth_at(d)} if daily else {})
 
     # ---- fills ----
     def _leg_bars(self, sym: str, legs, d: date):
