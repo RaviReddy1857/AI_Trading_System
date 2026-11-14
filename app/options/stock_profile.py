@@ -57,8 +57,8 @@ def trend_block(daily: Sequence, index_daily: Sequence, right: str, cfg) -> tupl
     if right == "PE":
         if closes[-1] < avg:
             why.append(f"close {fmt(closes[-1])} is below the {cfg.long_sma_days}-day average {fmt(avg)}")
-        low = min(b.low for b in window)
-        if min(b.low for b in recent) <= low:
+        low = min(b.close for b in window)                     # a 52-week low is the lowest CLOSE of the window
+        if min(b.close for b in recent) <= low:
             why.append(f"52-week low {fmt(low)} was made in the last {cfg.extreme_recent_sessions} sessions")
         if rel < -cfg.max_underperformance_pct:
             why.append(f"{cfg.relative_return_sessions}-session return {stock_ret:.1f}% trails the index "
@@ -66,8 +66,8 @@ def trend_block(daily: Sequence, index_daily: Sequence, right: str, cfg) -> tupl
         return (DOWNTREND_BLOCK if why else None), why
     if closes[-1] > avg:
         why.append(f"close {fmt(closes[-1])} is above the {cfg.long_sma_days}-day average {fmt(avg)}")
-    high = max(b.high for b in window)
-    if max(b.high for b in recent) >= high:
+    high = max(b.close for b in window)
+    if max(b.close for b in recent) >= high:
         why.append(f"52-week high {fmt(high)} was made in the last {cfg.extreme_recent_sessions} sessions")
     if rel > cfg.max_underperformance_pct:
         why.append(f"{cfg.relative_return_sessions}-session return {stock_ret:.1f}% leads the index "

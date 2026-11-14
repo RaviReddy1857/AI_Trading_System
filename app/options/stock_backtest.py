@@ -233,6 +233,8 @@ def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], de
                 "worst_campaign_inr": min(nets) if nets else None, "max_drawdown_inr": s["max_drawdown_inr"],
                 "costs_inr": s["costs_inr"], "hedge_cost_inr": round(sum(c["hedge_cost_inr"] for c in camps), 2),
                 "rolled_when_recovery_was_not_possible": sum(1 for c in camps if c["rolled_when_recovery_was_not_possible"]),
+                # which rule said "exit" each time a roll was considered and not made
+                "roll_refusals": dict(sorted(Counter(t.roll_refused for t in trades if t.roll_refused).items())),
                 "low_sample": n < min_n}
 
     return {"exit_policy_comparison": {
@@ -253,6 +255,7 @@ def print_effects(rep: dict) -> None:
                 print(f"    {group:9s} {r['policy']:12s} campaigns {r['campaigns']:4d}  rolls {r['rolls']:4d} (max "
                       f"{r['max_rolls_in_a_campaign']})  win {r['win_rate_pct']}%  net Rs {r['net_pnl_inr']:>12,.2f}  "
                       f"per campaign Rs {r['per_campaign_inr']}  worst Rs {r['worst_campaign_inr']}"
+                      + (f"  roll refused by {r['roll_refusals']}" if r["roll_refusals"] else "")
                       + ("  LOW SAMPLE" if r["low_sample"] else ""))
     fx = rep.get("rule_effects")
     if not fx:

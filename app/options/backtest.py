@@ -124,6 +124,7 @@ class OptionTrade:
     campaign_id: str = ""         # phase 9: the original signal's id; a roll keeps its original trade's id
     roll_no: int = 0              # 0 = the original trade, 1 = its first roll, ...
     max_profit_inr: float | None = None
+    roll_refused: str = ""        # exit policy with rolls: the rule that refused a roll when this spread was closed
     exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
 
@@ -219,6 +220,7 @@ class _Position:
     roll_no: int = 0
     realised: float = 0.0         # net P&L of the campaign's earlier positions
     pending_roll: Signal | None = None   # the spread to open when this one is closed (exit policies with rolls)
+    roll_refused: str = ""
 
 
 class OptionEngine:
@@ -506,8 +508,8 @@ class OptionEngine:
             if wants_roll and roll_ctx is not None:
                 short, long_ = pos.legs[0], pos.legs[1]
                 held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
-                pos.pending_roll = roll_choices(strategy, roll_ctx(), held, value, pos.roll_no, pos.realised,
-                                                unlimited=never_stop)["roll_signal"]
+                choice = roll_choices(strategy, roll_ctx(), held, value, pos.roll_no, pos.realised, unlimited=never_stop)
+                pos.pending_roll, pos.roll_refused = choice["roll_signal"], choice["refused_by"] or ""
             return ("hold",)
         if len(pos.legs) > 1:
             # A debit spread (bull call spread): judged on the closing value of its legs (bought minus
@@ -640,6 +642,10 @@ class OptionEngine:
                     done = self._close(pos, sym, d, [b.open for b in legs_bars], True,
                                        "ROLLED" if rolled is not None else pos.pending_exit, strategy, exit_check,
                                        pos.pending_basis)
+                    if rolled is None and pos.pending_roll is not None:
+                        done.roll_refused = "ROLL_NOT_FILLED"            # the replacement could not be entered at this open
+                    elif rolled is None:
+                        done.roll_refused = pos.roll_refused
                     trades.append(done)
                     if rolled is not None:
                         rolled.campaign_id, rolled.roll_no = done.campaign_id, pos.roll_no + 1

@@ -26,11 +26,11 @@ from app.options.stock_selling import SpreadPosition, build_stock_selling, posit
 from app.quality import IST
 from app.store import Store
 from tests.rev_fixture import washed_out_stock
-from tests.test_phase3 import FixedRegime, settings
-from tests.test_phase9_core import EXP, LOT, NOW, chain, ctx_for, ist_date, legs_of, weekdays
+from tests.test_phase3 import FixedRegime
+from tests.test_phase9_core import settings, EXP, LOT, NOW, chain, ctx_for, ist_date, legs_of, weekdays
 from tests.test_phase9_rules import snap
 
-REV = SosParams().reversal
+REV = settings().stock_option_selling.reversal
 BASE_LOW = 540 * 0.98                                    # the fall's lowest close less its 2% daily range
 
 
@@ -49,12 +49,17 @@ def test_ACCEPTANCE_washed_out_then_base_forming_then_reversal_confirmed():
     sc, bars, _, m = scan()
     states = [sc.info(i)["state"] for i in range(len(bars))]
     first = {x: states.index(x) for x in ("WASHED_OUT", "BASE_FORMING", REVERSAL_CONFIRMED)}
-    # more than 30% below the 52-week high (below 700) from session 395 on; three months (63 sessions) later: washed out
-    assert first["WASHED_OUT"] == 460 and states[459] is None
-    day = sc.days[460]
-    assert day.washed_out and day.drawdown_pct > 30 and day.high_52w == pytest.approx(1002 * 1.02) and not day.base_forming
-    # base forming: no new low for 15 sessions and the last 10 sessions' range at most 85% of the 30 before
-    assert m["quiet_from"] < first["BASE_FORMING"] <= m["quiet_from"] + 3
+    # below the 200-day average since the first leg down; 25% below the 52-week high (below 766.5) on session 388
+    assert first["WASHED_OUT"] == 388 and states[387] is None
+    assert sc.days[387].drawdown_pct < 25 <= sc.days[388].drawdown_pct
+    day = sc.days[388]
+    assert day.washed_out and day.high_52w == pytest.approx(1002 * 1.02) and not day.base_forming
+    # with the drawdown already there, 63 sessions below the long average are needed too
+    longer = REV.model_copy(update={"min_sessions_below_long": 120})
+    late = [d.washed_out for d in ReversalScanner(bars, washed_out_stock()[1], longer, 200).days].index(True)
+    assert late > 388
+    # base forming: no new low for 15 sessions and the 10-session ATR below 0.8 x the 20-session ATR
+    assert m["quiet_from"] < first["BASE_FORMING"] <= m["quiet_from"] + 6
     assert sc.days[first["BASE_FORMING"]].base_low == pytest.approx(BASE_LOW)
     assert all(not d.base_forming for d in sc.days[:m["quiet_from"]])           # wide ranges: not a base yet
     # confirmed on the first close above the last swing high (600), not on the two closes before it
@@ -78,7 +83,7 @@ def test_each_confirmation_condition_is_needed():
     broken = bars[:i] + [replace(bars[i], low=500.0)] + bars[i + 1:]
     assert not any(d.confirmed for d in ReversalScanner(broken, idx, REV, 200).days)
     # a stock that is not below its 200-day average, or not down 30% for three months, is not washed out
-    assert not any(d.washed_out for d in ReversalScanner(bars[:440], idx, REV, 200).days)
+    assert not any(d.washed_out for d in ReversalScanner(bars[:388], idx, REV, 200).days)
     shallow = REV.model_copy(update={"drawdown_pct": 60.0})
     assert not any(d.washed_out for d in ReversalScanner(bars, idx, shallow, 200).days)
     # too little history is unknown, never a state
@@ -106,7 +111,7 @@ def test_the_lift_lasts_lift_sessions_and_ends_if_the_base_low_breaks_and_one_co
     assert after.days[c + 3].lift_active and not after.days[c + 4].lift_active and not after.days[c + 9].lift_active
     # a price break (unadjusted split) starts the history afresh: nothing is known for a year after it
     gap = ReversalScanner(bars, idx, REV, 200, breaks=[400])
-    assert not any(d.washed_out or d.confirmed for d in gap.days)
+    assert not any(d.washed_out or d.confirmed for d in gap.days[400:]) and gap.days[399].washed_out
 
 
 # ---------------- the block is lifted only for put spreads below the base low ----------------

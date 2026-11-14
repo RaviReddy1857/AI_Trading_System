@@ -28,7 +28,25 @@ from app.options.stock_selling import (SpreadPosition, StockOptionSelling, build
                                        exit_calls, exit_levels, roll_choices, support_resistance, trend_of)
 from app.quality import IST
 from app.store import Store
-from tests.test_phase3 import FixedRegime, settings
+from tests.test_phase3 import FixedRegime
+from tests.test_phase3 import settings as _settings
+
+# The tests pin the thresholds their fixtures were built for, so they do not move when a default in
+# config.yaml changes. test_shipped_defaults_are_the_section_2_values checks the shipped defaults.
+FIXTURE_SOS = {
+    "min_open_interest": 100, "max_bid_ask_spread_pct": 10.0, "max_loss_per_stock_spread_pct": 10.0,
+    "min_net_credit_pct_of_max_loss": 10.0,
+    "trend_block": {"enabled": True, "long_sma_days": 200, "extreme_lookback_sessions": 252, "extreme_recent_sessions": 20,
+                    "relative_return_sessions": 63, "max_underperformance_pct": 10.0},
+    "campaign_limit": {"enabled": True, "window_days": 90, "max_stopped_trades": 2, "max_cumulative_loss_pct": 5.0,
+                       "cooling_off_days": 45},
+    "roll": {"max_rolls": 1, "min_net_credit_pct_of_width": 10.0, "stuck_time_value_pct": 10.0},
+}
+
+
+def settings(**over):
+    sos = {**FIXTURE_SOS, **over.pop("stock_option_selling", {})}
+    return _settings(stock_option_selling=sos, **over)
 
 UTC = timezone.utc
 NOW = datetime(2026, 11, 13, 10, 0, tzinfo=UTC)          # Friday 15:30 IST: the close
@@ -96,6 +114,33 @@ def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events
 @pytest.fixture(scope="module")
 def s():
     return settings()
+
+
+# A roll that qualifies: a 1,000-share lot (so the fixed brokerage is small beside the premium), capital
+# large enough for that lot's max loss, and an open put spread 1110/1100 that is cheap to close.
+LOT_R = 1000
+HELD_ROLL = None            # set below, once SpreadPosition is imported
+
+
+def big_settings(**sos):
+    return settings(account={"capital_inr": 2000000.0}, stock_option_selling=sos)
+
+
+def roll_ctx(cfg, bars, cheap=True, drop=(), **kw):
+    """Chain for the roll tests. `cheap`: the held 1110 put is quoted 2.00/2.20 and the 1100 put
+    1.40/1.60, so closing the spread costs 2.20 - 1.40 = 0.80 a share. `drop`: (strike, right)
+    quotes left out of the chain."""
+    spot = bars[-1].close
+    quotes = []
+    for q in chain(spot, lot=LOT_R):
+        if (q.strike, q.right) in drop:
+            continue
+        if cheap and (q.strike, q.right) == (1110.0, "PE"):
+            q = OptionQuote(1110.0, "PE", 2.0, 2.2, 2.1, q.oi)
+        if cheap and (q.strike, q.right) == (1100.0, "PE"):
+            q = OptionQuote(1100.0, "PE", 1.4, 1.6, 1.5, q.oi)
+        quotes.append(q)
+    return ctx_for(cfg, bars, quotes, expiries=(ExpiryInfo(EXP, "monthly", LOT_R),), **kw)
 
 
 @pytest.fixture()
@@ -290,6 +335,27 @@ def test_strategy_identity_status_and_determinism(s, strat):
     assert cs.evaluate(ctx_for(s, bars)) == [] and any("STOCK_OPTION_SELLING_NOT_ALLOWED" in r for r in cs.last_no_trade)
 
 
+def test_shipped_defaults_are_the_section_2_values():
+    """config.yaml as shipped (not the fixture values above): the starting defaults of the Phase 9
+    specification, section 2. Changing one needs the user's approval."""
+    p = _settings().stock_option_selling
+    assert (p.max_loss_per_stock_spread_pct, p.min_net_credit_pct_of_max_loss) == (2.5, 20.0)      # 2.5% risk, 0.20 credit
+    assert (p.max_short_delta, p.hedge_strikes_out) == (0.20, [2, 3])
+    assert (p.entry_min_days_to_expiry, p.entry_max_days_to_expiry) == (20, 35)
+    assert (p.profit_target_pct_of_credit, p.stop_multiple_of_credit) == (50.0, 2.0)
+    assert (p.exit_days_before_expiry, p.forced_exit_trading_days_before_expiry) == (10, 5)
+    assert (p.min_open_interest, p.max_bid_ask_spread_pct) == (200, 5.0)
+    assert (p.trend_fast_sma, p.trend_slow_sma, p.trend_block.long_sma_days) == (20, 50, 200)
+    tb, cl, r, rv = p.trend_block, p.campaign_limit, p.roll, p.reversal
+    assert (tb.extreme_recent_sessions, tb.extreme_lookback_sessions, tb.relative_return_sessions,
+            tb.max_underperformance_pct) == (20, 252, 63, 5.0)
+    assert (cl.window_days, cl.max_stopped_trades, cl.max_cumulative_loss_pct, cl.cooling_off_days) == (90, 2, 1.5, 30)
+    assert (r.max_rolls, r.min_net_credit_pct_of_width, r.stuck_time_value_pct) == (1, 10.0, 20.0)
+    assert (rv.drawdown_pct, rv.min_sessions_below_long, rv.base_no_new_low_sessions) == (25.0, 63, 15)
+    assert (rv.range_sessions, rv.range_compare_sessions, rv.range_shrink_ratio) == (10, 20, 0.8)
+    assert rv.alerts_approved is False and _settings().options.backtest.daily_request_budget == 3500
+
+
 def test_config_is_validated():
     for bad in ({"entry_min_days_to_expiry": 40}, {"exit_days_before_expiry": 5}, {"hedge_strikes_out": [3, 2]},
                 {"hedge_strikes_out": [2]}, {"trend_fast_sma": 60}, {"max_short_delta": 0.6},
@@ -299,7 +365,7 @@ def test_config_is_validated():
     with pytest.raises(Exception):
         settings(options={"backtest": {"daily_request_budget": -1}})
     p = SosParams()
-    assert (p.entry_min_dte, p.entry_max_dte, p.exit_days_before_expiry) == (20, 35, 7)
+    assert (p.entry_min_dte, p.entry_max_dte, p.exit_days_before_expiry) == (20, 35, 10)
     assert settings().options.backtest.daily_request_budget == 3500
 
 
@@ -406,6 +472,7 @@ def test_shortlist_route_and_page_are_read_only(s):
 
 # ---------------- exit and adjustment calls, roll ----------------
 POS = SpreadPosition("RELIANCE", "PE", 1060.0, 1040.0, EXP, 4.0, LOT)
+HELD_ROLL = SpreadPosition("RELIANCE", "PE", 1110.0, 1100.0, EXP, 4.0, LOT_R)
 
 
 def kinds(calls):
@@ -425,9 +492,12 @@ def test_ACCEPTANCE_profit_target_stop_threat_and_forced_exit_calls_fire(s):
     assert kinds(exit_calls(POS, p, today, 3.0, 1060.0, "UP")) == []            # at the strike is not beyond it
     assert kinds(exit_calls(POS, p, today, 3.0, 1100.0, "DOWN")) == ["TREND_FLIP"]
     assert kinds(exit_calls(POS, p, today, 3.0, 1100.0, None)) == []            # no clear trend is not a flip
-    forced = exit_calls(POS, p, date(2026, 12, 1), 3.0, 1100.0, "UP")           # 7 days to expiry
+    # time exit at 10 calendar days; forced exit inside the last 5 trading days (expiry Tuesday 8 December)
+    assert kinds(exit_calls(POS, p, date(2026, 11, 27), 3.0, 1100.0, "UP")) == []           # 11 days
+    assert kinds(exit_calls(POS, p, date(2026, 11, 28), 3.0, 1100.0, "UP")) == ["TIME_EXIT"]   # 10 days
+    assert kinds(exit_calls(POS, p, date(2026, 11, 30), 3.0, 1100.0, "UP")) == ["TIME_EXIT"]   # 6 trading days left
+    forced = exit_calls(POS, p, date(2026, 12, 1), 3.0, 1100.0, "UP")           # 5 trading days left
     assert kinds(forced) == ["FORCED_EXPIRY_EXIT"] and forced[0]["action"] == "Exit now: physical settlement"
-    assert kinds(exit_calls(POS, p, date(2026, 11, 30), 3.0, 1100.0, "UP")) == []
     # the same state gives the same call every time it is asked: it repeats until the position is closed
     assert exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN") == exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN")
     assert kinds(exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN")) == ["FORCED_EXPIRY_EXIT", "STOP",
@@ -438,28 +508,27 @@ def test_ACCEPTANCE_profit_target_stop_threat_and_forced_exit_calls_fire(s):
     assert kinds(exit_calls(call, p, today, 3.0, 1201.0, "UP")) == ["STRIKE_BREACHED", "TREND_FLIP"]
 
 
-def test_ACCEPTANCE_threat_shows_exit_and_roll_with_numbers_and_a_roll_is_never_unhedged(s, strat):
+def test_ACCEPTANCE_threat_shows_exit_and_roll_with_numbers_and_a_roll_is_never_unhedged():
+    cfg = big_settings()
+    strat = build_stock_selling(cfg)
     bars = stock_bars()
-    spot = bars[-1].close
-    both = {EXP: chain(spot), EXP_NEXT: chain(spot, expiry=EXP_NEXT)}
-    c = ctx_for(s, bars, both, expiries=(ExpiryInfo(EXP, "monthly", LOT), ExpiryInfo(EXP_NEXT, "monthly", LOT)))
-    held = SpreadPosition("RELIANCE", "PE", 1100.0, 1080.0, EXP, 4.0, LOT)       # struck nearer the money than the rules now give
-    out = roll_choices(strat, c, held, close_cost=7.0)
-    assert out["exit"]["cost_to_close_inr"] == 7.0 * LOT
-    assert out["exit"]["realised_pnl_inr"] < (4.0 - 7.0) * LOT                   # the loss plus closing charges
+    out = roll_choices(strat, roll_ctx(cfg, bars), HELD_ROLL, close_cost=0.8)
+    assert out["exit"]["cost_to_close_inr"] == 0.8 * LOT_R
+    assert out["exit"]["realised_pnl_inr"] < (4.0 - 0.8) * LOT_R                 # less the closing charges
     roll = out["roll"]
-    assert roll is not None and roll["expiry"] == EXP.isoformat()
-    assert unhedged_short_legs(roll["legs"]) == [] and roll["legs"][0]["strike"] < 1100.0
-    assert roll["net_per_share"] == pytest.approx(roll["new_credit_per_share"] - 7.0, abs=0.01)
-    assert roll["net_is"] == "debit" and roll["new_max_loss_inr"] > 0 and roll["new_breakevens"] and roll["margin_inr"] == 40000.0
-    # the same spread is not a roll: with only this month available and the same strikes there is none
-    now_legs = legs_of(strat.evaluate(ctx_for(s, bars))[0])
-    same = SpreadPosition("RELIANCE", "PE", now_legs[0].strike, now_legs[1].strike, EXP, 4.0, LOT)
-    assert roll_choices(strat, ctx_for(s, bars), same, 7.0)["roll"] is None
-    # a falling stock does not pass the falling-stock block: the alert is "exit", and it says why
+    assert out["action"] == "ROLL" and roll is not None and roll["expiry"] == EXP.isoformat()
+    assert unhedged_short_legs(roll["legs"]) == [] and roll["legs"][0]["strike"] < 1110.0
+    assert roll["roll_net_credit_inr"] == pytest.approx(roll["new_credit_inr"] - roll["close_debit_inr"]
+                                                        - roll["roll_charges_inr"], abs=0.02)
+    assert roll["new_max_loss_inr"] > 0 and roll["new_breakevens"] and roll["margin_inr"] == 40000.0
+    # an open spread that is dear to close: the new premium is positive, the roll is still refused
+    dear = roll_choices(strat, roll_ctx(cfg, bars, cheap=False), HELD_ROLL, close_cost=7.0)
+    assert dear["action"] == "EXIT" and dear["roll"] is None and dear["refused_by"] == "ROLL_NET_CREDIT_TOO_SMALL"
+    assert dear["exit"]["cost_to_close_inr"] == 7.0 * LOT_R                      # the exit numbers are always shown
+    # a falling stock: no replacement passes the entry rules; the alert is "exit", and it says why
     down = stock_bars(start=1200, drift=-1.0)
-    out = roll_choices(strat, ctx_for(s, down, chain(down[-1].close)), held, 7.0)
-    assert out["action"] == "EXIT" and out["roll"] is None and out["roll_note"].startswith("exit: DOWNTREND_BLOCK")
+    out = roll_choices(strat, roll_ctx(cfg, down, cheap=False), HELD_ROLL, 7.0)
+    assert out["action"] == "EXIT" and out["roll"] is None and out["roll_note"].startswith("exit: no roll passes the rules")
 
 
 # ---------------- 5-minute exit check ----------------

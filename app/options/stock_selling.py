@@ -43,14 +43,15 @@ Not built yet (after phase 6): signal cards with the capital-fit label, alerts, 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
 
 from ..config import StockOptionSelling as StockOptionSellingParams
+from ..costs import CostBreakdown
 from ..indicators import atr, last, sma
 from ..models import Signal
 from ..quality import IST
 from ..strategies.base import fmt, ok
-from .base import (ExpiryInfo, OptionContext, OptionQuote, leg_view, liquidity_problem, metrics, pick_expiry,
+from .base import (ExpiryInfo, OptionContext, OptionQuote, add_costs, leg_view, liquidity_problem, metrics,
                    pick_short_strike,
                    round_trip_costs)
 from .credit_spread import SIDE_NAME, CreditSpread
@@ -155,7 +156,7 @@ class StockOptionSelling(CreditSpread):
 
     def applies(self, rule: str, ctx: OptionContext) -> bool:
         if ctx.rolling:
-            return False                 # a roll is the same campaign; roll_choices applies the block itself
+            return False                 # "any": the research-only unlimited roll has no entry rules
         return getattr(self.params, rule).enabled and (not ctx.no_filter or rule in self.baseline_rules)
 
     def min_credit_applies(self, ctx: OptionContext) -> bool:
@@ -177,8 +178,6 @@ class StockOptionSelling(CreditSpread):
         if not p.enabled:
             self.no("DISABLED", "stock_option_selling.enabled is false")
             return False
-        if ctx.rolling:
-            return True                   # a roll: the roll rules decide (roll_choices), not the entry trend and IV rank
         direction, _, text = trend_of(ctx.daily, p.trend_fast_sma, p.trend_slow_sma, p.atr_days)
         if direction is None:
             self.no("NO_TREND", text)
@@ -257,6 +256,7 @@ class StockOptionSelling(CreditSpread):
     def assess(self, ctx: OptionContext) -> Assessment:
         """Apply every rule to one stock. `signal` is set only for a complete, valid, hedged setup."""
         p = self.params
+        self.last_no_trade = []          # the reasons of THIS assessment only (roll decisions call assess directly)
         out = Assessment(ctx.underlying)
         direction, clarity, trend_text = trend_of(ctx.daily, p.trend_fast_sma, p.trend_slow_sma, p.atr_days)
         out.scores = {"iv_rank": None if ctx.iv_rank is None else round(ctx.iv_rank / 100.0, 3),
@@ -300,11 +300,6 @@ class StockOptionSelling(CreditSpread):
             exp = next((e for e in ctx.expiries if e.lot_size), None)
             if exp is None:
                 self.no("NO_EXPIRY", "no later expiry with a known lot size")
-        elif ctx.rolling == "rules":       # this month if it is still far enough away, else the next one
-            exp = pick_expiry(ctx, p.entry_min_dte, p.roll.max_days_to_expiry, self.expiry_kinds)
-            if exp is None or not exp.lot_size:
-                self.no("NO_EXPIRY", f"no monthly expiry {p.entry_min_dte}-{p.roll.max_days_to_expiry} days away to roll into")
-                exp = None
         else:
             exp = self.pick(ctx)
         if exp is None:
@@ -479,9 +474,14 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
     def pnl(cost: float) -> float:
         return round((pos.credit - cost) * pos.shares, 2)
 
-    if days <= p.exit_days_before_expiry:
+    left = trading_days_to(today, pos.expiry)
+    if left <= p.forced_exit_trading_days_before_expiry:
         out.append({"kind": "FORCED_EXPIRY_EXIT", "action": "Exit now: physical settlement",
-                    "reason": f"{days} day(s) to expiry; stock options settle physically, no position in expiry week"})
+                    "reason": f"{left} trading day(s) to expiry, inside the forced-exit window; stock options settle "
+                              f"physically"})
+    elif days <= p.exit_days_before_expiry:
+        out.append({"kind": "TIME_EXIT", "action": "Exit: time exit",
+                    "reason": f"{days} day(s) to expiry, at or inside the {p.exit_days_before_expiry}-day time exit"})
     if close_cost is None:
         out.append({"kind": "DATA_MISSING", "action": "Check the position by hand",
                     "reason": "no usable price for one of the legs: target and stop cannot be checked"})
@@ -506,13 +506,64 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
     return out
 
 
-def stuck_position(pos: SpreadPosition, short_price: float | None, spot: float | None, today: date, roll_cfg) -> str | None:
+def roll_net_credit(ctx: OptionContext, pos: SpreadPosition, replacement: Signal) -> dict | None:
+    """The money a roll brings in or costs, in rupees:
+        new spread credit - debit to close the old spread - all roll charges
+    Each of the four legs is priced once at its execution price with adverse slippage (live: sell at
+    the bid, buy at the ask; history: the last traded price moved against us by the options slippage).
+    Charges cover buying back the old sold leg, selling the old bought leg, selling the new sold leg
+    and buying the new bought leg. None when any of the old legs has no usable price: unknown is
+    never treated as a pass."""
+    qs = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
+    ql = ctx.quotes.quote(pos.expiry, pos.long_strike, pos.right)
+    buy_back = qs.buy_price(ctx.historical) if qs is not None else None
+    sell_hedge = ql.sell_price(ctx.historical) if ql is not None else None
+    if buy_back is None or sell_hedge is None:
+        return None
+
+    def px(price: float, side: str) -> float:
+        return float(ctx.costs.fill_price("options", price, side)) if ctx.historical else float(price)
+
+    new_short = next(leg for leg in replacement.legs if leg.action == "SELL")
+    new_long = next(leg for leg in replacement.legs if leg.action == "BUY")
+    old_short, old_long = px(buy_back, "BUY"), px(sell_hedge, "SELL")
+    ns, nl = px(new_short.price, "SELL"), px(new_long.price, "BUY")
+    new_shares = new_short.lots * new_short.lot_size
+    charges = CostBreakdown()
+    add_costs(charges, ctx.costs.options(pos.lots, old_short * pos.shares, old_long * pos.shares))
+    add_costs(charges, ctx.costs.options(new_short.lots, nl * new_shares, ns * new_shares))
+    new_credit = (ns - nl) * new_shares
+    close_debit = (old_short - old_long) * pos.shares
+    width_inr = abs(new_short.strike - new_long.strike) * new_shares
+    net = new_credit - close_debit - float(charges.total)
+    return {"new_credit_inr": round(new_credit, 2), "close_debit_inr": round(close_debit, 2),
+            "roll_charges_inr": float(charges.total), "roll_net_credit_inr": round(net, 2),
+            "replacement_width_inr": round(width_inr, 2),
+            "roll_net_credit_pct_of_width": round(net / width_inr * 100, 2) if width_inr > 0 else None}
+
+
+def trading_days_to(today: date, expiry: date, is_trading_day=None) -> int:
+    """Trading days after `today` up to and including `expiry` (weekdays, less the holidays the
+    caller's calendar knows)."""
+    n, d = 0, today
+    while d < expiry:
+        d += timedelta(days=1)
+        if d.weekday() < 5 and (is_trading_day is None or is_trading_day(d)):
+            n += 1
+    return n
+
+
+def stuck_position(pos: SpreadPosition, short_price: float | None, spot: float | None, today: date, p,
+                   is_trading_day=None) -> str | None:
     """Why rolling this spread would earn little, or None. Stuck = the sold option is in the money and
-    its time value is below `stuck_time_value_pct` of its price (a roll would mostly pay intrinsic
-    value), or expiry is within `pre_expiry_window_days`."""
-    days = (pos.expiry - today).days
-    if days <= roll_cfg.pre_expiry_window_days:
-        return f"{days} day(s) to expiry, inside the {roll_cfg.pre_expiry_window_days}-day pre-expiry window"
+    its time value is below `roll.stuck_time_value_pct` of its price (a roll would mostly pay
+    intrinsic value), or the position is inside the forced-exit window
+    (`forced_exit_trading_days_before_expiry`). `p`: the stock_option_selling settings."""
+    roll_cfg = p.roll
+    left = trading_days_to(today, pos.expiry, is_trading_day)
+    if left <= p.forced_exit_trading_days_before_expiry:
+        return (f"{left} trading day(s) to expiry, inside the {p.forced_exit_trading_days_before_expiry}-trading-day "
+                f"forced-exit window")
     if short_price is None or spot is None or short_price <= 0:
         return None
     intrinsic = max(0.0, pos.short_strike - spot) if pos.right == "PE" else max(0.0, spot - pos.short_strike)
@@ -531,20 +582,21 @@ STUCK_ACTION = "exit; rolling earns little"
 def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPosition, close_cost: float,
                  rolls_so_far: int = 0, realised_so_far_inr: float = 0.0, unlimited: bool = False) -> dict:
     """Exit or roll for a threatened spread, with numbers. Exit: the cost to close now and the realised
-    P&L. A roll is suggested only if every rule holds:
-    (a) the new spread's credit after its hedge cost and charges is above zero and at least
-        `roll.min_net_credit_pct_of_width` of its width;
-    (b) the sold strike moves the way the market has gone (lower for puts, higher for calls), never
-        the same or a worse strike;
-    (c) the stock passes the falling-stock block (its mirror for calls);
-    (d) the campaign has been rolled fewer than `roll.max_rolls` times;
-    and the position is not stuck (stuck_position). The new spread also obeys the structure rules
-    (support/resistance, delta, hedge, max loss, liquidity, entry window, events, margin, minimum
-    credit), so it is never unhedged, and it is one lot: a roll never raises the size. Otherwise the
-    action is EXIT and `roll_note` says why. `campaign_after_roll` shows the best the campaign could
-    still end at; if that is a loss it says "recovery not possible from this position".
-    `unlimited` (backtest comparison "roll every month" only): the next month's spread by the
-    structure rules alone, with none of (a)-(d)."""
+    P&L (always shown, whatever is unknown about a roll). A roll is suggested only when all hold:
+    - the position is not stuck (stuck_position);
+    - fewer than `roll.max_rolls` rolls have been completed in this campaign;
+    - the replacement spread has the same or a later expiry and passes EVERY entry rule as a new
+      trade would (trend, IV rank, events, falling-stock block, campaign limit, strikes, hedge, max
+      loss, liquidity, entry window, minimum credit, margin), on the same side;
+    - its sold strike is strictly lower (put spread) or strictly higher (call spread) than the old one;
+    - roll net credit = new spread credit - debit to close the old spread - all roll charges
+      (roll_net_credit), and roll net credit / (replacement width x lot size x lots) is above
+      `roll.min_net_credit_pct_of_width` / 100. A positive new premium alone does not qualify.
+    Otherwise the action is EXIT and `roll_note` says why. The replacement is one lot: a roll never
+    raises the size. `campaign_after_roll` shows the best the campaign could still end at; if that
+    is a loss it says "recovery not possible from this position".
+    `unlimited` (research-only backtest policy "roll every month"): the next month's spread by the
+    structure rules alone, with none of the conditions above; it never reaches a live signal."""
     p = strategy.params
     today = ctx.asof.astimezone(IST).date()
     exit_costs = float(round_trip_costs(ctx.costs, [
@@ -554,57 +606,70 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
            "exit": {"cost_to_close_per_share": round(close_cost, 2), "cost_to_close_inr": round(close_cost * pos.shares, 2),
                     "realised_pnl_inr": realised, "campaign_pnl_inr": round(realised_so_far_inr + realised, 2),
                     "note": "after estimated closing charges"},
-           "roll": None, "roll_note": "", "roll_signal": None}
+           "roll": None, "roll_note": "", "roll_signal": None, "refused_by": None}
 
-    def exit_only(why: str) -> dict:
-        out["roll_note"] = why
+    def exit_only(code: str, why: str) -> dict:
+        out["roll_note"], out["refused_by"] = why, code
         return out
 
     if unlimited:
         mode, expiries = "any", [e for e in ctx.expiries if e.expiry > pos.expiry][:1]
     else:
         q = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
-        stuck = stuck_position(pos, q.price(ctx.historical) if q is not None else None, ctx.spot, today, p.roll)
+        stuck = stuck_position(pos, q.price(ctx.historical) if q is not None else None, ctx.spot, today, p)
         if stuck:
-            return exit_only(f"{STUCK_ACTION}: {stuck}")
+            return exit_only("STUCK_POSITION", f"{STUCK_ACTION}: {stuck}")
         if rolls_so_far >= p.roll.max_rolls:
-            return exit_only(f"exit: this campaign has already been rolled {rolls_so_far} time(s) (max_rolls {p.roll.max_rolls})")
-        code, why_block = trend_block(ctx.daily, ctx.index_daily, pos.right, p.trend_block)
-        if code:
-            return exit_only(f"exit: {code}: " + "; ".join(why_block))
-        mode, expiries = "rules", list(ctx.expiries)
-    best, why_not = None, []
+            return exit_only("MAX_ROLLS", f"exit: this campaign has already been rolled {rolls_so_far} time(s) "
+                                          f"(max_rolls {p.roll.max_rolls})")
+        mode, expiries = "", [e for e in ctx.expiries if e.expiry >= pos.expiry]
+    best, money, why_not, codes = None, None, [], []
     for exp in expiries:
-        a = strategy.assess(replace(ctx, expiries=(exp,), rolling=mode, baseline_right=pos.right, no_filter=False))
+        a = strategy.assess(replace(ctx, expiries=(exp,), rolling=mode, no_filter=False,
+                                    baseline_right=pos.right if unlimited else None))
         if a.signal is None:
             why_not += [r for r in strategy.last_no_trade if r not in why_not]
+            codes += [r.split(":")[0] for r in strategy.last_no_trade]
             continue
-        short, d = a.signal.legs[0], a.signal.details
-        if not unlimited:
-            moved = short.strike < pos.short_strike if pos.right == "PE" else short.strike > pos.short_strike
-            if not moved:
-                why_not.append(f"{exp.expiry:%d-%b-%Y}: the rules give the sold strike {short.strike:g}, not "
-                               f"{'below' if pos.right == 'PE' else 'above'} the current {pos.short_strike:g}")
-                continue
-            need = p.roll.min_net_credit_pct_of_width / 100.0 * d["width"] * exp.lot_size
-            if d["net_credit_after_costs_inr"] <= 0 or d["net_credit_after_costs_inr"] < need:
-                why_not.append(f"{exp.expiry:%d-%b-%Y}: new credit after the hedge and charges Rs "
-                               f"{fmt(d['net_credit_after_costs_inr'])} is under {p.roll.min_net_credit_pct_of_width:g}% "
-                               f"of the width (Rs {fmt(need)})")
-                continue
-        best = a.signal
+        short, d = next(leg for leg in a.signal.legs if leg.action == "SELL"), a.signal.details
+        if unlimited:
+            best = a.signal
+            break
+        if short.right != pos.right:
+            why_not.append(f"{exp.expiry:%d-%b-%Y}: the entry rules now give a {SIDE_NAME[short.right]}, not a "
+                           f"{SIDE_NAME[pos.right]}")
+            codes.append("OTHER_SIDE")
+            continue
+        moved = short.strike < pos.short_strike if pos.right == "PE" else short.strike > pos.short_strike
+        if not moved:
+            why_not.append(f"{exp.expiry:%d-%b-%Y}: the rules give the sold strike {short.strike:g}, not "
+                           f"{'below' if pos.right == 'PE' else 'above'} the current {pos.short_strike:g}")
+            codes.append("STRIKE_NOT_BETTER")
+            continue
+        m = roll_net_credit(ctx, pos, a.signal)
+        if m is None:
+            why_not.append("the open spread has no usable price for a leg: the roll cannot be priced")
+            codes.append("ROLL_PRICE_UNKNOWN")
+            continue
+        if not (m["roll_net_credit_pct_of_width"] is not None
+                and m["roll_net_credit_pct_of_width"] > p.roll.min_net_credit_pct_of_width):
+            why_not.append(f"{exp.expiry:%d-%b-%Y}: roll net credit Rs {fmt(m['roll_net_credit_inr'])} (new credit Rs "
+                           f"{fmt(m['new_credit_inr'])} - close Rs {fmt(m['close_debit_inr'])} - charges Rs "
+                           f"{fmt(m['roll_charges_inr'])}) is {m['roll_net_credit_pct_of_width']}% of the replacement "
+                           f"width, not above {p.roll.min_net_credit_pct_of_width:g}%")
+            codes.append("ROLL_NET_CREDIT_TOO_SMALL")
+            continue
+        best, money = a.signal, m
         break
     if best is None:
-        return exit_only("exit: no roll passes the rules" + (": " + "; ".join(why_not[:4]) if why_not else ""))
+        return exit_only(codes[0] if codes else "NO_EXPIRY",
+                         "exit: no roll passes the rules" + (": " + "; ".join(why_not[:4]) if why_not else
+                                                             ": no expiry on or after the current one to roll into"))
     d = best.details
     out.update({"action": "ROLL", "roll_signal": best, "roll": {
         "legs": [leg.to_dict() for leg in best.legs], "expiry": d["expiry"], "roll_no": rolls_so_far + 1,
-        "new_credit_per_share": d["net_credit"],
-        "new_net_credit_after_costs_inr": d["net_credit_after_costs_inr"],
-        "hedge_cost_inr": d["hedge_cost_inr"],
-        "net_per_share": round(d["net_credit"] - close_cost, 2),
-        "net_inr": round((d["net_credit"] - close_cost) * pos.shares, 2),
-        "net_is": "credit" if d["net_credit"] >= close_cost else "debit",
+        "new_credit_per_share": d["net_credit"], "hedge_cost_inr": d["hedge_cost_inr"],
+        **(money or {}),
         "new_max_loss_inr": d["max_loss_inr"], "new_breakevens": d["breakevens"], "margin_inr": d["margin_inr"],
         "campaign_after_roll": after_roll(realised_so_far_inr, realised, d["max_profit_inr"])}})
     return out
@@ -620,7 +685,7 @@ def position_alerts(strategy: StockOptionSelling, ctx: OptionContext, pos: Sprea
                                strategy.params.reversal.alerts_approved))
     q = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
     stuck = stuck_position(pos, q.price(ctx.historical) if q is not None else None, ctx.spot,
-                           ctx.asof.astimezone(IST).date(), strategy.params.roll)
+                           ctx.asof.astimezone(IST).date(), strategy.params)
     if stuck:
         changes.append({"kind": "STUCK_POSITION", "what_changed": stuck})
     if not changes:

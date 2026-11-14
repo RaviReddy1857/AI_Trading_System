@@ -3,11 +3,10 @@ nothing here alerts until the user approves it (stock_option_selling.reversal.al
 strategies.status).
 
 Three states, each computed for a day from that day's bars and earlier ones only (ReversalScanner):
-1. WASHED_OUT: the close has been more than `drawdown_pct` below the 52-week high on every session
-   for `min_months` months, and is below the 200-day average.
-2. BASE_FORMING: washed out, no new low for `base_no_new_low_sessions`, and the average daily
-   high-low range of the last `range_sessions` is at most `range_shrink_ratio` of the average of the
-   `range_compare_sessions` before them.
+1. WASHED_OUT: the close is `drawdown_pct` or more below the 52-week high and has been below the
+   200-day average for at least `min_sessions_below_long` sessions in a row.
+2. BASE_FORMING: washed out, no new low for `base_no_new_low_sessions`, and the `range_sessions` ATR
+   is below `range_shrink_ratio` x the `range_compare_sessions` ATR.
    The base low is the lowest low of the 52-week window.
 3. REVERSAL_CONFIRMED (on one day): a base was forming within the last `base_valid_sessions`, the low
    has held, and the close is above the 20-day average and above the last swing high, on volume above
@@ -71,10 +70,9 @@ class ReversalScanner:
         bars = self.bars
         closes = [b.close for b in bars]
         need = max(c.high_lookback_sessions, n_long)
-        months = c.min_months * MONTH_SESSIONS
         t = c.swing_pct / 100.0
         seg = 0                     # first index of the current unbroken stretch
-        below_run = 0               # consecutive sessions more than drawdown_pct below the 52-week high
+        below_run = 0               # consecutive sessions closing below the long average
         lo = hi = 0
         direction = None
         last_h = None               # close of the newest confirmed swing high
@@ -113,15 +111,14 @@ class ReversalScanner:
                     self.pivots.append(("L", lo, i))
                     direction, hi = "up", i
             if i - seg + 1 < need:
-                below_run = 0
                 self.days.append(ReversalDay(last_confirmed=last_conf))
                 continue
             window = bars[i - c.high_lookback_sessions + 1:i + 1]
             high = max(w.high for w in window)
             dd = (1 - x / high) * 100 if high > 0 else None
-            below_run = below_run + 1 if dd is not None and dd > c.drawdown_pct else 0
             avg_long = sum(closes[i - n_long + 1:i + 1]) / n_long
-            washed = below_run >= months and x < avg_long
+            below_run = below_run + 1 if x < avg_long else 0
+            washed = dd is not None and dd >= c.drawdown_pct and below_run >= c.min_sessions_below_long
             # ---- base forming ----
             base, base_low = False, None
             if washed:
@@ -129,9 +126,10 @@ class ReversalScanner:
                 base_low = min(lows)
                 age = len(lows) - 1 - max(k for k, v in enumerate(lows) if v == base_low)
                 r, m = c.range_sessions, c.range_compare_sessions
-                rng = [(w.high - w.low) / w.close for w in bars[i - r - m + 1:i + 1]]
-                before, now = statistics.mean(rng[:m]), statistics.mean(rng[m:])
-                base = age >= c.base_no_new_low_sessions and before > 0 and now <= c.range_shrink_ratio * before
+                tr = [max(w.high - w.low, abs(w.high - v.close), abs(w.low - v.close))
+                      for v, w in zip(bars[i - m:i], bars[i - m + 1:i + 1])]          # true ranges of the last m sessions
+                atr_long, atr_short = statistics.mean(tr), statistics.mean(tr[-r:])
+                base = age >= c.base_no_new_low_sessions and atr_long > 0 and atr_short < c.range_shrink_ratio * atr_long
             # ---- confirmation ----
             base_days = [(j, low) for j, low in base_days if i - j <= c.base_valid_sessions]
             confirmed, why = False, ()

@@ -1,5 +1,6 @@
 """Phase 9: campaign tracking, roll rules, minimum net credit, stuck-position alert, no recovery sizing,
 and the three exit policies compared on the same entries in the backtest."""
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -15,12 +16,12 @@ from app.options.stock_selling import (STUCK_ACTION, SpreadPosition, build_stock
                                        stuck_position)
 from app.quality import IST
 from app.store import Store
-from tests.test_phase3 import settings
-from tests.test_phase9_core import (EXP, EXP_NEXT, LOT, NOW, chain, ctx_for, engine_for, ist_date, legs_of, stock_bars,
+from tests.test_phase9_core import (HELD_ROLL, LOT_R, big_settings, roll_ctx, settings, EXP, EXP_NEXT, LOT, NOW, chain, ctx_for, engine_for, ist_date, legs_of, stock_bars,
                                     stock_world)
 from tests.test_phase9_rules import snap
 
-ROLL = SosParams().roll
+SOS = settings().stock_option_selling
+ROLL = SOS.roll
 
 
 @pytest.fixture(scope="module")
@@ -89,72 +90,98 @@ def test_campaigns_are_stored_and_served_read_only():
 
 
 # ---------------- 2. roll rules ----------------
-def test_ACCEPTANCE_a_roll_is_suggested_only_when_every_rule_holds(s):
-    strat = build_stock_selling(s)
-    bars = stock_bars()
-    out = roll_choices(strat, two_months(s, bars), HELD, 7.0)
-    assert out["action"] == "ROLL" and out["roll_note"] == ""
+def test_ACCEPTANCE_roll_net_credit_is_new_credit_less_the_debit_to_close_less_all_roll_charges():
+    """By hand, live quotes (sell at the bid, buy at the ask; no further slippage), 1,000 shares:
+    close the old spread: buy back 1110 PE at 2.20, sell 1100 PE at 1.40 -> debit 0.80 x 1000 = 800.
+    open the replacement at its bid and ask. Charges: four executions (two legs closed, two opened)."""
+    from app.costs import CostModel
+    cfg = big_settings()
+    strat = build_stock_selling(cfg)
+    c = roll_ctx(cfg, stock_bars())
+    out = roll_choices(strat, c, HELD_ROLL, 0.8)
+    assert out["action"] == "ROLL" and out["roll_note"] == "" and out["refused_by"] is None
     roll = out["roll"]
-    width = abs(roll["legs"][0]["strike"] - roll["legs"][1]["strike"])
-    assert roll["legs"][0]["strike"] < HELD.short_strike                           # (b) lower for a put: the way the market went
-    assert roll["new_net_credit_after_costs_inr"] > 0                              # (a) after the hedge and all charges
-    assert roll["new_net_credit_after_costs_inr"] >= ROLL.min_net_credit_pct_of_width / 100 * width * LOT
-    assert roll["roll_no"] == 1 and unhedged_short_legs(roll["legs"]) == []
-    assert all(leg["lots"] == 1 for leg in roll["legs"])                           # a roll never raises the size
+    sold, bought = roll["legs"]
+    assert (sold["action"], bought["action"]) == ("SELL", "BUY") and sold["lots"] == bought["lots"] == 1
+    new_credit = (sold["price"] - bought["price"]) * LOT_R
+    costs = CostModel(cfg.costs)
+    charges = float(costs.options(1, 2.2 * LOT_R, 1.4 * LOT_R).total
+                    + costs.options(1, bought["price"] * LOT_R, sold["price"] * LOT_R).total)
+    assert roll["close_debit_inr"] == pytest.approx(800.0, abs=0.01)
+    assert roll["new_credit_inr"] == pytest.approx(new_credit, abs=0.01)
+    assert roll["roll_charges_inr"] == pytest.approx(charges, abs=0.01) and charges > 4 * 49      # four brokerage legs and more
+    net = new_credit - 800.0 - charges
+    assert roll["roll_net_credit_inr"] == pytest.approx(net, abs=0.02)
+    width = abs(sold["strike"] - bought["strike"]) * LOT_R
+    assert roll["replacement_width_inr"] == width
+    assert roll["roll_net_credit_pct_of_width"] == pytest.approx(net / width * 100, abs=0.01)
+    assert roll["roll_net_credit_pct_of_width"] > ROLL.min_net_credit_pct_of_width
+    assert sold["strike"] < HELD_ROLL.short_strike and roll["expiry"] == EXP.isoformat() and roll["roll_no"] == 1
+    assert unhedged_short_legs(roll["legs"]) == []
     after = roll["campaign_after_roll"]
-    assert after["realised_pnl_inr"] == out["exit"]["realised_pnl_inr"]
-    assert after["best_possible_outcome_inr"] == pytest.approx(after["realised_pnl_inr"] + roll["new_net_credit_after_costs_inr"], abs=0.02)
-    # (d) the campaign has already been rolled once
-    again = roll_choices(strat, two_months(s, bars), HELD, 7.0, rolls_so_far=1)
-    assert again["action"] == "EXIT" and again["roll"] is None and "already been rolled 1 time" in again["roll_note"]
-    never = build_stock_selling(settings(stock_option_selling={"roll": {**ROLL.model_dump(), "max_rolls": 0}}))
-    assert roll_choices(never, two_months(s, bars), HELD, 7.0)["action"] == "EXIT"
-    # (a) the new credit is too small a share of the width
-    thin = build_stock_selling(settings(stock_option_selling={"roll": {**ROLL.model_dump(), "min_net_credit_pct_of_width": 60}}))
-    out = roll_choices(thin, two_months(s, bars), HELD, 7.0)
-    assert out["action"] == "EXIT" and "under 60% of the width" in out["roll_note"]
-    # (b) the rules give a strike that is not below the one held: the same or a worse strike is never a roll
-    low = SpreadPosition("RELIANCE", "PE", 1000.0, 980.0, EXP, 4.0, LOT)
-    out = roll_choices(strat, two_months(s, bars), low, 7.0)
-    assert out["action"] == "EXIT" and "not below the current 1000" in out["roll_note"]
-    same_k = legs_of(strat.evaluate(ctx_for(s, bars))[0])[0].strike
-    same = SpreadPosition("RELIANCE", "PE", same_k, same_k - 20, EXP, 4.0, LOT)
-    assert roll_choices(strat, ctx_for(s, bars), same, 7.0)["action"] == "EXIT"      # only this month: the same strike
-    nxt = roll_choices(strat, two_months(s, bars), same, 7.0)                         # next month the rules sit lower
-    assert nxt["action"] == "ROLL" and nxt["roll"]["legs"][0]["strike"] < same_k and nxt["roll"]["expiry"] == EXP_NEXT.isoformat()
-    # (c) the stock does not pass the falling-stock block
-    down = stock_bars(start=1200, drift=-1.0)
-    out = roll_choices(strat, two_months(s, down), HELD, 7.0)
-    assert out["action"] == "EXIT" and out["roll_note"].startswith("exit: DOWNTREND_BLOCK")
-    # the entry trend and IV-rank rules do not gate a roll, the roll rules do
-    assert roll_choices(strat, two_months(s, bars, iv_rank=10.0), HELD, 7.0)["action"] == "ROLL"
+    assert after["realised_pnl_inr"] == out["exit"]["realised_pnl_inr"] and after["recovery_possible"] is True
+    # history (last traded prices): each leg is moved against us by the options slippage exactly once
+    from app.options.stock_selling import roll_net_credit
+    hist = replace(c, historical=True, require_margin=False, margin=None)
+    sig = strat.assess(hist).signal
+    m = roll_net_credit(hist, HELD_ROLL, sig)
+    s_new, b_new = (next(x for x in sig.legs if x.action == k) for k in ("SELL", "BUY"))
+    slip = cfg.costs.slippage_pct.options / 100
+    exp_close = (2.1 * (1 + slip) - 1.5 * (1 - slip)) * LOT_R                # last prices 2.10 and 1.50
+    exp_new = (s_new.price * (1 - slip) - b_new.price * (1 + slip)) * LOT_R
+    assert m["close_debit_inr"] == pytest.approx(exp_close, abs=11) and m["new_credit_inr"] == pytest.approx(exp_new, abs=11)
+    assert m["roll_net_credit_inr"] == pytest.approx(m["new_credit_inr"] - m["close_debit_inr"] - m["roll_charges_inr"], abs=0.02)
 
 
-def test_a_roll_that_cannot_recover_the_campaign_says_so(s):
-    strat = build_stock_selling(s)
-    out = roll_choices(strat, two_months(s, stock_bars()), HELD, 7.0, realised_so_far_inr=-20000.0)
+def test_ACCEPTANCE_a_positive_new_premium_alone_does_not_qualify_and_each_rule_can_refuse_a_roll():
+    cfg = big_settings()
+    strat = build_stock_selling(cfg)
+    bars = stock_bars()
+    # the open spread is dear to close: new credit is positive, roll net credit is negative -> exit
+    dear = roll_choices(strat, roll_ctx(cfg, bars, cheap=False), HELD_ROLL, 7.0)
+    assert dear["action"] == "EXIT" and dear["refused_by"] == "ROLL_NET_CREDIT_TOO_SMALL"
+    assert "new credit Rs" in dear["roll_note"] and "not above 10%" in dear["roll_note"]
+    fresh = strat.assess(roll_ctx(cfg, bars, cheap=False)).signal
+    assert fresh is not None and fresh.details["net_credit_after_costs_inr"] > 0        # the premium alone was positive
+    # exactly at the limit is not enough: the ratio must be ABOVE min_roll_net_credit_pct_of_width
+    ok = roll_choices(strat, roll_ctx(cfg, bars), HELD_ROLL, 0.8)["roll"]["roll_net_credit_pct_of_width"]
+    at = build_stock_selling(big_settings(roll={**ROLL.model_dump(), "min_net_credit_pct_of_width": ok}))
+    assert roll_choices(at, roll_ctx(cfg, bars), HELD_ROLL, 0.8)["action"] == "EXIT"
+    # the campaign has already been rolled max_rolls times
+    again = roll_choices(strat, roll_ctx(cfg, bars), HELD_ROLL, 0.8, rolls_so_far=1)
+    assert again["action"] == "EXIT" and again["refused_by"] == "MAX_ROLLS" and "already been rolled 1 time" in again["roll_note"]
+    never = build_stock_selling(big_settings(roll={**ROLL.model_dump(), "max_rolls": 0}))
+    assert roll_choices(never, roll_ctx(cfg, bars), HELD_ROLL, 0.8)["action"] == "EXIT"
+    # the sold strike must be strictly lower for a put spread: the same or a higher strike is never a roll
+    low = SpreadPosition("RELIANCE", "PE", 1000.0, 980.0, EXP, 4.0, LOT_R)
+    out = roll_choices(strat, roll_ctx(cfg, bars), low, 0.8)
+    assert out["action"] == "EXIT" and out["refused_by"] == "STRIKE_NOT_BETTER" and "not below the current 1000" in out["roll_note"]
+    same_k = legs_of(strat.evaluate(roll_ctx(cfg, bars))[0])[0].strike
+    same = SpreadPosition("RELIANCE", "PE", same_k, same_k - 20, EXP, 4.0, LOT_R)
+    assert roll_choices(strat, roll_ctx(cfg, bars), same, 0.8)["refused_by"] == "STRIKE_NOT_BETTER"
+    # the replacement must pass every entry rule a new trade would: IV rank, events, margin, the campaign limit
+    assert roll_choices(strat, roll_ctx(cfg, bars, iv_rank=10.0), HELD_ROLL, 0.8)["refused_by"] == "IV_RANK_TOO_LOW"
+    assert roll_choices(strat, roll_ctx(cfg, bars, margin=None), HELD_ROLL, 0.8)["refused_by"] == "MARGIN_UNKNOWN"
+    from app.manual_data import Event
+    ev = roll_choices(strat, roll_ctx(cfg, bars, events=(Event(date(2026, 11, 25), "RESULTS", "", "RELIANCE"),)), HELD_ROLL, 0.8)
+    assert ev["refused_by"] == "EVENT_BEFORE_EXPIRY"
+    stops = (ClosedTrade(date(2026, 9, 20), True, -4000.0), ClosedTrade(date(2026, 10, 30), True, -4000.0))
+    assert roll_choices(strat, roll_ctx(cfg, bars, closed_trades=stops), HELD_ROLL, 0.8)["refused_by"] == "STOCK_LOSS_LIMIT"
+    # an earlier expiry is never a roll target; a leg of the open spread without a price means the roll is unknown
+    later = SpreadPosition("RELIANCE", "PE", 1110.0, 1100.0, date(2026, 12, 15), 4.0, LOT_R)
+    out = roll_choices(strat, roll_ctx(cfg, bars), later, 0.8)
+    assert out["action"] == "EXIT" and out["refused_by"] == "NO_EXPIRY"
+    gone = roll_choices(strat, roll_ctx(cfg, bars, drop={(1100.0, "PE")}), HELD_ROLL, 0.8)
+    assert gone["action"] == "EXIT" and gone["refused_by"] == "ROLL_PRICE_UNKNOWN" and gone["exit"]["cost_to_close_inr"] == 800.0
+
+
+def test_a_roll_that_cannot_recover_the_campaign_says_so():
+    cfg = big_settings()
+    out = roll_choices(build_stock_selling(cfg), roll_ctx(cfg, stock_bars()), HELD_ROLL, 0.8, realised_so_far_inr=-200000.0)
     after = out["roll"]["campaign_after_roll"]
     assert out["action"] == "ROLL" and after["recovery_possible"] is False
     assert after["message"] == "recovery not possible from this position" and after["best_possible_outcome_inr"] < 0
-    assert out["exit"]["campaign_pnl_inr"] == pytest.approx(-20000.0 + out["exit"]["realised_pnl_inr"], abs=0.02)
-
-
-def test_a_roll_may_use_the_next_month_but_no_expiry_beyond_the_roll_limit(s):
-    strat = build_stock_selling(s)
-    bars = stock_bars()
-    spot = bars[-1].close
-    near, far = date(2026, 11, 24), date(2026, 12, 29)                 # 11 and 46 days away
-    held = SpreadPosition("RELIANCE", "PE", 1100.0, 1080.0, near, 4.0, LOT)
-    c = ctx_for(s, bars, {near: chain(spot, expiry=near), far: chain(spot, expiry=far)},
-                expiries=(ExpiryInfo(near, "monthly", LOT), ExpiryInfo(far, "monthly", LOT)))
-    out = roll_choices(strat, c, held, 7.0)
-    assert out["action"] == "ROLL" and out["roll"]["expiry"] == far.isoformat()        # 46 days: fine for a roll
-    assert strat.evaluate(ctx_for(s, bars, {far: chain(spot, expiry=far)})) == []      # ... but not for a new entry
-    too_far = date(2027, 1, 26)                                        # 74 days: beyond roll.max_days_to_expiry
-    c2 = ctx_for(s, bars, {near: chain(spot, expiry=near), too_far: chain(spot, expiry=too_far)},
-                 expiries=(ExpiryInfo(near, "monthly", LOT), ExpiryInfo(too_far, "monthly", LOT)))
-    out = roll_choices(strat, c2, held, 7.0)
-    assert out["action"] == "EXIT" and "no roll passes the rules" in out["roll_note"]
+    assert out["exit"]["campaign_pnl_inr"] == pytest.approx(-200000.0 + out["exit"]["realised_pnl_inr"], abs=0.02)
 
 
 # ---------------- 3. net credit after hedge and charges ----------------
@@ -186,18 +213,18 @@ def test_ACCEPTANCE_stuck_position_alert_is_exit_rolling_earns_little(s):
     pos = SpreadPosition("RELIANCE", "PE", 1100.0, 1080.0, EXP, 4.0, LOT)
     today = date(2026, 11, 13)                                           # 25 days to expiry
     # in the money by 40 with a price of 42: time value 2 / 42 = 4.8%, under 10%
-    why = stuck_position(pos, 42.0, 1060.0, today, ROLL)
+    why = stuck_position(pos, 42.0, 1060.0, today, SOS)
     assert why and "in the money" in why and "4.8%" in why
-    assert stuck_position(pos, 50.0, 1060.0, today, ROLL) is None        # time value 20%
-    assert stuck_position(pos, 44.4, 1060.0, today, ROLL) is not None    # 9.9%
-    assert stuck_position(pos, 44.5, 1060.0, today, ROLL) is None        # 10.1%
-    assert stuck_position(pos, 3.0, 1120.0, today, ROLL) is None         # out of the money
-    assert stuck_position(pos, None, 1060.0, today, ROLL) is None        # unknown price: nothing is claimed
+    assert stuck_position(pos, 50.0, 1060.0, today, SOS) is None        # time value 20%
+    assert stuck_position(pos, 44.4, 1060.0, today, SOS) is not None    # 9.9%
+    assert stuck_position(pos, 44.5, 1060.0, today, SOS) is None        # 10.1%
+    assert stuck_position(pos, 3.0, 1120.0, today, SOS) is None         # out of the money
+    assert stuck_position(pos, None, 1060.0, today, SOS) is None        # unknown price: nothing is claimed
     call = SpreadPosition("RELIANCE", "CE", 1100.0, 1120.0, EXP, 4.0, LOT)
-    assert stuck_position(call, 41.0, 1140.0, today, ROLL) is not None and stuck_position(call, 41.0, 1090.0, today, ROLL) is None
+    assert stuck_position(call, 41.0, 1140.0, today, SOS) is not None and stuck_position(call, 41.0, 1090.0, today, SOS) is None
     # inside the pre-expiry window, whatever the price
-    assert "pre-expiry window" in stuck_position(pos, 3.0, 1120.0, date(2026, 11, 28), ROLL)        # 10 days
-    assert stuck_position(pos, 3.0, 1120.0, date(2026, 11, 27), ROLL) is None                        # 11 days
+    assert "forced-exit window" in stuck_position(pos, 3.0, 1120.0, date(2026, 12, 1), SOS)      # 5 trading days left
+    assert stuck_position(pos, 3.0, 1120.0, date(2026, 11, 30), SOS) is None                        # 6 trading days left
     # in a roll decision and in the alerts: exit, and no roll is offered
     strat = build_stock_selling(s)
     bars = stock_bars(start=930.0)                                       # the stock is near 1049: the 1100 put is deep in the money
@@ -265,38 +292,28 @@ def test_ACCEPTANCE_the_three_exit_policies_use_exactly_the_same_entries(drop_wo
     assert all(t.roll_no == 0 and t.exit_reason != "ROLLED" for t in got["baseline"]["stop"])
 
 
-def test_roll_policy_links_the_roll_to_its_original_trade_and_obeys_the_roll_rules(drop_world):
+REFUSALS = {"STUCK_POSITION", "MAX_ROLLS", "OTHER_SIDE", "STRIKE_NOT_BETTER", "ROLL_PRICE_UNKNOWN",
+            "ROLL_NET_CREDIT_TOO_SMALL", "NO_EXPIRY", "ROLL_NOT_FILLED", "NO_TREND", "IV_RANK_UNKNOWN", "IV_RANK_TOO_LOW",
+            "DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT", "NO_STRIKE", "ILLIQUID", "UNHEDGED_SHORT",
+            "CREDIT_TOO_SMALL", "MAX_LOSS_ABOVE_LIMIT", "INSUFFICIENT_HISTORY", "NO_CREDIT", "NO_CREDIT_AFTER_COSTS"}
+
+
+def test_roll_policy_refuses_a_roll_that_does_not_pay_for_closing_the_old_spread_and_records_the_rule(drop_world):
+    """A stopped spread costs at least twice its credit to close, so a replacement at the rules'
+    strikes cannot give a positive roll net credit: the roll policy exits, as the stop policy does,
+    and every refusal is recorded with the rule that made it."""
     cfg, eng, dev = setup_policy(drop_world)
     got = policy_runs(cfg, eng, "RELIANCE", dev)["baseline"]
     stopped = [t for t in got["stop"] if t.exit_reason == "STOP" and t.variant == "baseline:PE"]
-    assert len(stopped) == 1
-    rolled = [t for t in got["roll_rules"] if t.exit_reason == "ROLLED"]
-    assert len(rolled) == 1 and rolled[0].signal_id == stopped[0].signal_id
-    assert rolled[0].net_pnl == stopped[0].net_pnl and rolled[0].exit_time == stopped[0].exit_time     # closed at the same open
-    child = [t for t in got["roll_rules"] if t.roll_no == 1]
-    assert len(child) == 1 and child[0].campaign_id == rolled[0].campaign_id == rolled[0].signal_id
-    assert child[0].entry_time[:10] == rolled[0].exit_time[:10]                    # opened at the open the old one closed at
-    assert ist_date(child[0].signal_time) < ist_date(child[0].entry_time)          # decided at the previous close
-    sell = lambda t: next(x for x in t.legs if x["action"] == "SELL")
-    assert sell(child[0])["strike"] < sell(rolled[0])["strike"] and sell(child[0])["right"] == "PE"
-    assert unhedged_short_legs(child[0].legs, child[0].expiry, child[0].lots, child[0].lot_size) == [] and child[0].lots == 1
-    assert max(t.roll_no for t in got["roll_rules"]) == 1                          # max_rolls
-    assert child[0].max_profit_inr > 0
-    width = abs(child[0].legs[0]["strike"] - child[0].legs[1]["strike"])
-    assert child[0].max_profit_inr >= ROLL.min_net_credit_pct_of_width / 100 * width * child[0].lot_size
-    camps = {c["campaign_id"]: c for c in campaigns_from_trades(got["roll_rules"])}
-    c = camps[rolled[0].campaign_id]
-    assert c["rolls"] == 1 and c["positions"] == 2 and c["open"] is False
-    assert c["realised_pnl_inr"] == pytest.approx(rolled[0].net_pnl + child[0].net_pnl, abs=0.01)
-    assert c["charges_inr"] == pytest.approx(rolled[0].costs["total"] + child[0].costs["total"], abs=0.01)
-    assert c["hedge_cost_inr"] == pytest.approx(sum(
-        (x["entry_price"] - x["exit_price"]) * x["lots"] * x["lot_size"]
-        for t in (rolled[0], child[0]) for x in t.legs if x["action"] == "BUY"), abs=0.01)
-    # with max_rolls 0 the same threat is just an exit
-    none = settings(backtest=cfg.backtest.model_dump(), options=cfg.options.model_dump(),
-                    stock_option_selling={"roll": {**ROLL.model_dump(), "max_rolls": 0}})
-    again = policy_runs(none, eng, "RELIANCE", dev)["baseline"]["roll_rules"]
-    assert all(t.roll_no == 0 and t.exit_reason != "ROLLED" for t in again)
+    assert len(stopped) == 1 and stopped[0].roll_refused == ""           # the stop policy never considers a roll
+    same = [t for t in got["roll_rules"] if t.signal_id == stopped[0].signal_id]
+    assert len(same) == 1 and same[0].exit_reason == "STOP" and same[0].roll_no == 0
+    assert same[0].net_pnl == stopped[0].net_pnl and same[0].exit_time == stopped[0].exit_time
+    assert same[0].roll_refused in REFUSALS and same[0].roll_refused != ""
+    assert all(t.roll_no == 0 and t.exit_reason != "ROLLED" for t in got["roll_rules"])
+    considered = [t for t in got["roll_rules"] if t.exit_reason in ("STOP", "STRIKE_BREACHED")]
+    assert considered and all(t.roll_refused in REFUSALS for t in considered)
+    assert all(t.roll_refused == "" for t in got["roll_rules"] if t.exit_reason in ("TARGET", "TIME", "PERIOD_END"))
 
 
 def test_roll_always_never_stops_and_rolls_a_losing_spread_into_the_next_month(slide_world):
@@ -310,9 +327,23 @@ def test_roll_always_never_stops_and_rolls_a_losing_spread_into_the_next_month(s
     for t in rolled:
         child = next(x for x in always if x.campaign_id == t.campaign_id and x.roll_no == t.roll_no + 1)
         assert child.expiry > t.expiry and child.entry_time[:10] == t.exit_time[:10]
-        assert (date.fromisoformat(t.expiry) - ist_date(t.exit_time)).days <= 7     # at the forced exit before expiry week
+        assert (date.fromisoformat(t.expiry) - ist_date(t.exit_time)).days <= 10    # at the time exit, 10 days before expiry
         assert unhedged_short_legs(child.legs, child.expiry, child.lots, child.lot_size) == []
         assert datetime.fromisoformat(t.exit_time).astimezone(IST).hour == 9
+        # the roll is linked to its original trade, and the campaign's figures add up
+        assert child.campaign_id == t.campaign_id == next(x.signal_id for x in always if x.campaign_id == t.campaign_id and x.roll_no == 0)
+        assert child.lots == 1 and ist_date(child.signal_time) < ist_date(child.entry_time)
+    camps = {c["campaign_id"]: c for c in campaigns_from_trades(always)}
+    first = rolled[0]
+    legs = [x for x in always if x.campaign_id == first.campaign_id]
+    c = camps[first.campaign_id]
+    assert c["rolls"] == len(legs) - 1 >= 1 and c["positions"] == len(legs) and c["open"] is False
+    assert c["realised_pnl_inr"] == pytest.approx(sum(x.net_pnl for x in legs), abs=0.01)
+    assert c["charges_inr"] == pytest.approx(sum(x.costs["total"] for x in legs), abs=0.01)
+    assert c["hedge_cost_inr"] == pytest.approx(sum((y["entry_price"] - y["exit_price"]) * y["lots"] * y["lot_size"]
+                                                    for x in legs for y in x.legs if y["action"] == "BUY"), abs=0.01)
+    # no expired contract is ever held: every position is closed on or before its expiry
+    assert all(ist_date(x.exit_time) <= date.fromisoformat(x.expiry) for x in always)
 
 
 def test_ACCEPTANCE_report_compares_the_three_exit_policies_per_campaign(drop_world):
@@ -328,8 +359,9 @@ def test_ACCEPTANCE_report_compares_the_three_exit_policies_per_campaign(drop_wo
             assert r["positions"] == r["campaigns"] + r["rolls"] and r["low_sample"] is True          # under 30 campaigns
             assert r["worst_campaign_inr"] <= r["per_campaign_inr"] and r["hedge_cost_inr"] > 0
     base = {r["policy"]: r for r in out["baseline"]}
-    assert base["roll_rules"]["rolls"] == 1 and base["roll_rules"]["max_rolls_in_a_campaign"] == 1
-    assert base["roll_rules"]["net_pnl_inr"] != base["stop"]["net_pnl_inr"]
+    assert base["roll_rules"]["rolls"] == 0 and base["roll_rules"]["net_pnl_inr"] == base["stop"]["net_pnl_inr"]
+    assert base["roll_rules"]["roll_refusals"] and set(base["roll_rules"]["roll_refusals"]) <= REFUSALS
+    assert sum(base["roll_rules"]["roll_refusals"].values()) >= 1 and base["stop"]["roll_refusals"] == {}
     got = policy_runs(cfg, eng, "RELIANCE", dev)["baseline"]
     assert base["roll_rules"]["net_pnl_inr"] == pytest.approx(sum(t.net_pnl for t in got["roll_rules"]), abs=0.02)
     # deterministic

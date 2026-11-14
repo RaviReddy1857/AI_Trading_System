@@ -332,17 +332,18 @@ options:
 stock_option_selling:
   enabled: true
   min_iv_rank: 50               # sell only when the stock's IV rank is at least this
-  min_open_interest: 100        # each traded strike: open interest, in lots, at least this
-  max_bid_ask_spread_pct: 10    # each traded strike (live): bid-ask width within 10% of the mid price
+  min_open_interest: 200        # min_open_interest_lots (spec section 2): each traded strike, open interest in lots
+  max_bid_ask_spread_pct: 5     # max_bid_ask_pct_of_mid (spec section 2): live eligibility
   max_short_delta: 0.20
   hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
-  max_loss_per_stock_spread_pct: 10   # one lot's max loss at most this % of capital (ASSUMPTION, yours to set)
-  min_net_credit_pct_of_max_loss: 10  # CREDIT_TOO_SMALL: credit after hedge and charges under 10% of the max loss (ASSUMPTION)
+  max_loss_per_stock_spread_pct: 2.5  # max_risk_per_position_pct (spec section 2): a position's max loss, % of capital
+  min_net_credit_pct_of_max_loss: 20  # min_credit_to_max_loss 0.20 (spec section 2): CREDIT_TOO_SMALL below it
   entry_min_days_to_expiry: 20
   entry_max_days_to_expiry: 35
   profit_target_pct_of_credit: 50
   stop_multiple_of_credit: 2.0  # close when buying the spread back costs 2x the credit
-  exit_days_before_expiry: 7    # out at the open of the first session within 7 days of expiry: never held in expiry week
+  exit_days_before_expiry: 10   # time_exit_dte (spec section 2): out at the open of the first session within 10 calendar days of expiry
+  forced_exit_trading_days_before_expiry: 5   # no position inside the last 5 trading days, whatever else
   trend_fast_sma: 20            # swing trend rule: close above the 50-day average and 20-day above 50-day = up trend
   trend_slow_sma: 50
   atr_days: 14
@@ -355,34 +356,32 @@ stock_option_selling:
     extreme_lookback_sessions: 252   # 52-week low (puts) / high (calls) ...
     extreme_recent_sessions: 20      # ... made in the last 20 sessions
     relative_return_sessions: 63     # 3-month return against NIFTY
-    max_underperformance_pct: 10     # blocked when it trails (puts) / leads (calls) NIFTY by more than this
+    max_underperformance_pct: 5      # rel_strength_max_lag_pct: blocked when it trails (puts) / leads (calls) NIFTY by more than 5 points
   campaign_limit:               # STOCK_LOSS_LIMIT: per stock, closed manual positions included
     enabled: true
     window_days: 90
     max_stopped_trades: 2       # this many stopped trades in the window ...
-    max_cumulative_loss_pct: 5  # ... or a net loss of this % of capital in the window (ASSUMPTION, yours to set)
-    cooling_off_days: 45        # no new signal in that stock for this long (ASSUMPTION, yours to set)
-  roll:                         # a roll is suggested only if every rule holds; otherwise the alert is "exit"
+    max_cumulative_loss_pct: 1.5 # stock_loss_max_pct_capital: ... or a net loss of 1.5% of capital in the window
+    cooling_off_days: 30        # stock_cooloff_days: no new signal in that stock for 30 calendar days
+  roll:                         # a roll is suggested only if every rule holds (spec section 6); otherwise the alert is "exit"
     max_rolls: 1                # rolls allowed in one campaign (the original trade and its rolls)
-    min_net_credit_pct_of_width: 10   # new credit after hedge cost and charges: above zero and at least 10% of the new width (ASSUMPTION)
-    stuck_time_value_pct: 10    # stuck: sold option in the money with time value under 10% of its price (ASSUMPTION)
-    pre_expiry_window_days: 10  # stuck: this close to expiry (ASSUMPTION)
-    max_days_to_expiry: 65      # a roll may use the next monthly expiry up to this far away (a new entry stops at 35) (ASSUMPTION)
+    min_net_credit_pct_of_width: 10   # min_roll_net_credit_pct_of_width: (new credit - debit to close the old spread - all roll charges) above 10% of the replacement width
+    stuck_time_value_pct: 20    # stuck: sold option in the money with time value under 20% of its price, or inside the forced-exit window
   reversal:                     # reversal detector for washed-out stocks: a watch list and candidates, never a signal
     enabled: true
     alerts_approved: false      # no reversal alert is produced until you set this to true
-    drawdown_pct: 30            # washed out: more than 30% below the 52-week high ... (ASSUMPTION)
-    min_months: 3               # ... on every session for 3 months, and below the 200-day average (ASSUMPTION)
+    drawdown_pct: 25            # washed_out_drawdown_pct: 25% or more below the 52-week high ...
+    min_sessions_below_long: 63 # ... with at least 63 sessions in a row below the 200-day average
     high_lookback_sessions: 252
-    base_no_new_low_sessions: 15     # base forming: no new low for 15 sessions ... (ASSUMPTION)
-    range_sessions: 10               # ... and the average daily high-low range of the last 10 sessions
-    range_compare_sessions: 30       # compared with the 30 sessions before those
-    range_shrink_ratio: 0.85         # at most 85% of that earlier average (ASSUMPTION)
+    base_no_new_low_sessions: 15     # base forming: no new low for 15 sessions ...
+    range_sessions: 10               # ... and the 10-session ATR
+    range_compare_sessions: 20       # below 0.8 x the 20-session ATR (base_range_contraction)
+    range_shrink_ratio: 0.8
     base_valid_sessions: 10          # the confirmation must come within 10 sessions of a base-forming day
     confirm_sma_days: 20             # confirmed: close above the 20-day average and above the last swing high,
     volume_sma_days: 20              # volume above its 20-day average,
     relative_return_sessions: 10     # and the 10-session return ahead of NIFTY
-    swing_pct: 5                     # a swing high / breakdown level needs a 5% move (ASSUMPTION)
+    swing_pct: 5                     # a swing high / breakdown level needs a 5% move
     lift_sessions: 20                # the falling-stock block is lifted for 20 sessions, only for put spreads below the base low
     rearm_sessions: 40               # one confirmation per stock in 40 sessions
     outcome_sessions: [10, 20, 40]
@@ -390,8 +389,8 @@ stock_option_selling:
       width_strikes: 2
       entry_min_dte: 20
       entry_max_dte: 65
-      target_pct_of_max_profit: 60   # (ASSUMPTION)
-      stop_pct_of_debit: 50          # (ASSUMPTION)
+      target_pct_of_max_profit: 60   #
+      stop_pct_of_debit: 50          #
       exit_days_before_expiry: 7
   profile:                      # range and speed profile, scenario history, alert levels (data from 2019-01-22 only)
     windows_years: [2, 5]

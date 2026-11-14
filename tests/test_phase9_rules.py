@@ -20,11 +20,10 @@ from app.options.stock_profile import (DOWNTREND_BLOCK, HISTORY_LABEL, INSUFFICI
 from app.options.stock_selling import SpreadPosition, build_stock_selling, position_alerts
 from app.quality import IST
 from app.store import Store
-from tests.test_phase3 import settings
-from tests.test_phase9_core import (EXP, EXP_NEXT, LOT, NOW, chain, ctx_for, engine_for, index_bars, ist_date, run_bt,
+from tests.test_phase9_core import (settings, EXP, EXP_NEXT, LOT, NOW, chain, ctx_for, engine_for, index_bars, ist_date, run_bt,
                                     stock_bars, stock_world, weekdays_back)
 
-CFG = SosParams()
+CFG = settings().stock_option_selling
 TB, CL, PR = CFG.trend_block, CFG.campaign_limit, CFG.profile
 END = date(2026, 11, 13)
 
@@ -357,23 +356,25 @@ def test_snapshot_levels_are_from_the_bars_given():
     assert snapshot([], 20, TB) is None
 
 
-def test_ACCEPTANCE_an_alert_says_what_changed_and_shows_exit_and_roll_with_numbers(s):
-    strat = build_stock_selling(s)
-    bars = stock_bars()
-    spot = bars[-1].close
-    both = {EXP: chain(spot), EXP_NEXT: chain(spot, expiry=EXP_NEXT)}
-    c = ctx_for(s, bars, both, expiries=(ExpiryInfo(EXP, "monthly", LOT), ExpiryInfo(EXP_NEXT, "monthly", LOT)))
-    pos = SpreadPosition("RELIANCE", "PE", 1100.0, 1080.0, EXP, 4.0, LOT)
+def test_ACCEPTANCE_an_alert_says_what_changed_and_shows_exit_and_roll_with_numbers():
+    from tests.test_phase9_core import HELD_ROLL, LOT_R, big_settings, roll_ctx
+    cfg = big_settings()
+    strat = build_stock_selling(cfg)
+    c = roll_ctx(cfg, stock_bars())
     prev, now = snap(), snap(date(2026, 11, 13), close=1079.0, vix_change_pct=18.0)
-    alerts = position_alerts(strat, c, pos, 7.0, prev, now)
+    alerts = position_alerts(strat, c, HELD_ROLL, 0.8, prev, now)
     assert [a["kind"] for a in alerts] == ["BELOW_SUPPORT", "VIX_SPIKE"]
     for a in alerts:
-        assert a["underlying"] == "RELIANCE" and "bull put spread 1100/1080" in a["position"] and a["what_changed"]
-        assert a["exit"]["cost_to_close_inr"] == 7.0 * LOT and a["exit"]["realised_pnl_inr"] < 0
+        assert a["underlying"] == "RELIANCE" and "bull put spread 1110/1100" in a["position"] and a["what_changed"]
+        assert a["exit"]["cost_to_close_inr"] == 0.8 * LOT_R and a["action"] == "ROLL"
         assert a["roll"] is not None and unhedged_short_legs(a["roll"]["legs"]) == [] and a["roll"]["new_max_loss_inr"] > 0
-    assert position_alerts(strat, c, pos, 7.0, prev, snap(date(2026, 11, 13))) == []       # nothing changed: no alert
-    blind = position_alerts(strat, c, pos, None, prev, now)
+        assert a["roll"]["roll_net_credit_inr"] > 0 and "roll_signal" not in a
+    assert position_alerts(strat, c, HELD_ROLL, 0.8, prev, snap(date(2026, 11, 13))) == []     # nothing changed: no alert
+    blind = position_alerts(strat, c, HELD_ROLL, None, prev, now)
     assert blind[0]["exit"] is None and "cannot be priced" in blind[0]["roll_note"]
+    # roll inputs unknown (a leg of the open spread has no quote): the exit guidance is still there
+    gone = position_alerts(strat, roll_ctx(cfg, stock_bars(), drop={(1100.0, "PE")}), HELD_ROLL, 0.8, prev, now)
+    assert gone[0]["action"] == "EXIT" and gone[0]["exit"]["cost_to_close_inr"] == 0.8 * LOT_R and gone[0]["roll"] is None
 
 
 # ---------------- in the backtest: each rule and alert against the baseline ----------------

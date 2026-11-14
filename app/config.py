@@ -519,7 +519,7 @@ class TrendBlock(StrictModel):
     extreme_lookback_sessions: int = Field(252, ge=60, le=400)     # "52-week" low / high
     extreme_recent_sessions: int = Field(20, ge=1, le=120)         # ... made within this many sessions
     relative_return_sessions: int = Field(63, ge=10, le=260)       # about 3 months
-    max_underperformance_pct: float = Field(10.0, gt=0, le=100)    # stock return minus NIFTY return, in points
+    max_underperformance_pct: float = Field(5.0, gt=0, le=100)     # rel_strength_max_lag_pct: stock return minus NIFTY return, points
 
 
 class CampaignLimit(StrictModel):
@@ -528,18 +528,15 @@ class CampaignLimit(StrictModel):
     enabled: bool = True
     window_days: int = Field(90, ge=7, le=730)
     max_stopped_trades: int = Field(2, ge=1, le=20)
-    max_cumulative_loss_pct: float = Field(5.0, gt=0, le=100)      # net loss in the window, % of capital
-    cooling_off_days: int = Field(45, ge=1, le=365)
+    max_cumulative_loss_pct: float = Field(1.5, gt=0, le=100)      # stock_loss_max_pct_capital: net loss in the window, % of capital
+    cooling_off_days: int = Field(30, ge=1, le=365)                # stock_cooloff_days (calendar)
 
 
 class RollRules(StrictModel):
     """When a threatened spread may be rolled instead of closed. Anything else is "exit"."""
     max_rolls: int = Field(1, ge=0, le=12)                         # rolls allowed in one campaign
     min_net_credit_pct_of_width: float = Field(10.0, ge=0, le=100)  # new credit after hedge and charges, % of the new width
-    stuck_time_value_pct: float = Field(10.0, ge=0, le=100)        # sold option in the money with time value below this % of its price
-    pre_expiry_window_days: int = Field(10, ge=0, le=60)           # this close to expiry a roll earns little: exit
-    # A roll may go into the next monthly expiry even when that is further away than a new entry may be.
-    max_days_to_expiry: int = Field(65, ge=8, le=120)
+    stuck_time_value_pct: float = Field(20.0, ge=0, le=100)        # sold option in the money with time value below this % of its price
 
 
 class BullCallParams(StrictModel):
@@ -564,13 +561,13 @@ class Reversal(StrictModel):
     until `alerts_approved` is set by the user."""
     enabled: bool = True
     alerts_approved: bool = False                                  # no reversal alert is produced while this is false
-    drawdown_pct: float = Field(30.0, gt=0, lt=100)                # washed out: this far below the 52-week high ...
-    min_months: int = Field(3, ge=1, le=24)                        # ... on every session for this many months (21 sessions each) ...
+    drawdown_pct: float = Field(25.0, gt=0, lt=100)                # washed_out_drawdown_pct: this far below the 52-week high ...
+    min_sessions_below_long: int = Field(63, ge=1, le=400)         # ... with at least this many sessions in a row below sma_long
     high_lookback_sessions: int = Field(252, ge=60, le=400)        # ... and below the trend block's long average
     base_no_new_low_sessions: int = Field(15, ge=3, le=120)        # base: the low is at least this many sessions old ...
     range_sessions: int = Field(10, ge=3, le=60)                   # ... and the average daily range of the last N sessions
-    range_compare_sessions: int = Field(30, ge=3, le=120)          # is at most `range_shrink_ratio` of the average of
-    range_shrink_ratio: float = Field(0.85, gt=0, le=1)            # the `range_compare_sessions` sessions before them
+    range_compare_sessions: int = Field(20, ge=3, le=120)          # base_range_contraction: ATR(range_sessions) below
+    range_shrink_ratio: float = Field(0.8, gt=0, le=1)             # range_shrink_ratio x ATR(range_compare_sessions)
     base_valid_sessions: int = Field(10, ge=1, le=60)              # a confirmation must come this soon after a base-forming day
     confirm_sma_days: int = Field(20, ge=5, le=100)
     volume_sma_days: int = Field(20, ge=5, le=100)
@@ -612,18 +609,19 @@ class StockOptionSelling(StrictModel):
     physically, so no position is open in expiry week."""
     enabled: bool = True
     min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when the stock's IV rank is at least this
-    min_open_interest: int = Field(100, ge=0)                 # each traded strike: open interest in LOTS at least this
-    max_bid_ask_spread_pct: float = Field(10.0, gt=0, le=100)  # each traded strike: bid-ask width, % of mid, at most this
+    min_open_interest: int = Field(200, ge=0)                 # min_open_interest_lots: each traded strike, open interest in LOTS
+    max_bid_ask_spread_pct: float = Field(5.0, gt=0, le=100)   # max_bid_ask_pct_of_mid: each traded strike (live eligibility)
     max_short_delta: float = Field(0.20, gt=0, lt=0.5)
     hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
-    max_loss_per_stock_spread_pct: float = Field(10.0, gt=0, le=100)   # one lot's max loss, % of capital, at most this
+    max_loss_per_stock_spread_pct: float = Field(2.5, gt=0, le=100)    # max_risk_per_position_pct: a position's max loss, % of capital
     # Net credit after the hedge and all charges must be at least this % of the max loss (CREDIT_TOO_SMALL). 0 = off.
-    min_net_credit_pct_of_max_loss: float = Field(10.0, ge=0, le=100)
+    min_net_credit_pct_of_max_loss: float = Field(20.0, ge=0, le=100)   # min_credit_to_max_loss 0.20
     entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
     entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
     profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)
     stop_multiple_of_credit: float = Field(2.0, gt=1, le=10)
-    exit_days_before_expiry: int = Field(7, ge=7, le=30)      # out this many days before expiry: never in expiry week
+    exit_days_before_expiry: int = Field(10, ge=7, le=30)     # time_exit_dte: out this many calendar days before expiry
+    forced_exit_trading_days_before_expiry: int = Field(5, ge=1, le=15)   # no position inside this window, whatever else
     trend_fast_sma: int = Field(20, ge=2, le=200)             # the swing trend rule: close and fast average vs slow average
     trend_slow_sma: int = Field(50, ge=3, le=400)
     atr_days: int = Field(14, ge=2, le=100)
