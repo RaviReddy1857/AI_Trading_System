@@ -346,23 +346,46 @@ def test_roll_always_never_stops_and_rolls_a_losing_spread_into_the_next_month(s
     assert all(ist_date(x.exit_time) <= date.fromisoformat(x.expiry) for x in always)
 
 
-def test_ACCEPTANCE_report_compares_the_three_exit_policies_per_campaign(drop_world):
+def test_ACCEPTANCE_report_compares_the_three_exit_policies_per_campaign_on_daily_and_synchronized_bars(drop_world):
     cfg, eng, dev = setup_policy(drop_world)
-    out = policy_comparison(cfg, eng, ["RELIANCE"], dev)["exit_policy_comparison"]
-    assert out["exit_check"] == "daily" and "same signals" in out["note"]
-    for group in ("strategy", "baseline"):
-        rows = {r["policy"]: r for r in out[group]}
-        assert list(rows) == ["stop", "roll_rules", "roll_always"]
-        assert len({r["campaigns"] for r in rows.values()}) == 1 and rows["stop"]["campaigns"] > 0     # the same entries
-        assert rows["stop"]["rolls"] == 0 and rows["stop"]["positions"] == rows["stop"]["campaigns"]
-        for r in rows.values():
-            assert r["positions"] == r["campaigns"] + r["rolls"] and r["low_sample"] is True          # under 30 campaigns
-            assert r["worst_campaign_inr"] <= r["per_campaign_inr"] and r["hedge_cost_inr"] > 0
-    base = {r["policy"]: r for r in out["baseline"]}
-    assert base["roll_rules"]["rolls"] == 0 and base["roll_rules"]["net_pnl_inr"] == base["stop"]["net_pnl_inr"]
-    assert base["roll_rules"]["roll_refusals"] and set(base["roll_rules"]["roll_refusals"]) <= REFUSALS
-    assert sum(base["roll_rules"]["roll_refusals"].values()) >= 1 and base["stop"]["roll_refusals"] == {}
-    got = policy_runs(cfg, eng, "RELIANCE", dev)["baseline"]
-    assert base["roll_rules"]["net_pnl_inr"] == pytest.approx(sum(t.net_pnl for t in got["roll_rules"]), abs=0.02)
+    both = policy_comparison(cfg, eng, ["RELIANCE"], dev)["exit_policy_comparison"]
+    assert list(both) == ["intraday", "daily"]
+    for mode, out in both.items():
+        assert out["exit_check"] == mode and "same signals" in out["note"] and "research only" in out["note"]
+        for group in ("strategy", "baseline"):
+            rows = {r["policy"]: r for r in out[group]}
+            assert list(rows) == ["stop", "roll_rules", "roll_always"]
+            assert rows["stop"]["rolls"] == 0 and rows["stop"]["positions"] == rows["stop"]["campaigns"] > 0
+            for r in rows.values():
+                assert r["positions"] == r["campaigns"] + r["rolls"] and r["low_sample"] is True      # under 30 campaigns
+                assert r["worst_campaign_inr"] <= r["per_campaign_inr"] and r["hedge_cost_inr"] > 0
+                assert r["avg_win_inr"] is None or r["avg_win_inr"] > 0
+                assert r["campaigns"] + r["data_incomplete_campaigns"] + r["entries_without_synchronized_bar"] >= rows["stop"]["campaigns"]
+        base = {r["policy"]: r for r in out["baseline"]}
+        assert base["roll_rules"]["rolls"] == 0 and base["roll_rules"]["net_pnl_inr"] == base["stop"]["net_pnl_inr"]
+        assert base["roll_rules"]["roll_refusals"] and set(base["roll_rules"]["roll_refusals"]) <= REFUSALS
+        assert base["stop"]["roll_refusals"] == {}
+    assert "synchronized" in both["intraday"]["note"].lower() and "daily closes" in both["daily"]["note"]
+    assert both["daily"]["baseline"][0]["data_incomplete_campaigns"] == 0
+    got = policy_runs(cfg, eng, "RELIANCE", dev, "intraday")["baseline"]
+    assert {r["policy"]: r for r in both["intraday"]["baseline"]}["stop"]["net_pnl_inr"] == pytest.approx(
+        sum(t.net_pnl for t in got["stop"]), abs=0.02)
+    assert all(t.exit_check == "intraday" for t in got["stop"])
+    # the same signals are entered under every policy in the synchronized run too
+    assert originals(got["roll_rules"]) == originals(got["stop"])
     # deterministic
-    assert policy_comparison(cfg, eng, ["RELIANCE"], dev)["exit_policy_comparison"] == out
+    assert policy_comparison(cfg, eng, ["RELIANCE"], dev)["exit_policy_comparison"] == both
+
+
+def test_synchronized_roll_every_month_fills_all_four_legs_in_one_bar_or_just_exits(slide_world):
+    cfg, eng, dev = setup_policy(slide_world)
+    always = policy_runs(cfg, eng, "RELIANCE", dev, "intraday")["baseline"]["roll_always"]
+    assert always and all(t.exit_reason not in ("STOP", "STRIKE_BREACHED") for t in always)
+    for t in always:
+        assert ist_date(t.exit_time) <= date.fromisoformat(t.expiry)                 # never held past expiry
+        if t.exit_reason == "ROLLED":
+            child = next(x for x in always if x.campaign_id == t.campaign_id and x.roll_no == t.roll_no + 1)
+            assert child.entry_time == t.exit_time                                   # the same synchronized bar
+            assert child.expiry > t.expiry and t.net_pnl < 0
+        elif t.roll_refused:
+            assert t.roll_refused in REFUSALS                                        # not made: recorded why, and closed

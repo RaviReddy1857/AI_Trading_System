@@ -53,7 +53,7 @@ log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
-PLAN_VERSION = 3        # 3: the reversal candidates (bull call spread, put spread below the base low)
+PLAN_VERSION = 4        # 4: section 2 defaults (other strikes) and the exit policies on synchronized 5-minute bars
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
 
@@ -185,17 +185,23 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
             "baseline_by_entry_condition": by_cond}
 
 
-def policy_runs(settings: Settings, eng: OptionEngine, sym: str, sessions: list[date]) -> dict:
-    """{"strategy" | "baseline": {policy: trades}} for one stock. The "stop" policy is run first and its
-    entry signals are recorded; every other policy enters exactly those signals (daily exit check)."""
+def policy_runs(settings: Settings, eng: OptionEngine, sym: str, sessions: list[date], exit_check: str = "daily",
+                skipped: dict | None = None) -> dict:
+    """{"strategy" | "baseline": {policy: trades}} for one stock under one execution mode. The "stop"
+    policy is run first and its entry signals are recorded; every other policy enters exactly those
+    signals. `skipped`: {group: {policy: Counter}} collects what each run skipped or left out."""
     policies = settings.stock_option_selling.backtest.exit_policies
     ref = variant(settings)
     out = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
+
+    def counter(group: str, policy: str) -> Counter:
+        return Counter() if skipped is None else skipped.setdefault(group, {}).setdefault(policy, Counter())
+
     recorded = {}
     for name in ["strategy"] + baseline_variants(ref):
         rec: list = []
         group = "strategy" if name == "strategy" else "baseline"
-        out[group]["stop"] += eng.run_stream(ref, sym, sessions, name, Counter(), exit_check="daily", record=rec)
+        out[group]["stop"] += eng.run_stream(ref, sym, sessions, name, counter(group, "stop"), exit_check=exit_check, record=rec)
         recorded[name] = rec
     for policy in policies[1:]:
         st = variant(settings)
@@ -205,57 +211,84 @@ def policy_runs(settings: Settings, eng: OptionEngine, sym: str, sessions: list[
             for d, sig in rec:
                 replay.setdefault(d, []).append(sig)
             group = "strategy" if name == "strategy" else "baseline"
-            out[group][policy] += eng.run_stream(st, sym, sessions, name, Counter(), exit_check="daily", replay=replay)
+            out[group][policy] += eng.run_stream(st, sym, sessions, name, counter(group, policy), exit_check=exit_check,
+                                                 replay=replay)
     return out
 
 
-def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
-    """The exit policies on the same entries, counted per campaign (an original trade and its rolls)."""
+POLICY_NOTE = {
+    "daily": "Decisions are taken on daily closes and filled at the next session's open; a roll closes the old spread "
+             "and opens the new one at the same open.",
+    "intraday": "Synchronized 5-minute bars of every leg: entry at the first synchronized bar of the session after the "
+                "signal, stop and target on synchronized bar closes, every fill at the next synchronized bar's open; a "
+                "roll fills at the first bar in which all four legs traded. A campaign with a session lacking a "
+                "synchronized bar is data-incomplete and left out of every figure; the counts are shown.",
+}
+
+
+def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date],
+                      exit_checks: tuple[str, ...] | None = None) -> dict:
+    """The exit policies on the same entries, counted per campaign (an original trade and its rolls),
+    under each execution mode."""
     policies = settings.stock_option_selling.backtest.exit_policies
-    total = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
-    for sym in syms:
-        got = policy_runs(settings, eng, sym, dev)
-        for group in total:
-            for p in policies:
-                total[group][p] += got[group][p]
+    modes = tuple(exit_checks or settings.stock_option_selling.backtest.exit_checks)
     min_n = settings.backtest.min_trades
 
-    def row(policy: str, trades: list) -> dict:
+    def row(policy: str, trades: list, sk: Counter) -> dict:
         camps = campaigns_from_trades(trades)
         nets = [c["realised_pnl_inr"] for c in camps]
+        wins, losses = [x for x in nets if x > 0], [x for x in nets if x <= 0]
         s = stats(trades, settings.account.capital_inr, min_n)
         n = len(camps)
         return {"policy": policy, "label": POLICY_LABEL[policy], "campaigns": n, "positions": len(trades),
                 "rolls": sum(c["rolls"] for c in camps), "campaigns_rolled": sum(1 for c in camps if c["rolls"]),
                 "max_rolls_in_a_campaign": max((c["rolls"] for c in camps), default=0),
-                "win_rate_pct": round(sum(1 for x in nets if x > 0) / n * 100, 1) if n else None,
+                "win_rate_pct": round(len(wins) / n * 100, 1) if n else None,
+                "avg_win_inr": round(sum(wins) / len(wins), 2) if wins else None,
+                "avg_loss_inr": round(sum(losses) / len(losses), 2) if losses else None,
+                "profit_factor": round(sum(wins) / -sum(losses), 2) if losses and sum(losses) < 0 else None,
                 "net_pnl_inr": s["net_pnl_inr"], "per_campaign_inr": round(s["net_pnl_inr"] / n, 2) if n else None,
                 "worst_campaign_inr": min(nets) if nets else None, "max_drawdown_inr": s["max_drawdown_inr"],
                 "costs_inr": s["costs_inr"], "hedge_cost_inr": round(sum(c["hedge_cost_inr"] for c in camps), 2),
                 "rolled_when_recovery_was_not_possible": sum(1 for c in camps if c["rolled_when_recovery_was_not_possible"]),
                 # which rule said "exit" each time a roll was considered and not made
                 "roll_refusals": dict(sorted(Counter(t.roll_refused for t in trades if t.roll_refused).items())),
+                "data_incomplete_campaigns": sk.get("DATA_INCOMPLETE_CAMPAIGNS", 0),
+                "sessions_without_synchronized_bar": sk.get("DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION", 0),
+                "sessions_with_5_minute_bars_not_stored": sk.get("DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED", 0),
+                "entries_without_synchronized_bar": sk.get("NO_SYNCHRONIZED_BAR_AT_ENTRY", 0)
+                + sk.get("5_MINUTE_BARS_NOT_STORED_AT_ENTRY", 0),
                 "low_sample": n < min_n}
 
-    return {"exit_policy_comparison": {
-        "exit_check": "daily",
-        "note": "Every policy enters exactly the same signals (recorded from the stop policy). Decisions are taken on "
-                "daily closes and filled at the next session's open; a roll closes the old spread and opens the new "
-                "one at the same open, one lot each. Results are per campaign: an original trade and all its rolls.",
-        "strategy": [row(p, total["strategy"][p]) for p in policies],
-        "baseline": [row(p, total["baseline"][p]) for p in policies]}}
+    out = {}
+    for mode in modes:
+        total = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
+        sk: dict = {}
+        for sym in syms:
+            got = policy_runs(settings, eng, sym, dev, mode, sk)
+            for group in total:
+                for p in policies:
+                    total[group][p] += got[group][p]
+        out[mode] = {"exit_check": mode,
+                     "note": "Every policy enters exactly the same signals (recorded from the stop policy). "
+                             + POLICY_NOTE[mode] + " One lot each. Results are per campaign: an original trade and all "
+                             "its rolls. Roll every month is research only and never reaches a live signal.",
+                     "strategy": [row(p, total["strategy"][p], sk.get("strategy", {}).get(p, Counter())) for p in policies],
+                     "baseline": [row(p, total["baseline"][p], sk.get("baseline", {}).get(p, Counter())) for p in policies]}
+    return {"exit_policy_comparison": out}
 
 
 def print_effects(rep: dict) -> None:
-    pc = rep.get("exit_policy_comparison")
-    if pc:
-        print("  exit policies on the same entries (daily exit check, per campaign):")
+    for mode, pc in (rep.get("exit_policy_comparison") or {}).items():
+        print(f"  exit policies on the same entries ({mode} execution, per campaign):")
         for group in ("strategy", "baseline"):
             for r in pc[group]:
                 print(f"    {group:9s} {r['policy']:12s} campaigns {r['campaigns']:4d}  rolls {r['rolls']:4d} (max "
                       f"{r['max_rolls_in_a_campaign']})  win {r['win_rate_pct']}%  net Rs {r['net_pnl_inr']:>12,.2f}  "
                       f"per campaign Rs {r['per_campaign_inr']}  worst Rs {r['worst_campaign_inr']}"
                       + (f"  roll refused by {r['roll_refusals']}" if r["roll_refusals"] else "")
+                      + (f"  data-incomplete campaigns left out {r['data_incomplete_campaigns']}"
+                         if r["data_incomplete_campaigns"] else "")
                       + ("  LOW SAMPLE" if r["low_sample"] else ""))
     fx = rep.get("rule_effects")
     if not fx:
@@ -363,7 +396,8 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
             for st, names in runs:
                 for name in names:
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
-            policy_runs(settings, engine, sym, block)        # the spreads the roll policies open
+            for mode in settings.stock_option_selling.backtest.exit_checks:
+                policy_runs(settings, engine, sym, block, mode)      # the spreads the roll policies open
             for st in build_reversal_strategies(settings):   # the two reversal candidates and their baselines
                 for name in ["strategy"] + baseline_variants(st):
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="daily")

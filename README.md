@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 527 passed
+python -m pytest -q          # should say 528 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -311,9 +311,10 @@ python -m app.history                              # daily bars must be up to da
   day until `--status` shows every year complete; a Breeze error stops it cleanly and the next run carries on.
 - A report covers only the stocks and years that are completely downloaded (`--all-data` shows everything, marked INCOMPLETE).
 
-**What the report shows:** the strategy beside its no-filter baseline (same spread on a fixed schedule) with target and
-stop checked on 5-minute option bars and on daily closes; three exit policies on the same entries (stop, roll by the
-rules, roll every month); what each rule and each alert does to the result; baseline trades split by what was known at
+**What the report shows:** the strategy beside its no-filter baseline (same spread on a fixed schedule), executed on
+synchronized 5-minute bars of every leg (a campaign with a session lacking such a bar is left out as data-incomplete and
+counted) and, for comparison, on daily closes; three exit policies on the same entries under both executions (stop, roll
+by the rules, roll every month, the last one research only); what each rule and each alert does to the result; baseline trades split by what was known at
 entry; and every confirmed reversal with its 10, 20 and 40-session outcome and both candidate trades.
 
 **Files you fill for the scenario history** (until then those scenarios say "no data"; nothing is invented):

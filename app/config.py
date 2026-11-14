@@ -489,12 +489,10 @@ class StockSellingBacktest(StrictModel):
     """Backtest and option-history download of stock option selling."""
     priority_stocks: int = Field(30, ge=1, le=250)      # the N most liquid F&O stocks are downloaded and tested
     liquidity_lookback_days: int = Field(60, ge=5, le=500)   # liquidity = median daily traded value over these sessions
-    # How target and stop are checked while a spread is open: on the legs' 5-minute bars ("intraday") or on
-    # the daily closes with a fill at the next session's open ("daily"). The first one is the main result;
-    # every report shows the strategy and its baseline under each.
+    # Execution: "intraday" = synchronized 5-minute bars of every leg (entry, stop, target and every fill; no stale
+    # price, no daily fallback; a campaign with a missing bar is data-incomplete and left out) or "daily" = daily
+    # closes with fills at the next session's open. The first one is the main result; reports show both.
     exit_checks: list[Literal["intraday", "daily"]] = ["intraday", "daily"]
-    # 5-minute check: a leg's last traded price may be this old at most (stock options do not trade every bar).
-    intraday_leg_max_age_minutes: int = Field(30, ge=5, le=375)
     exit_on_strike_breach: bool = True                  # close (next open) when the stock closes beyond the sold strike
     # Exit policies compared on the SAME entries (daily exit check): "stop" = close at the stop; "roll_rules" =
     # roll a threatened spread when the roll rules allow it, else close; "roll_always" = never stop, roll a

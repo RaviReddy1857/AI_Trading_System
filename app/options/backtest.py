@@ -70,7 +70,7 @@ from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
 from .stock_profile import ClosedTrade, Snapshot, alert_kinds, snapshot
-from .stock_selling import SpreadPosition, roll_choices
+from .stock_selling import SpreadPosition, roll_choices, roll_money
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
                              discover_expiries, simulated_expiries, stock_iv_series)
 
@@ -86,9 +86,12 @@ ELIGIBILITY_LABEL = "excludes margin and bid/ask eligibility checks"
 IV_EXPIRY_REACH_DAYS = 75     # stock IV history: an at-the-money call is used at most 70 days before its expiry
 EXIT_CHECK_LABEL = {
     "daily": "target and stop checked on the legs' daily closes, filled at the next session's open",
-    "intraday": "target and stop checked on the legs' 5-minute bars, filled at the next 5-minute bar's open "
-                "(the daily close is the fallback when a day's 5-minute bars are not stored)",
+    "intraday": "synchronized 5-minute bars of every leg: entered at the first synchronized bar's open of the session "
+                "after the signal, target and stop checked on synchronized bar closes, every fill at the next "
+                "synchronized bar's open; a campaign with a session lacking such a bar is data-incomplete and left out",
 }
+DATA_INCOMPLETE_KEYS = ("DATA_INCOMPLETE_CAMPAIGNS", "DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED",
+                        "DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION")
 ELIGIBILITY_NOTE = ("Backtest results exclude the margin and bid/ask eligibility checks: past margins are not known and "
                     "option history has traded prices only (no bid/ask). A live signal still needs a current margin "
                     "entry and a bid and an ask within the width limit on every traded strike.")
@@ -129,47 +132,53 @@ class OptionTrade:
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
 
 
-def intraday_spread_exit(leg_bars: list[list], signs: list[int], target: float, stop: float,
-                         max_age: timedelta):
-    """Target and stop of a spread on its legs' 5-minute bars for ONE session.
-
-    `leg_bars`: each leg's bars of the session, oldest first. `signs`: +1 for a sold leg, -1 for a bought
-    one, so sum(sign x price) is the cost to buy the spread back. At the close of every 5-minute bar the
-    cost is compared with the target (at or below) and the stop (at or above). A leg that did not trade
-    in that bar is priced at its last traded close if that is at most `max_age` old; older than that the
-    cost is unknown and nothing is decided. A decision is filled at the open of the NEXT 5-minute bar
-    (never the same bar), each leg at that bar's open or, if it did not trade in it, at its last close
-    within `max_age`.
-
-    Returns (reason, fill_time, [fill price per leg]) when filled in this session, (reason, None, None)
-    when decided but not fillable before the close (the caller fills it at the next session's open),
-    or None when neither level was reached."""
+def synchronized_bars(leg_bars: list[list]) -> list[tuple[datetime, list]]:
+    """The 5-minute bars of ONE session in which EVERY leg traded: [(bar start, [that bar of each leg])],
+    oldest first. A spread is only ever priced from such a bar: the legs' prices are of the same five
+    minutes, and no leg is carried forward from an earlier trade."""
     by_start = [{b.start: b for b in bars} for bars in leg_bars]
-    times = sorted({b.start for bars in leg_bars for b in bars})
+    if not by_start:
+        return []
+    common = sorted(set.intersection(*(set(x) for x in by_start)))
+    return [(s, [x[s] for x in by_start]) for s in common]
 
-    def price(i: int, at: datetime, what: str) -> float | None:
-        b = by_start[i].get(at)
-        if b is not None:
-            return b.open if what == "open" else b.close
-        older = [x for x in leg_bars[i] if x.start < at and at - x.start <= max_age]
-        return older[-1].close if older else None
 
-    decision = None
-    for at in times:
-        if decision is not None:
-            fills = [price(i, at, "open") for i in range(len(leg_bars))]
-            if all(f is not None for f in fills):
-                return decision, at, fills
-            continue
-        closes = [price(i, at, "close") for i in range(len(leg_bars))]
-        if any(c is None for c in closes):
-            continue
-        cost = sum(s * c for s, c in zip(signs, closes))
+def sync_decision(sync: list[tuple[datetime, list]], signs: list[int], target: float, stop: float,
+                  use_stop: bool = True) -> tuple[str, int, float] | None:
+    """Target and stop of a credit spread on its synchronized bars. `signs`: +1 for a sold leg, -1 for a
+    bought one, so sum(sign x close) is the cost to buy the spread back at a bar's close. Returns
+    (TARGET | STOP, index of the deciding bar, cost) for the first bar whose close reaches a level, or
+    None. The fill is never on the deciding bar: the caller fills at the open of the NEXT synchronized
+    bar (bar index + 1, or the first one of a later session)."""
+    for k, (_, bars) in enumerate(sync):
+        cost = sum(s * b.close for s, b in zip(signs, bars))
         if cost <= target:
-            decision = "TARGET"
-        elif cost >= stop:
-            decision = "STOP"
-    return (decision, None, None) if decision else None
+            return "TARGET", k, cost
+        if use_stop and cost >= stop:
+            return "STOP", k, cost
+    return None
+
+
+class QuoteOverride:
+    """Quotes with the last traded price of some contracts replaced (the open spread's legs at a
+    5-minute bar's close), for a roll decision taken inside a session."""
+
+    def __init__(self, quotes, prices: dict):
+        self._q, self._p = quotes, prices
+        self.oi_available = quotes.oi_available
+
+    def strikes(self, expiry):
+        return self._q.strikes(expiry)
+
+    def atm_candidates(self, expiry):
+        return self._q.atm_candidates(expiry)
+
+    def quote(self, expiry, strike, right):
+        px = self._p.get((expiry, float(strike), right))
+        return OptionQuote(strike, right, None, None, px, None, None, None) if px is not None else self._q.quote(expiry, strike, right)
+
+    def highest_oi_strike(self, expiry, right):
+        return self._q.highest_oi_strike(expiry, right)
 
 
 class HistoryQuotes:
@@ -220,6 +229,7 @@ class _Position:
     roll_no: int = 0
     realised: float = 0.0         # net P&L of the campaign's earlier positions
     pending_roll: Signal | None = None   # the spread to open when this one is closed (exit policies with rolls)
+    last_bar: datetime | None = None     # synchronized execution: start of the bar this position was opened on
     roll_refused: str = ""
 
 
@@ -228,7 +238,6 @@ class OptionEngine:
                  lot_sizes: dict[str, int] | None = None, intraday: OptionIntraday | None = None):
         self.s, self.store, self.source, self.prices = settings, store, source, prices
         self.intraday = intraday         # 5-minute option bars (exit_check "intraday"); None = not available
-        self.max_leg_age = timedelta(minutes=settings.stock_option_selling.backtest.intraday_leg_max_age_minutes)
         self.base = base or Engine(settings, store, source, calendar=load_calendar(settings, store))
         self.costs = self.base.costs
         self.o = settings.options
@@ -379,8 +388,38 @@ class OptionEngine:
         if bars is None:
             skipped["NO_OPTION_BAR_AT_ENTRY"] += 1
             return None
-        fills = [self.costs.fill_price("options", b.open, leg.action) for leg, b in zip(sig.legs, bars)]
-        raw = sum((Decimal(str(b.open)) * (1 if leg.action == "SELL" else -1) for leg, b in zip(sig.legs, bars)), Decimal(0))
+        fills = self._try_fill(sig, [b.open for b in bars], skipped)
+        return None if fills is None else _Position(sig, list(sig.legs), fills, d, i, variant)
+
+    def _enter_sync(self, sig: Signal, sym: str, d: date, i: int, variant: str, skipped: Counter) -> _Position | None:
+        """Synchronized execution: enter at the open of the session's FIRST 5-minute bar in which every
+        leg traded. No such bar, or the bars not stored: no entry (never a guess, never retried)."""
+        if check_hedged(sig.legs or ()):
+            skipped[UNHEDGED_SHORT] += 1
+            return None
+        if daily_start(d) >= sig.valid_until:
+            skipped["NO_NEXT_BAR"] += 1
+            return None
+        sync = self._sync_bars(sym, sig.legs, d)
+        if sync is None:
+            skipped["5_MINUTE_BARS_NOT_STORED_AT_ENTRY"] += 1
+            return None
+        if not sync:
+            skipped["NO_SYNCHRONIZED_BAR_AT_ENTRY"] += 1
+            return None
+        start, bars = sync[0]
+        fills = self._try_fill(sig, [b.open for b in bars], skipped)
+        if fills is None:
+            return None
+        pos = _Position(sig, list(sig.legs), fills, d, i, variant)
+        pos.last_bar = start
+        return pos
+
+    def _try_fill(self, sig: Signal, opens: list[float], skipped: Counter) -> list[Decimal] | None:
+        """Entry fills (after slippage) at the given opening prices, or None when the price has already
+        passed the signal's stop or target."""
+        fills = [self.costs.fill_price("options", o, leg.action) for leg, o in zip(sig.legs, opens)]
+        raw = sum((Decimal(str(o)) * (1 if leg.action == "SELL" else -1) for leg, o in zip(sig.legs, opens)), Decimal(0))
         net = sum((f * (1 if leg.action == "SELL" else -1) for leg, f in zip(sig.legs, fills)), Decimal(0))
         stop, target = Decimal(str(sig.stop)), Decimal(str(sig.target))
         if sig.direction == "SPREAD":
@@ -397,7 +436,7 @@ class OptionEngine:
                 if not (stop < price < target):
                     skipped[why] += 1
                     return None
-        return _Position(sig, list(sig.legs), fills, d, i, variant)
+        return fills
 
     def _close(self, pos: _Position, sym: str, d: date, raw_exit: list[float], at_open: bool, reason: str,
                strategy: OptionStrategy, exit_check: str = "daily", basis: str = "",
@@ -443,17 +482,148 @@ class OptionEngine:
             return p.exit_days_before_expiry
         return p.stock_exit_days_before_expiry if self.kinds.get(sym) == "stock" else p.index_exit_days_before_expiry
 
-    def _leg_sessions(self, sym: str, legs, d: date):
-        """Each leg's 5-minute bars of session d, or None if any leg's are unknown."""
+    def _sync_bars(self, sym: str, legs, d: date):
+        """The synchronized 5-minute bars of session d for these legs, or None when any leg's 5-minute
+        bars are unknown (not stored, or the session is outside the stored window)."""
         if self.intraday is None:
             return None
-        out = []
+        per = []
         for leg in legs:
             bars = self.intraday.session(sym, leg.expiry, leg.strike, leg.right, d)
             if bars is None:
                 return None
-            out.append(bars)
-        return out
+            per.append(bars)
+        return synchronized_bars(per)
+
+    def _sync_exit(self, pos: _Position, sym: str, d: date, i: int, sync: list, k: int, reason: str,
+                   strategy: OptionStrategy):
+        """Close at the open of synchronized bar k. With a roll pending, the old spread is closed and the
+        replacement opened at the first bar from there on in which all four legs traded; without one in
+        this session the roll is not made and the spread is simply closed."""
+        start, bars = sync[k]
+        rolled = None
+        if pos.pending_roll is not None:
+            new = pos.pending_roll
+            four = self._sync_bars(sym, list(pos.legs) + list(new.legs), d)
+            for s4, b4 in (four or []):
+                if s4 < start:
+                    continue
+                fills = self._try_fill(new, [x.open for x in b4[len(pos.legs):]], Counter())
+                if fills is not None:
+                    rolled = _Position(new, list(new.legs), fills, d, i, pos.variant)
+                    rolled.last_bar, start, bars = s4, s4, b4[:len(pos.legs)]
+                break
+        done = self._close(pos, sym, d, [b.open for b in bars], False, "ROLLED" if rolled is not None else reason,
+                           strategy, "intraday", pos.pending_basis, exit_dt=start)
+        if rolled is not None:
+            rolled.campaign_id, rolled.roll_no = done.campaign_id, pos.roll_no + 1
+            rolled.realised = pos.realised + done.net_pnl
+        else:
+            done.roll_refused = "ROLL_NOT_FILLED" if pos.pending_roll is not None else pos.roll_refused
+        return ("trade", done, rolled)
+
+    def _sync_roll_decision(self, pos: _Position, sym: str, d: date, start: datetime, bars: list, cost: float,
+                            strategy: OptionStrategy, ctx_prev) -> None:
+        """A stop reached at a synchronized bar's close under the roll policy. The replacement is chosen
+        and judged by the entry rules on the last COMPLETED session (the newest daily data known inside
+        the session); the roll net credit is priced from this bar's closes of all four legs. A
+        replacement leg without a bar here leaves the roll unpriced: the answer is then exit."""
+        ctx = ctx_prev()
+        if ctx is None:
+            pos.roll_refused = "ROLL_PRICE_UNKNOWN"
+            return
+        short, long_ = pos.legs[0], pos.legs[1]
+        signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
+        credit = float(sum((f * s for f, s in zip(pos.fills, signs)), Decimal(0)))
+        held = SpreadPosition(sym, short.right, short.strike, long_.strike, short.expiry, credit, short.lot_size, short.lots)
+        over = {(leg.expiry, float(leg.strike), leg.right): b.close for leg, b in zip(pos.legs, bars)}
+        choice = roll_choices(strategy, replace(ctx, quotes=QuoteOverride(ctx.quotes, over)), held, cost, pos.roll_no,
+                              pos.realised, today=d)
+        new = choice["roll_signal"]
+        if new is None:
+            pos.roll_refused = choice["refused_by"] or ""
+            return
+        now = []
+        for leg in new.legs:
+            sess = self.intraday.session(sym, leg.expiry, leg.strike, leg.right, d) if self.intraday is not None else None
+            bar = next((b for b in (sess or []) if b.start == start), None)
+            if bar is None:
+                pos.roll_refused = "ROLL_PRICE_UNKNOWN"
+                return
+            now.append(bar.close)
+        fp = lambda px, side: float(self.costs.fill_price("options", px, side))
+        m = roll_money(self.costs, held, fp(bars[0].close, "BUY"), fp(bars[1].close, "SELL"), new,
+                       fp(now[0], "SELL"), fp(now[1], "BUY"))
+        limit = strategy.params.roll.min_net_credit_pct_of_width
+        if m["roll_net_credit_pct_of_width"] is None or not m["roll_net_credit_pct_of_width"] > limit:
+            pos.roll_refused = "ROLL_NET_CREDIT_TOO_SMALL"
+            return
+        pos.pending_roll = new
+
+    def _manage_sync(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
+                     skipped: Counter, spot: float | None, alerts: tuple, ctx_now, ctx_prev):
+        """One session of an open credit spread on synchronized 5-minute bars. Returns
+        ('trade', OptionTrade, replacement position or None) | ('hold',) | ('incomplete',).
+        'incomplete': the session's 5-minute bars are not stored for a leg, or the session has no bar
+        in which every leg traded; the campaign is then data-incomplete and left out of the results."""
+        sig, expiry = pos.sig, pos.legs[0].expiry
+        sync = self._sync_bars(sym, pos.legs, d)
+        if sync is None:
+            skipped["DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED"] += 1
+            return ("incomplete",)
+        opened_here = pos.entry_d == d and pos.last_bar is not None
+        if opened_here:
+            sync = [x for x in sync if x[0] > pos.last_bar]
+        if not sync and not opened_here:
+            skipped["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] += 1
+            return ("incomplete",)
+        signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
+        policy = getattr(strategy, "exit_policy", "stop")
+        never_stop = policy == "roll_always"
+        if pos.pending_exit and sync:                      # decided earlier: the first synchronized bar's open
+            return self._sync_exit(pos, sym, d, i, sync, 0, pos.pending_exit, strategy)
+        hit = sync_decision(sync, signs, sig.target, sig.stop, use_stop=not never_stop)
+        if hit is not None:
+            reason, k, cost = hit
+            pos.pending_exit, pos.pending_basis = reason, "synchronized 5-minute bar"
+            if reason == "STOP" and policy == "roll_rules":
+                self._sync_roll_decision(pos, sym, d, sync[k][0], sync[k][1], cost, strategy, ctx_prev)
+            if k + 1 < len(sync):
+                return self._sync_exit(pos, sym, d, i, sync, k + 1, reason, strategy)
+            return ("hold",)                               # filled at the first synchronized bar of the next session
+        # ---- rules decided at the session's close (filled at the next session's first synchronized bar) ----
+        nxt = self.base.next_session(d)
+        if not sync:
+            return ("hold",)                               # opened on the session's last synchronized bar
+        last_start, last = sync[-1]
+        mark = [b.close for b in last]
+        at_close = last_start + timedelta(minutes=5)
+        basis = "rule at the close"
+        if d >= expiry or nxt is None or nxt > expiry:
+            return ("trade", self._close(pos, sym, d, mark, False, "EXPIRY_EXIT", strategy, "intraday", basis,
+                                         exit_dt=at_close), None)
+        if d >= last_allowed:
+            return ("trade", self._close(pos, sym, d, mark, False, "PERIOD_END", strategy, "intraday", basis,
+                                         exit_dt=at_close), None)
+        cost = sum(s * c for s, c in zip(signs, mark))
+        credit = float(sum((f * s for f, s in zip(pos.fills, signs)), Decimal(0)))
+        side = 0 if pos.legs[0].right == "PE" else 1
+        if (not never_stop and getattr(strategy, "threat_exit", False) and spot is not None
+                and (spot < pos.legs[0].strike if side == 0 else spot > pos.legs[0].strike)):
+            pos.pending_exit, pos.pending_basis = "STRIKE_BREACHED", basis
+        elif alerts and any(a in strategy.alert_exits for a in alerts[side]):
+            pos.pending_exit = "ALERT_" + next(a for a in alerts[side] if a in strategy.alert_exits)
+            pos.pending_basis = "alert at the close"
+        elif (expiry - nxt).days <= self._exit_days(strategy, sym):
+            pos.pending_exit, pos.pending_basis = "TIME", basis
+        wants_roll = (policy == "roll_rules" and pos.pending_exit == "STRIKE_BREACHED") or \
+                     (never_stop and pos.pending_exit == "TIME" and cost > credit)
+        if wants_roll:
+            short, long_ = pos.legs[0], pos.legs[1]
+            held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
+            choice = roll_choices(strategy, ctx_now(), held, cost, pos.roll_no, pos.realised, unlimited=never_stop)
+            pos.pending_roll, pos.roll_refused = choice["roll_signal"], choice["refused_by"] or ""
+        return ("hold",)
 
     def _manage(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
                 skipped: Counter, exit_check: str = "daily", spot: float | None = None, alerts: tuple = (),
@@ -472,18 +642,6 @@ class OptionEngine:
                 return ("trade", self._close(pos, sym, d, closes, False, "EXPIRY_EXIT", strategy, exit_check,
                                              "rule at the close"))
             signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
-            if exit_check == "intraday":
-                sess = self._leg_sessions(sym, pos.legs, d)
-                if sess is None:
-                    skipped["INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE"] += 1
-                else:
-                    r = intraday_spread_exit(sess, signs, sig.target, sig.stop, self.max_leg_age)
-                    if r is not None and r[1] is not None:
-                        return ("trade", self._close(pos, sym, d, r[2], False, r[0], strategy, exit_check,
-                                                     "5-minute bar", exit_dt=r[1] ))
-                    if r is not None:
-                        pos.pending_exit, pos.pending_basis = r[0], "5-minute bar, filled at the next session's open"
-                        return ("hold",)
             if d >= last_allowed:
                 return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check,
                                              "rule at the close"))
@@ -591,6 +749,9 @@ class OptionEngine:
         needs_daily = getattr(strategy, "needs_daily", False)
 
         alert_exits = getattr(strategy, "alert_exits", frozenset())
+        # Synchronized 5-minute execution applies to credit spreads; other structures stay on daily bars.
+        sync = exit_check == "intraday" and getattr(strategy, "structure", "") == "CREDIT_SPREAD"
+        incomplete: set[str] = set()
         spike = self.s.stock_option_selling.profile.vix_spike_pct
         prev_snap = None
 
@@ -629,7 +790,7 @@ class OptionEngine:
             # ---- exits decided at the previous close, filled at this open ----
             keep: list[_Position] = []
             for pos in positions:
-                if not pos.pending_exit:
+                if not pos.pending_exit or sync:           # synchronized: filled inside the session (_manage_sync)
                     keep.append(pos)
                     continue
                 legs_bars = self._leg_bars(sym, pos.legs, d)
@@ -659,7 +820,7 @@ class OptionEngine:
                 if gap:
                     skipped["NEXT_BAR_NOT_NEXT_SESSION"] += 1
                 else:
-                    pos = self._enter(sig, sym, d, i, variant, skipped)
+                    pos = (self._enter_sync if sync else self._enter)(sig, sym, d, i, variant, skipped)
                 if pos is not None:
                     positions.append(pos)
                 if row is not None:
@@ -676,13 +837,24 @@ class OptionEngine:
                     alerts = tuple(tuple(a["kind"] for a in alert_kinds(prev_snap, snap, right, spike))
                                    for right in ("PE", "CE"))
                 prev_snap = snap
-            for pos in positions:
-                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts,
-                                 lambda: self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed()))
+            ctx_now = lambda: self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed())
+            ctx_prev = lambda: (self.context(strategy, sym, bar_date(bars[i - 1]), bars[i - 1].close, variant, None,
+                                             recent(i - 1), closed()) if i > start else None)
+            queue = list(positions)
+            while queue:
+                pos = queue.pop(0)
+                if sync:
+                    r = self._manage_sync(pos, sym, d, i, last_allowed, strategy, skipped, bar.close, alerts, ctx_now, ctx_prev)
+                else:
+                    r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts, ctx_now)
                 if r[0] == "trade":
                     trades.append(r[1])
+                    if len(r) > 2 and r[2] is not None:
+                        queue.append(r[2])                 # a replacement opened inside the session: manage its rest
                 elif r[0] == "hold":
                     keep.append(pos)
+                elif r[0] == "incomplete":
+                    incomplete.add(pos.campaign_id or pos.sig.signal_id)
             positions = keep
             if d not in allowed or d >= last_allowed:
                 continue
@@ -755,6 +927,9 @@ class OptionEngine:
         for _, row in pending:                                # signalled on the last bar: no next session to fill
             if row is not None:
                 row.update(result="skipped", reason="NO_NEXT_BAR")
+        if incomplete:                                        # data-incomplete campaigns are left out entirely
+            skipped["DATA_INCOMPLETE_CAMPAIGNS"] += len(incomplete)
+            trades = [t for t in trades if (t.campaign_id or t.signal_id) not in incomplete]
         return trades
 
 
@@ -841,8 +1016,10 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             "strategy_by_exit": {k: len(v) for k, v in _by(mt, lambda t: t.exit_reason).items()},
             "baseline_by_exit": {k: len(v) for k, v in _by(mb, lambda t: t.exit_reason).items()},
             "baseline_by_exit_basis": {k: len(v) for k, v in _by(mb, lambda t: t.exit_basis or "-").items()},
-            "days_checked_on_daily_close_instead": ms.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0)
-            + mbs.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0),
+            # synchronized execution: campaigns left out because a session had no bar in which every leg traded
+            # (or its 5-minute bars are not stored), and the sessions that caused it
+            "data_incomplete": {"strategy": {k: ms.get(k, 0) for k in DATA_INCOMPLETE_KEYS},
+                                "baseline": {k: mbs.get(k, 0) for k in DATA_INCOMPLETE_KEYS}},
             "comparison": compare(so, bo)}
     wf = []
     for w in windows(dev, cfg.window_sessions * 3, cfg.step_sessions * 3):

@@ -506,14 +506,33 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
     return out
 
 
-def roll_net_credit(ctx: OptionContext, pos: SpreadPosition, replacement: Signal) -> dict | None:
-    """The money a roll brings in or costs, in rupees:
+def roll_money(costs, pos: SpreadPosition, old_short: float, old_long: float, replacement: Signal,
+               new_short: float, new_long: float) -> dict:
+    """Roll net credit in rupees from the four EXECUTION prices (slippage already in them):
         new spread credit - debit to close the old spread - all roll charges
-    Each of the four legs is priced once at its execution price with adverse slippage (live: sell at
-    the bid, buy at the ask; history: the last traded price moved against us by the options slippage).
     Charges cover buying back the old sold leg, selling the old bought leg, selling the new sold leg
-    and buying the new bought leg. None when any of the old legs has no usable price: unknown is
-    never treated as a pass."""
+    and buying the new bought leg."""
+    sold = next(leg for leg in replacement.legs if leg.action == "SELL")
+    bought = next(leg for leg in replacement.legs if leg.action == "BUY")
+    new_shares = sold.lots * sold.lot_size
+    charges = CostBreakdown()
+    add_costs(charges, costs.options(pos.lots, old_short * pos.shares, old_long * pos.shares))
+    add_costs(charges, costs.options(sold.lots, new_long * new_shares, new_short * new_shares))
+    new_credit = (new_short - new_long) * new_shares
+    close_debit = (old_short - old_long) * pos.shares
+    width_inr = abs(sold.strike - bought.strike) * new_shares
+    net = new_credit - close_debit - float(charges.total)
+    return {"new_credit_inr": round(new_credit, 2), "close_debit_inr": round(close_debit, 2),
+            "roll_charges_inr": float(charges.total), "roll_net_credit_inr": round(net, 2),
+            "replacement_width_inr": round(width_inr, 2),
+            "roll_net_credit_pct_of_width": round(net / width_inr * 100, 2) if width_inr > 0 else None}
+
+
+def roll_net_credit(ctx: OptionContext, pos: SpreadPosition, replacement: Signal) -> dict | None:
+    """roll_money with the prices of this moment's quotes: each of the four legs is priced once at
+    its execution price with adverse slippage (live: sell at the bid, buy at the ask; history: the
+    last traded price moved against us by the options slippage). None when a leg of the open spread
+    has no usable price: unknown is never treated as a pass."""
     qs = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
     ql = ctx.quotes.quote(pos.expiry, pos.long_strike, pos.right)
     buy_back = qs.buy_price(ctx.historical) if qs is not None else None
@@ -524,22 +543,10 @@ def roll_net_credit(ctx: OptionContext, pos: SpreadPosition, replacement: Signal
     def px(price: float, side: str) -> float:
         return float(ctx.costs.fill_price("options", price, side)) if ctx.historical else float(price)
 
-    new_short = next(leg for leg in replacement.legs if leg.action == "SELL")
-    new_long = next(leg for leg in replacement.legs if leg.action == "BUY")
-    old_short, old_long = px(buy_back, "BUY"), px(sell_hedge, "SELL")
-    ns, nl = px(new_short.price, "SELL"), px(new_long.price, "BUY")
-    new_shares = new_short.lots * new_short.lot_size
-    charges = CostBreakdown()
-    add_costs(charges, ctx.costs.options(pos.lots, old_short * pos.shares, old_long * pos.shares))
-    add_costs(charges, ctx.costs.options(new_short.lots, nl * new_shares, ns * new_shares))
-    new_credit = (ns - nl) * new_shares
-    close_debit = (old_short - old_long) * pos.shares
-    width_inr = abs(new_short.strike - new_long.strike) * new_shares
-    net = new_credit - close_debit - float(charges.total)
-    return {"new_credit_inr": round(new_credit, 2), "close_debit_inr": round(close_debit, 2),
-            "roll_charges_inr": float(charges.total), "roll_net_credit_inr": round(net, 2),
-            "replacement_width_inr": round(width_inr, 2),
-            "roll_net_credit_pct_of_width": round(net / width_inr * 100, 2) if width_inr > 0 else None}
+    sold = next(leg for leg in replacement.legs if leg.action == "SELL")
+    bought = next(leg for leg in replacement.legs if leg.action == "BUY")
+    return roll_money(ctx.costs, pos, px(buy_back, "BUY"), px(sell_hedge, "SELL"), replacement,
+                      px(sold.price, "SELL"), px(bought.price, "BUY"))
 
 
 def trading_days_to(today: date, expiry: date, is_trading_day=None) -> int:
@@ -580,7 +587,8 @@ STUCK_ACTION = "exit; rolling earns little"
 
 
 def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPosition, close_cost: float,
-                 rolls_so_far: int = 0, realised_so_far_inr: float = 0.0, unlimited: bool = False) -> dict:
+                 rolls_so_far: int = 0, realised_so_far_inr: float = 0.0, unlimited: bool = False,
+                 today: date | None = None) -> dict:
     """Exit or roll for a threatened spread, with numbers. Exit: the cost to close now and the realised
     P&L (always shown, whatever is unknown about a roll). A roll is suggested only when all hold:
     - the position is not stuck (stuck_position);
@@ -598,7 +606,7 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
     `unlimited` (research-only backtest policy "roll every month"): the next month's spread by the
     structure rules alone, with none of the conditions above; it never reaches a live signal."""
     p = strategy.params
-    today = ctx.asof.astimezone(IST).date()
+    today = today or ctx.asof.astimezone(IST).date()
     exit_costs = float(round_trip_costs(ctx.costs, [
         OptionLeg("BUY", pos.right, pos.short_strike, pos.expiry, pos.lots, max(close_cost, 0.05), pos.lot_size)]).total) / 2
     realised = round((pos.credit - close_cost) * pos.shares - exit_costs, 2)

@@ -189,11 +189,11 @@ function reversals(rep){
  <table><thead><tr><th>Sessions later</th><th>Cases</th><th>Median %</th><th>Mean %</th><th>25th pct</th><th>75th pct</th><th>Worst %</th><th>Best %</th><th>Up in % of cases</th><th>Sample</th></tr></thead><tbody>${o.outcomes.map(r=>`<tr><td>${r.sessions}</td><td>${r.cases}</td><td>${fmt(r.median_pct)}</td><td>${fmt(r.mean_pct)}</td><td>${fmt(r.p25_pct)}</td><td>${fmt(r.p75_pct)}</td><td>${fmt(r.worst_pct)}</td><td>${fmt(r.best_pct)}</td><td>${fmt(r.up_pct_of_cases,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}</tbody></table>`;
 }
 function policies(rep){
- const pc=rep.exit_policy_comparison; if(!pc) return '';
- const tr=(g,r)=>`<tr><td>${g}: ${esc(r.label)}</td><td>${r.campaigns}</td><td>${r.rolls} (max ${r.max_rolls_in_a_campaign})</td><td>${fmt(r.win_rate_pct,1)}</td><td class="${r.net_pnl_inr>0?'up':(r.net_pnl_inr<0?'down':'')}">${fmt(r.net_pnl_inr)}</td><td>${fmt(r.per_campaign_inr)}</td><td>${fmt(r.worst_campaign_inr)}</td><td>${fmt(r.max_drawdown_inr)}</td><td>${fmt(r.hedge_cost_inr)}</td><td>${fmt(r.costs_inr)}</td><td>${r.rolled_when_recovery_was_not_possible}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`;
- return `<h2 style="margin-top:12px">Exit policies on the same entries (per campaign, ${esc(pc.exit_check)} exit check)</h2>
- <table><thead><tr><th></th><th>Campaigns</th><th>Rolls</th><th>Win %</th><th>Net</th><th>Per campaign</th><th>Worst campaign</th><th>Max DD</th><th>Hedge cost</th><th>Charges</th><th>Rolled with no recovery possible</th><th>Sample</th></tr></thead>
- <tbody>${pc.strategy.map(r=>tr('strategy',r)).join('')}${pc.baseline.map(r=>tr('baseline',r)).join('')}</tbody></table><div class="mute">${esc(pc.note)}</div>`;
+ const all=rep.exit_policy_comparison; if(!all) return '';
+ const tr=(g,r)=>`<tr><td>${g}: ${esc(r.label)}</td><td>${r.campaigns}</td><td>${r.rolls} (max ${r.max_rolls_in_a_campaign})</td><td>${fmt(r.win_rate_pct,1)}</td><td>${fmt(r.avg_win_inr)}</td><td>${fmt(r.avg_loss_inr)}</td><td class="${r.net_pnl_inr>0?'up':(r.net_pnl_inr<0?'down':'')}">${fmt(r.net_pnl_inr)}</td><td>${fmt(r.per_campaign_inr)}</td><td>${fmt(r.worst_campaign_inr)}</td><td>${fmt(r.max_drawdown_inr)}</td><td>${fmt(r.profit_factor)}</td><td>${esc(Object.keys(r.roll_refusals||{}).length?JSON.stringify(r.roll_refusals):'-')}</td><td>${r.data_incomplete_campaigns||'-'}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`;
+ return Object.values(all).map(pc=>`<h2 style="margin-top:12px">Exit policies on the same entries (per campaign, ${esc(pc.exit_check)} execution)</h2>
+ <table><thead><tr><th></th><th>Campaigns</th><th>Rolls</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Per campaign</th><th>Worst campaign</th><th>Max DD</th><th>PF</th><th>Roll refused by</th><th>Data-incomplete (left out)</th><th>Sample</th></tr></thead>
+ <tbody>${pc.strategy.map(r=>tr('strategy',r)).join('')}${pc.baseline.map(r=>tr('baseline',r)).join('')}</tbody></table><div class="mute">${esc(pc.note)}</div>`).join('');
 }
 function effects(rep){
  const fx=rep.rule_effects; if(!fx) return '';
@@ -207,7 +207,7 @@ function bothWays(rep){
  const x=rep.exit_check_comparison; if(!x||Object.keys(x).length<2) return rep.exit_check_label?`<div class="mute">Exits: ${esc(rep.exit_check_label)}.</div>`:'';
  const rows=Object.entries(x).map(([m,o])=>row(esc(m)+' check: strategy',o.strategy,'')+row(esc(m)+' check: baseline',o.baseline,'')
   +Object.entries(o.baseline_by_variant||{}).map(([k,v])=>row(esc(m)+' check: '+esc(k),v,'')).join('')).join('');
- const how=Object.entries(x).map(([m,o])=>`<li class="mute"><b>${esc(m)}</b>: ${esc(o.label)}. Baseline exits ${esc(JSON.stringify(o.baseline_by_exit))}, decided on ${esc(JSON.stringify(o.baseline_by_exit_basis))}${o.days_checked_on_daily_close_instead?`; ${o.days_checked_on_daily_close_instead} position-days had no stored 5-minute bars and were checked on the daily close`:''}.</li>`).join('');
+ const how=Object.entries(x).map(([m,o])=>`<li class="mute"><b>${esc(m)}</b>: ${esc(o.label)}. Baseline exits ${esc(JSON.stringify(o.baseline_by_exit))}, decided on ${esc(JSON.stringify(o.baseline_by_exit_basis))}${o.data_incomplete&&o.data_incomplete.baseline.DATA_INCOMPLETE_CAMPAIGNS?`; ${o.data_incomplete.baseline.DATA_INCOMPLETE_CAMPAIGNS} baseline campaign(s) and ${o.data_incomplete.strategy.DATA_INCOMPLETE_CAMPAIGNS} strategy campaign(s) left out as data-incomplete (a session without a synchronized bar)`:''}.</li>`).join('');
  return `<h2 style="margin-top:12px">Target and stop checked both ways (main result: ${esc(rep.exit_check)})</h2>
  <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${rows}</tbody></table><ul>${how}</ul>`;
 }

@@ -17,7 +17,8 @@ from app.costs import CostModel
 from app.history import daily_start
 from app.manual_data import Event
 from app.models import Bar, unhedged_short_legs
-from app.options.backtest import OptionEngine, intraday_spread_exit, model_prices, run_option_backtest
+from app.options.backtest import (OptionEngine, model_prices, run_option_backtest, sync_decision,
+                                  synchronized_bars)
 from app.options.base import ChainQuotes, ExpiryInfo, OptionContext, OptionQuote
 from app.options.greeks import bs_delta, bs_price, years_to_expiry
 from app.options.option_history import (INTRADAY, IntradayBar, OptionHistory, OptionIntraday, budgeted_fetcher,
@@ -538,36 +539,36 @@ def ib(hhmm, o, c=None, d=date(2025, 7, 10)):
     return IntradayBar(datetime.combine(d, time(h, m), IST).astimezone(UTC), o, max(o, c), min(o, c), c)
 
 
-def test_intraday_exit_decides_on_a_bar_close_and_fills_at_the_next_bar_open():
-    age = timedelta(minutes=30)
-    short = [ib("09:15", 5.0), ib("09:20", 5.0, 9.0), ib("09:25", 9.5, 9.0), ib("09:30", 9.0)]
-    long_ = [ib("09:15", 1.0), ib("09:20", 1.0), ib("09:25", 1.2, 1.0), ib("09:30", 1.0)]
-    # cost at 09:20 close = 9 - 1 = 8 = the stop: decided there, filled at the 09:25 opens (never the same bar)
-    r = intraday_spread_exit([short, long_], [1, -1], 2.0, 8.0, age)
-    assert r[0] == "STOP" and r[1] == short[2].start and r[2] == [9.5, 1.2]
-    # target: cost at or below 2
-    r = intraday_spread_exit([[ib("10:00", 4.0, 2.5), ib("10:05", 2.4)], [ib("10:00", 1.0, 0.5), ib("10:05", 0.6)]],
-                             [1, -1], 2.0, 8.0, age)
-    assert r[0] == "TARGET" and r[2] == [2.4, 0.6]
-    # nothing reached: None
-    assert intraday_spread_exit([[ib("10:00", 4.0)], [ib("10:00", 1.0)]], [1, -1], 2.0, 8.0, age) is None
-    assert intraday_spread_exit([[], []], [1, -1], 2.0, 8.0, age) is None
-    # decided on the last bar of the session: not fillable today
-    assert intraday_spread_exit([[ib("15:25", 9.5)], [ib("15:25", 1.0)]], [1, -1], 2.0, 8.0, age) == ("STOP", None, None)
+def hhmm(sync):
+    return [s.astimezone(IST).strftime("%H:%M") for s, _ in sync]
 
 
-def test_intraday_exit_uses_a_leg_last_trade_only_while_it_is_fresh():
-    age = timedelta(minutes=30)
-    long_ = [ib("09:15", 1.0)]
-    spike = [ib("09:15", 5.0), ib("09:40", 9.5), ib("09:45", 9.6)]
-    # the bought leg last traded 25 minutes before 09:40: still usable, so the stop is seen and filled at 09:45
-    r = intraday_spread_exit([spike, long_], [1, -1], 2.0, 8.0, age)
-    assert r == ("STOP", spike[2].start, [9.6, 1.0])
-    # 50 minutes old at 10:05: the cost is unknown and nothing is decided on it
-    late = [ib("09:15", 5.0), ib("10:05", 9.5), ib("10:10", 9.6)]
-    assert intraday_spread_exit([late, long_], [1, -1], 2.0, 8.0, age) is None
-    # the look-ahead guard: a later bar never decides an earlier time (one bar, decision only)
-    assert intraday_spread_exit([[ib("11:00", 3.0, 9.5)], [ib("11:00", 1.0)]], [1, -1], 2.0, 8.0, age) == ("STOP", None, None)
+def test_ACCEPTANCE_a_spread_is_priced_only_from_bars_in_which_every_leg_traded():
+    short = [ib("09:15", 5.0), ib("09:20", 5.0, 9.0), ib("09:30", 9.5), ib("09:35", 9.0)]
+    long_ = [ib("09:15", 1.0), ib("09:25", 1.1), ib("09:30", 1.2), ib("09:35", 1.0)]
+    sync = synchronized_bars([short, long_])
+    assert hhmm(sync) == ["09:15", "09:30", "09:35"]                 # 09:20 and 09:25: only one leg traded
+    assert [b.close for b in sync[1][1]] == [9.5, 1.2]
+    assert synchronized_bars([short, []]) == [] and synchronized_bars([]) == [] and synchronized_bars([[], []]) == []
+    # the sold leg alone closed at 9.00 at 09:20 (cost would be 8 with a stale 1.00 for the other leg):
+    # that is not a synchronized bar, so nothing is decided there. Decided at 09:30: 9.5 - 1.2 = 8.3 >= 8
+    assert sync_decision(sync, [1, -1], 2.0, 8.0) == ("STOP", 1, pytest.approx(8.3))
+    # the fill is never on the deciding bar: the caller uses bar index + 1 (09:35 here)
+    assert sync[1 + 1][0] == short[3].start
+
+
+def test_sync_decision_target_stop_and_nothing():
+    two = lambda s, l: synchronized_bars([s, l])
+    assert sync_decision(two([ib("10:00", 4.0, 2.5), ib("10:05", 2.4)], [ib("10:00", 1.0, 0.5), ib("10:05", 0.6)]),
+                         [1, -1], 2.0, 8.0) == ("TARGET", 0, pytest.approx(2.0))
+    assert sync_decision(two([ib("10:00", 4.0)], [ib("10:00", 1.0)]), [1, -1], 2.0, 8.0) is None
+    assert sync_decision([], [1, -1], 2.0, 8.0) is None
+    late = two([ib("15:25", 9.5)], [ib("15:25", 1.0)])               # decided on the session's last bar: index 0 of 1
+    assert sync_decision(late, [1, -1], 2.0, 8.0) == ("STOP", 0, pytest.approx(8.5)) and len(late) == 1
+    assert sync_decision(late, [1, -1], 2.0, 8.0, use_stop=False) is None        # the research "never stop" policy
+    # the close decides, not the bar's high: a bar that spiked and came back does not stop the spread
+    spike = two([IntradayBar(ib("11:00", 3.0).start, 3.0, 12.0, 3.0, 3.2)], [ib("11:00", 1.0)])
+    assert sync_decision(spike, [1, -1], 2.0, 8.0) is None
 
 
 # ---------------- 5-minute history: parsing, paging, storage, budget ----------------
@@ -861,9 +862,10 @@ def test_stock_backtest_is_deterministic(world):
     assert a["trades"] == b["trades"] and strip(a) == strip(b)
 
 
-def test_intraday_check_exits_on_a_5_minute_bar_where_the_daily_check_sees_nothing():
-    """A stop touched at 10:00 on one day, with both legs trading, and gone again by the close. The
-    5-minute check exits at the 10:05 open; the daily check never sees it and its trade is unchanged."""
+def test_ACCEPTANCE_synchronized_stop_is_decided_on_a_bar_close_and_filled_at_the_next_synchronized_open():
+    """A stop touched at 10:00 on one day and gone again by the close. With only the sold leg trading at
+    10:00 there is no synchronized bar and nothing happens; once both legs trade at 10:00 and 10:05
+    the stop is decided at the 10:00 close and filled at the 10:05 open. The daily check never sees it."""
     w = stock_world()
     cfg, store, _, _ = w
     before = run_bt(w)
@@ -872,8 +874,7 @@ def test_intraday_check_exits_on_a_5_minute_bar_where_the_daily_check_sees_nothi
     exp = date.fromisoformat(pick["expiry"])
     sell, buy = (next(x for x in pick["legs"] if x["action"] == a) for a in ("SELL", "BUY"))
     day = next(d for d in weekdays(ist_date(pick["entry_time"]) + timedelta(days=1), ist_date(pick["exit_time"])))
-    credit = pick["entry_net"]
-    stop = round(credit / 0.995 * 2.0, 2) + 5                       # well above 2x the signal credit
+    stop = round(pick["entry_net"] / 0.995 * 2.0, 2) + 5            # well above 2x the signal credit
 
     def add(strike, rows):
         store.save_option_bars("sim", "RELIANCE", exp, strike, "PE", INTRADAY,
@@ -881,35 +882,50 @@ def test_intraday_check_exits_on_a_5_minute_bar_where_the_daily_check_sees_nothi
                                 for h, m, px in rows], NOW)
 
     same = lambda r, mode: [t for t in r["trades"] if t["exit_check"] == mode and t["signal_id"] == pick["signal_id"]][0]
-    # only the sold leg trades at 10:00; the bought leg's last trade (09:15) is 45 minutes old: cost unknown, no exit
-    add(sell["strike"], [(10, 0, stop + 1.0), (10, 5, stop + 1.5)])
+    first = same(before, "intraday")
+    assert datetime.fromisoformat(first["entry_time"]).astimezone(IST).time() == time(9, 15)      # the first synchronized bar
+    add(sell["strike"], [(10, 0, stop + 1.0), (10, 5, stop + 1.5)])       # the sold leg alone: not a synchronized bar
     mid = run_bt(w)
-    assert same(mid, "intraday")["exit_time"] == same(before, "intraday")["exit_time"]
-    # now the bought leg trades in those bars too: the stop is seen at the 10:00 close and filled at the 10:05 open
-    add(buy["strike"], [(10, 0, 1.0), (10, 5, 1.1)])
+    assert same(mid, "intraday") == first
+    add(buy["strike"], [(10, 0, 1.0), (10, 5, 1.1)])                      # now both legs trade in those bars
     after = run_bt(w)
     hit, daily = same(after, "intraday"), same(after, "daily")
-    assert hit["exit_reason"] == "STOP" and hit["exit_basis"] == "5-minute bar"
+    assert hit["exit_reason"] == "STOP" and hit["exit_basis"] == "synchronized 5-minute bar"
     assert datetime.fromisoformat(hit["exit_time"]).astimezone(IST) == datetime.combine(day, time(10, 5), IST)
     out = {x["strike"]: x["exit_price"] for x in hit["legs"]}
-    assert out[sell["strike"]] == pytest.approx((stop + 1.5) * 1.005, abs=0.011)     # bought back at the open plus slippage
+    assert out[sell["strike"]] == pytest.approx((stop + 1.5) * 1.005, abs=0.011)     # bought back at the 10:05 open plus slippage
     assert out[buy["strike"]] == pytest.approx(1.1 * 0.995, abs=0.011)
-    assert hit["net_pnl"] < 0
-    assert daily == same(before, "daily")                                           # daily closes did not change
-    assert after["report"]["exit_check_comparison"]["intraday"]["baseline"]["net_pnl_inr"] \
-        < before["report"]["exit_check_comparison"]["intraday"]["baseline"]["net_pnl_inr"]
+    assert hit["net_pnl"] < 0 and daily == same(before, "daily")                     # daily closes did not change
 
 
-def test_days_without_stored_5_minute_bars_are_checked_on_the_daily_close_and_counted(world):
-    with_bars = run_bt(world)
-    without = run_bt(world, with_intraday=False)
-    x = without["report"]["exit_check_comparison"]["intraday"]
-    assert x["days_checked_on_daily_close_instead"] > 0
-    assert with_bars["report"]["exit_check_comparison"]["intraday"]["days_checked_on_daily_close_instead"] == 0
-    key = lambda t: (t["variant"], t["signal_id"], t["exit_time"], t["exit_reason"], t["net_pnl"])
-    intraday = sorted(key(t) for t in without["trades"] if t["exit_check"] == "intraday")
-    daily = sorted(key(t) for t in without["trades"] if t["exit_check"] == "daily")
-    assert intraday == daily                                        # with no 5-minute bars at all it is the daily check
+def test_ACCEPTANCE_a_session_without_a_synchronized_bar_makes_the_campaign_data_incomplete_not_a_daily_fallback():
+    w = stock_world()
+    cfg, store, _, _ = w
+    before = run_bt(w)
+    pick = next(t for t in before["trades"] if t["exit_check"] == "intraday" and t["variant"] == "baseline:PE"
+                and (ist_date(t["exit_time"]) - ist_date(t["entry_time"])).days >= 5)
+    buy = next(x for x in pick["legs"] if x["action"] == "BUY")
+    day = next(d for d in weekdays(ist_date(pick["entry_time"]) + timedelta(days=1), ist_date(pick["exit_time"])))
+    lo = datetime.combine(day, time(0, 0), IST).astimezone(UTC).isoformat()
+    hi = datetime.combine(day + timedelta(days=1), time(0, 0), IST).astimezone(UTC).isoformat()
+    store._db.execute("DELETE FROM option_bars WHERE underlying='RELIANCE' AND expiry=? AND strike=? AND right='PE' "
+                      "AND interval=? AND start_utc>=? AND start_utc<?", (pick["expiry"], buy["strike"], INTRADAY, lo, hi))
+    store._db.commit()                                   # the bought leg did not trade that day
+    after = run_bt(w)
+    keyed = lambda r, mode: {(t["variant"], t["signal_id"]): t for t in r["trades"] if t["exit_check"] == mode}
+    b5, a5 = keyed(before, "intraday"), keyed(after, "intraday")
+    gone = ("baseline:PE", pick["signal_id"])
+    assert gone in b5 and gone not in a5                 # left out of the results: no price was invented for that day
+    assert {k: v for k, v in b5.items() if k != gone and k[0] != "strategy"} == {k: v for k, v in a5.items() if k[0] != "strategy"}
+    inc = after["report"]["exit_check_comparison"]["intraday"]["data_incomplete"]["baseline"]
+    assert inc["DATA_INCOMPLETE_CAMPAIGNS"] == 1 and inc["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] == 1
+    assert before["report"]["exit_check_comparison"]["intraday"]["data_incomplete"]["baseline"]["DATA_INCOMPLETE_CAMPAIGNS"] == 0
+    assert keyed(after, "daily")[gone] == keyed(before, "daily")[gone]              # the daily run still has its daily bars
+    # no 5-minute bars at all: the synchronized run enters nothing and says why; it never borrows daily prices
+    none = run_bt(w, with_intraday=False)
+    assert [t for t in none["trades"] if t["exit_check"] == "intraday"] == []
+    assert none["report"]["baseline"]["skipped_signals"]["5_MINUTE_BARS_NOT_STORED_AT_ENTRY"] >= 4
+    assert [t for t in none["trades"] if t["exit_check"] == "daily"]
 
 
 def test_strike_breach_exit_can_be_switched_off(world):

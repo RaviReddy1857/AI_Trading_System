@@ -404,8 +404,7 @@ stock_option_selling:
   backtest:
     priority_stocks: 30         # the 30 most liquid watchlist F&O stocks (median daily traded value) are downloaded and tested
     liquidity_lookback_days: 60
-    exit_checks: [intraday, daily]   # first = main result; target and stop on 5-minute option bars, or on daily closes
-    intraday_leg_max_age_minutes: 30 # 5-minute check: a leg's last trade may be this old at most
+    exit_checks: [intraday, daily]   # first = main result. intraday = synchronized 5-minute bars of every leg; daily = daily closes
     exit_on_strike_breach: true      # close at the next open when the stock closes beyond the sold strike
     exit_policies: [stop, roll_rules, roll_always]   # compared on the same entries: stop at 2x credit / roll by the rules / roll every month
 
