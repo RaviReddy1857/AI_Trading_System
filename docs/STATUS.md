@@ -1129,6 +1129,78 @@ months of data: low sample, no conclusion. Whole-lot sizing is not built, so eac
 | Config keys renamed to the specification's names; full parameter table in docs/implementation.md | Open |
 | Monthly candidates and trades; hold-through-gap sensitivity; VIX spike and expected-move definitions of section 2 | Open |
 
+## Phase 9 M1 completed in code (2026-11-15) and the end-of-M1 rerun
+
+Decisions of 2026-11-14 applied: `min_credit_to_max_loss` 0.10 (chosen by the user from the pre-outcome distribution, not
+from results); the research pages use the Phase 9 capital Rs 10,00,000; MARKET_WEAK applies to put selling only, with
+MARKET_UNKNOWN for missing data (confirmed); downloads complete 2023-2026 for every priority stock before any earlier
+year (`backtest.download_first_years_from: 2023`). Phase 5 not started; no holdout opened; no default tuned.
+
+### What M1 now contains
+| Item | Code | Tests |
+|---|---|---|
+| Whole-lot sizing within `max_risk_per_position_pct` (2.5% = Rs 25,000), rounded down; ZERO_SIZE; a roll never grows the position; margin for the whole position | `app/options/sizing.py`, `stock_selling.pick_hedge`, `reversal.BullCallSpread` | `test_ACCEPTANCE_sizing_is_whole_lots_within_the_risk_budget_rounded_down` |
+| Confirmed 5-bar pivots for support, resistance, the last swing high, stall zones and the range profile; NO_CONFIRMED_LEVEL | `stock_profile.pivots`, `alternating`, `support_resistance`; `reversal.ReversalScanner` | `test_ACCEPTANCE_support_is_a_confirmed_pivot_used_only_after_its_five_later_sessions`, pivot tests |
+| CORRELATED_LIMIT (6 spreads, 10% total risk, groups of same sector or correlation >= 0.7: 2 positions, 5% risk), CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN; in the backtest every stock runs side by side (`OptionEngine.run_portfolio`), entries and rolls are checked | `app/options/portfolio.py`, `backtest.iter_stream`/`run_portfolio` | `tests/test_phase9_portfolio.py` |
+| Research candidates versus actionable signals: every shortlist row is a research candidate with its snapshot timestamps; actionable needs market hours, a LIVE price, a chain no older than 15 minutes with bid and ask on every leg, a margin for the complete spread, known positions within the portfolio limits | `app/options/actionable.py`, `shortlist.run_shortlist` | `test_ACCEPTANCE_a_signal_is_actionable_only_with_live_fresh_known_inputs`, `..._shortlist_rows_are_labelled_research...` |
+| Positions open at the cutoff reported as open: marked after estimated liquidation costs; out of trade counts, win rate and profit factor; in equity and drawdown | `backtest.option_stats`, `OPEN_AT_CUTOFF` | `test_ACCEPTANCE_a_position_open_at_the_cutoff_is_reported_open_not_as_a_closed_trade` |
+| Config keys renamed to the specification's names; full parameter table | `app/config.py`, `config.yaml`, docs/implementation.md | `test_shipped_defaults_are_the_section_2_values` |
+| Monthly candidates after blocks and trades taken, shortages against 3-8 | `stock_backtest.monthly_candidates` | `test_ACCEPTANCE_monthly_candidates_after_blocks_and_trades_taken_are_reported` |
+| Section 2 vix_spike (up 20% over 5 sessions or above the 80th percentile of 252 closes) and expected_move (spot x IV x sqrt(DTE/365)) | `stock_profile.vix_spike_at`, `expected_move` | VIX and expected-move tests in `test_phase9_rules.py` |
+
+Correlated groups of the 25 tested stocks on 2026-06-05: sizes 13, 3, 3, 2, 1, 1, 1, 1 (sectors plus correlation >= 0.7;
+the 13 is the financial-services group); no pair without a measurable relationship.
+
+### End-of-M1 rerun with every block applied (25 stocks, 2026-01-01 to 2026-06-05, Rs 10,00,000, whole lots)
+`data/diagnostics/stock_report_2026-11-15_M1.txt`. **This report is INCOMPLETE: the new strike rules (pivots, sizing) want
+430 option contracts that are not stored.** The stored marks of "complete" were made under the earlier rules; the download
+plan version is raised so the next `--download` checks every stock-year again. Five months of one year: LOW SAMPLE, no
+conclusion.
+
+| | Execution | Trades | Win % | Net after costs (Rs) | Per trade (Rs) | PF |
+|---|---|---|---|---|---|---|
+| strategy | synchronized 5-minute | 7 (LOW SAMPLE) | 71.4 | +405 | +58 | 1.07 |
+| baseline (both sides) | synchronized 5-minute | 32 | 71.9 | +2,601 | +81 | 1.09 |
+| baseline bull put / bear call | synchronized 5-minute | 13 / 19 | 76.9 / 68.4 | +9,058 / -6,458 | | 2.14 / 0.67 |
+| strategy | daily close | 8 (LOW SAMPLE) | 62.5 | -5,532 | -692 | 0.55 |
+| baseline | daily close | 27 (7 more open at the cutoff) | 66.7 | -17,760 | -658 | 0.62 |
+
+- Verdict on the synchronized run: no edge versus the baseline (low sample).
+- Data-incomplete campaigns: 0 of 7 (strategy) and 0 of 32 (baseline); under 30%, no sensitivity run.
+- Portfolio limits on the strategy: 11 entries checked, none refused (one position at a time in a group of 1).
+- Baseline schedule: 250 attempts, 32 entered; 125 illiquid, 40 too little history, 28 no strike, 10 no confirmed level,
+  8 no priced hedge, 3 zero lots, 3 without 5-minute bars or a synchronized bar at entry, 1 gapped.
+- Strategy blocks: up-trend block 50, too little history 48, market weak 44, illiquid 37, no strike 31, credit too small 26.
+- Monthly candidates (3-8 is a reporting expectation only): 11 candidates and 7 trades in six months; January 0/0,
+  February 1/1, March 3/1, April 6/4, May 0/0, June 1/1. Five months are short. No rule was loosened.
+- Exit policies on the same entries (synchronized): stop and roll-by-rules identical (no roll passed: refusals IV rank
+  unknown 3, IV rank too low 2, no trend 2, market weak 1, strike not better 1 on the baseline); roll every month (research
+  only) +20,195 on 29 baseline campaigns with a worst campaign of -13,015, and 3 campaigns not closed or excluded.
+- Rule effects on the baseline (synchronized): trend block 14 trades +4,873 (PF 1.59); minimum credit 24 trades +3,134;
+  market block 19 trades -6,458; portfolio limits 18 trades +5,335; exit on any alert +11,506 (16 alert exits, 11 of them
+  the regime turning VOLATILE or EVENT). Strategy without the market block: 9 trades +8,536. All low sample.
+- Reversal study (49 watchlist stocks, 2020-2026 development period, pivots): 27 confirmations in 19 stocks; 10/20/40
+  sessions later median -1.4% / +1.2% / +1.8%; 3.8% made a new low within 40 sessions (low sample). Candidates: no
+  confirmation inside the stored months. Baselines: put spread below the base low 8 trades +551; bull call spread
+  (20-35 days, whole lots) 47 trades, -2,36,340, PF 0.47.
+
+### Decisions recorded for M1 (2026-11-15)
+- Support and resistance: nearest confirmed 5-bar pivot low below / high above the close among the last 252 sessions
+  (`pivot_lookback_sessions`, a new definition). A pivot uses the bar's low / high; the 52-week low uses closes, as section 2 says.
+- The reversal "last swing high" is the newest confirmed pivot high (its high); stall zones are confirmed pivot lows of the
+  52-week window above the price.
+- Sizing: lots = floor(budget / one lot's cost-inclusive max loss), then reduced while the max loss of n lots (with n lots'
+  charges) is above the budget. A roll's replacement is capped at the old position's lots.
+- Portfolio: two positions in the same stock are two positions of one group. Sector from the watchlist; an unknown sector
+  blocks (CORRELATION_UNKNOWN). Returns are not bridged over a missing session or a price break. Streams decide in
+  liquidity order within a day. The baseline runs without the portfolio limits (shown as a separate row with them).
+- Open at the cutoff: marked at the last tested close after estimated closing charges; the campaign's realised legs stay
+  realised. A position with no price at the cutoff is counted as `valuation_incomplete`.
+- Research pages: always research candidates; nothing is actionable until positions are recorded (PORTFOLIO_UNKNOWN).
+- vix_spike: a part without enough history counts only if the other part says yes; otherwise the state is unknown and
+  raises no alert. A scenario case is the first day of a spike episode.
+- Score factors and bands are M2 (below / next).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1191,10 +1263,12 @@ months of data: low sample, no conclusion. Whole-lot sizing is not built, so eac
 | 66 | 9 | 5-minute backtest execution conflicts with section 8.1 (stale leg price, daily entry and fallback); exit-policy comparison not yet on 5-minute bars | Fixed 2026-11-14: synchronized execution; exit policies run on both. Hold-through-gap sensitivity analysis still to build |
 | 67 | 9 | Open campaigns at the cutoff are closed and counted as trades; the specification wants them reported as open | Open (M1) |
 | 68 | 9 | Bull call candidate's 20-65 day window is not in section 2 and its baseline almost never enters | Closed 2026-11-14: 20-35 days; the baseline now enters (59 of 125 attempts) |
-| 69 | 9 | `min_credit_to_max_loss`: no stored spread reaches 0.20 (median 0.10, 75th percentile 0.135, n 28) | Waiting for user: set the value once; not applied meanwhile |
-| 70 | 9 | The research pages still use `account.capital_inr` Rs 2,00,000; only the Phase 9 backtests use Rs 10,00,000 | Waiting for user |
-| 71 | 9 | MARKET_WEAK is applied to put selling only (a weak market is not held against a bear call spread); unknown market data gives MARKET_UNKNOWN | Waiting for user: confirm |
+| 69 | 9 | `min_credit_to_max_loss`: no stored spread reaches 0.20 (median 0.10, 75th percentile 0.135, n 28) | Closed 2026-11-14: set to 0.10 by the user |
+| 70 | 9 | The research pages still use `account.capital_inr` Rs 2,00,000; only the Phase 9 backtests use Rs 10,00,000 | Closed 2026-11-14: research pages use Rs 10,00,000 |
+| 71 | 9 | MARKET_WEAK is applied to put selling only (a weak market is not held against a bear call spread); unknown market data gives MARKET_UNKNOWN | Closed 2026-11-14: confirmed by the user |
 | 72 | 9 | Open interest minimum of 200 lots skips 159 of 250 baseline attempts in the stored period | Reported; no default changed |
+| 73 | 9 | After the M1 rule changes the report wants 430 contracts that are not stored | Open: next `--download` (plan version raised, every stock-year is checked again) |
+| 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
