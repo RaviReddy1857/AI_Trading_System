@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 528 passed
+python -m pytest -q          # should say 535 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -303,6 +303,7 @@ python -m app.options.stock_backtest --status      # liquidity ranking, today's 
 python -m app.options.stock_backtest --download    # fetch stock option history within the daily budget, then report
 python -m app.options.stock_backtest               # report from stored prices only (no login needed)
 python -m app.options.stock_backtest --recheck --no-report   # after an interrupted download: mark what is completely stored
+python -m app.options.stock_backtest --credit-distribution   # net credit / max loss of spreads passing every other rule (no outcomes)
 python -m app.options.shortlist                    # after the close: load stock option chains, build the day's shortlist
 python -m app.history                              # daily bars must be up to date for the shortlist, profile and watch list
 ```
@@ -310,6 +311,7 @@ python -m app.history                              # daily bars must be up to da
   requests a day, the 30 most liquid stocks first, newest year first, and skips everything already stored. Run it once a
   day until `--status` shows every year complete; a Breeze error stops it cleanly and the next run carries on.
 - A report covers only the stocks and years that are completely downloaded (`--all-data` shows everything, marked INCOMPLETE).
+- Phase 9 backtests run at `stock_option_selling.backtest.capital_inr` (Rs 10,00,000); `account.capital_inr` is not changed.
 
 **What the report shows:** the strategy beside its no-filter baseline (same spread on a fixed schedule), executed on
 synchronized 5-minute bars of every leg (a campaign with a session lacking such a bar is left out as data-incomplete and
@@ -324,6 +326,11 @@ entry; and every confirmed reversal with its 10, 20 and 40-session outcome and b
 - `data/events.csv`: `date,type,note,symbol`. Add `RBI_POLICY` rows (symbol blank) for past rate-decision days, from the
   RBI website, and `RESULTS` rows with the stock's symbol for past and coming results days, from NSE corporate filings.
   `BOARD_MEETING` and `CORPORATE_ACTION` rows with a symbol also keep that stock off the shortlist until they pass.
+- **Event coverage (needed before any stock candidate can become a signal):** one `COVERAGE` row per stock in
+  `data/events.csv`, with three more columns in the header: `date,type,note,symbol,source,retrieved_at,covered_through`.
+  Example: `,COVERAGE,,RELIANCE,NSE corporate filings,2026-11-13,2026-12-31` = "I checked RELIANCE's announcements at NSE
+  on 13 November and they are known through 31 December". The row must be at most 7 days old and cover the option's
+  expiry; otherwise the candidate shows `EVENT_COVERAGE_UNKNOWN` and gives no signal.
 
 **Thresholds** are all in `config.yaml` under `stock_option_selling`; the ones marked ASSUMPTION are mine and need your decision.
 Reversal candidates stay silent until you set `stock_option_selling.reversal.alerts_approved: true`.

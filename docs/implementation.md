@@ -449,6 +449,20 @@ enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_l
 24. **Effect of every rule and alert in the backtest**: the strategy with one rule removed, the baseline with one rule or
     one alert-exit added, and the baseline's trades split by what was known at entry.
 
+### Final specification (2026-11-14)
+
+The consolidated Phase 9 specification of 2026-11-14 replaces the build steps above where they differ. Its state against
+the code, the section 2 parameter table and the milestones M1-M5 are tracked in docs/STATUS.md ("Phase 9 final
+specification" and the sections after it). Added to section 2 by the user on 2026-11-14:
+
+| Name | Value | Unit / comparison | Missing data |
+|---|---|---|---|
+| bull call candidate entry window | 20-35 | calendar days to expiry, inclusive (`reversal.bull_call.entry_min_dte`, `entry_max_dte`) | no expiry in the window: no candidate |
+| event_coverage_max_age_days | 7 | days since `retrieved_at` of the stock's COVERAGE row in events.csv; `covered_through` must be on or after expiry | no row, a stale row or short coverage: EVENT_COVERAGE_UNKNOWN, no actionable signal |
+| market_breadth_min_pct / breadth average | 40 / 50 sessions | share of watchlist stocks closing above their 50-session average, compared with the minimum; NIFTY close compared with its 200-day average (`market_block`) | under 80% of stocks usable, or under 200 index bars: MARKET_UNKNOWN, no put signal |
+| Phase 9 backtest capital | 10,00,000 | rupees (`backtest.capital_inr`); every limit is a % of it | - |
+| min_credit_to_max_loss | not applied | to be set once by the user from the stored distribution | - |
+
 ### Acceptance checks
 
 - Tests that a valid setup produces a signal at Rs 2,00,000 capital labelled NEEDS MORE CAPITAL with the correct shortfall, and FITS at Rs 10,00,000

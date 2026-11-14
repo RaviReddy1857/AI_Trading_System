@@ -1029,6 +1029,106 @@ pivots not).
   the capital-fit label, Telegram alerts, repeating exit calls, manual positions under /journal/, paper tracking.
 - **Therefore research-only or unavailable today:** every Phase 9 output. **No paper trading is running.** No alert is sent.
 
+## Phase 9: the user's answers of 2026-11-14 (evening), the download, and M1 progress
+
+No holdout opened, no default tuned, Phase 5 not started. Whole suite: 535 passing.
+
+### Answers applied
+| # | Answer | What was done |
+|---|---|---|
+| 1 | Capital Rs 10,00,000 for the Phase 9 backtests; `max_risk_per_position_pct` unchanged | `stock_option_selling.backtest.capital_inr: 1000000`; `stock_backtest.phase9_settings` runs every Phase 9 backtest at it (2.5% = Rs 25,000 a position). `account.capital_inr` is still Rs 2,00,000, so the research pages (shortlist, reversal watch) still measure against Rs 2,00,000: **say if they should use Rs 10,00,000 too.** |
+| 2 | Strict data-incomplete reading stays primary; report the number and share excluded; above 30% add a labelled sensitivity run at the daily close | `stock_backtest.incomplete_sensitivity`; the report prints both counts and shares. On the stored data the share is 0% (below), so no sensitivity run was made. |
+| 3 | Bull call candidate: 20-35 days to expiry | `reversal.bull_call.entry_max_dte: 35`. |
+| 4 | EVENT_COVERAGE_UNKNOWN | Live and research candidates need a `COVERAGE` row in events.csv for the stock, retrieved within `event_coverage_max_age_days` (7) and covering the expiry. Without it there is no actionable signal; the research candidate stays listed with the reason. Backtests list the event check under "bypassed checks" as not available historically (every option report now has that list). |
+| 5 | Report the credit / max-loss distribution, then stop | Done (below). `min_net_credit_pct_of_max_loss` is **0 (not applied)** until the user sets it. |
+| 6 | Download after `--recheck` | Done (below). |
+
+**events.csv coverage row format** (one row per stock; add the three columns to the header):
+`date,type,note,symbol,source,retrieved_at,covered_through` with `type` = `COVERAGE`, the stock's `symbol`, `source` (where
+the announcements were checked), `retrieved_at` (the day you checked; the `date` column may be left blank) and
+`covered_through` (the last date the check covers; it must be on or after the option's expiry). Example:
+`,COVERAGE,,RELIANCE,NSE corporate filings,2026-11-13,2026-12-31`.
+
+### Download (2026-11-14)
+After `--recheck`, the download used the rest of the day's budget: **3,500 of 3,500 requests used today**. It stopped at the
+budget, not on an error; one dropped connection was retried and the run carried on. **Completely stored now: January to
+5 June 2026 for 25 of the 30 priority stocks** (HDFCBANK, RELIANCE, ICICIBANK, SBIN, BHARTIARTL, INFY, BSE, LT, M&M, ETERNAL,
+TCS, AXISBANK, BAJFINANCE, KOTAKBANK, INDIGO, SHRIRAMFIN, MARUTI, BEL, TATASTEEL, ITC, SUNPHARMA, HINDALCO, COALINDIA,
+ADANIENT, ONGC). HCLTECH is partly stored; ADANIPORTS, NTPC, TITAN, ULTRACEMCO and all earlier years are not. Universe
+selection: the 30 watchlist stocks with the highest median daily traded value over the 60 sessions before 2026-06-08
+(the holdout start), selected on 2026-11-14 - a current liquidity-selected universe, not historically unbiased. The next
+run needs a fresh Breeze login and a new day's budget; at roughly 100 requests per stock-year the remaining history is many
+days of downloads.
+
+### Net credit / max loss, without outcomes (answer 5) - the user sets the minimum from this
+25 stocks, 2026-01-01 to 2026-06-05, one lot, capital Rs 10,00,000. Each observation is the first day a spread on an
+expiry passed every other rule (the minimum-credit rule off; the campaign limit off because it depends on results). No
+price after the decision day and no trade result was read (`python -m app.options.stock_backtest --credit-distribution`;
+`data/diagnostics/credit_ratio_distribution.json`).
+
+| Spreads | n | 25th pct | Median | 75th pct | Min | Max | >= 0.10 | >= 0.15 | >= 0.20 |
+|---|---|---|---|---|---|---|---|---|---|
+| Passing every other rule | 28 (LOW SAMPLE) | 0.044 | 0.100 | 0.135 | 0.009 | 0.186 | 50.0% | 14.3% | 0% |
+| - put spreads | 7 | 0.052 | 0.147 | 0.172 | | | | | |
+| - call spreads | 21 | 0.040 | 0.100 | 0.132 | | | | | |
+| No-filter structure (baseline attempts), for reference | 58 | 0.097 | 0.123 | 0.147 | 0.000 | 0.189 | 72.4% | 24.1% | 0% |
+
+No spread in the stored data reaches 0.20. Five months of one year and 28 observations: low sample.
+
+### Report at Rs 10,00,000 (25 stocks, 2026-01-01 to 2026-06-05, one lot per trade, minimum credit not applied)
+`data/diagnostics/stock_report_2026-11-14_10lakh.txt`. Run before the MARKET_WEAK block was added. Everything here is five
+months of data: low sample, no conclusion. Whole-lot sizing is not built, so each trade is still one lot.
+
+| | Execution | Trades | Win % | Net after costs (Rs) | Per trade (Rs) | PF |
+|---|---|---|---|---|---|---|
+| strategy | synchronized 5-minute | 22 (LOW SAMPLE) | 59.1 | -146 | -7 | 0.98 |
+| baseline (both sides) | synchronized 5-minute | 53 | 66.0 | -4,759 | -90 | 0.86 |
+| baseline bull put / bear call | synchronized 5-minute | 23 / 30 | 56.5 / 73.3 | -6,985 / +2,226 | | 0.63 / 1.16 |
+| strategy | daily close | 22 (LOW SAMPLE) | 54.5 | -4,819 | -219 | 0.68 |
+| baseline (both sides) | daily close | 52 | 59.6 | -26,842 | -516 | 0.52 |
+
+- **Data-incomplete campaigns (answer 2):** strategy 0 of 22 (0%), baseline 0 of 53 (0%) left out; one baseline entry had
+  no synchronized bar on its entry day and was not made. Under the research "roll every month" policy 1 of 53 baseline
+  campaigns was left out. Below 30%, so no sensitivity run.
+- **Baseline schedule:** 250 attempts, 53 entered. Skipped: 159 illiquid (open interest under 200 lots on a traded strike),
+  15 no strike, 14 no priced hedge, 3 gapped past stop or target, 2 max loss above the Rs 25,000 budget, 2 too little
+  history, 1 fill beyond the band, 1 no synchronized bar at entry.
+- **Exit policies on the same entries, per campaign:**
+
+| Entries | Execution | Stop | Roll by the rules | Roll every month (research only) |
+|---|---|---|---|---|
+| baseline, 53 | synchronized 5-minute | -4,759 | -4,759 (0 rolls) | +21,000 (0 rolls made; 52 campaigns, 1 left out; worst -13,015) |
+| baseline, 52 | daily | -26,842 | -26,842 (0 rolls) | -27,763 (0 rolls made; worst -21,924) |
+| strategy, 22 | synchronized 5-minute | -146 | -146 (0 rolls) | +2,071 (worst -4,913) |
+| strategy, 22 | daily | -4,819 | -4,819 (0 rolls) | -2,212 |
+
+  Roll by the rules made no roll. Refusals on the baseline (synchronized): IV rank unknown 6, IV rank too low 4, no trend
+  2, entry rules now on the other side 2, strike not better 1, no strike 1, too little history 1. On the strategy entries:
+  roll net credit too small 2, strike not better 2, illiquid 1, IV rank 2. "Roll every month" made no roll either (the next
+  month's strikes were illiquid or unpriced on the day); its numbers differ from "stop" only because it has no stop.
+- **Rule effects on the baseline (synchronized):** with the trend block 19 trades, +3,934 (PF 1.58); the campaign limit
+  changed nothing; exiting on any alert +3,452 (18 alert exits, 16 of them the regime turning VOLATILE or EVENT).
+  The strategy without the trend block: 35 trades, +2,850.
+- **Reversal candidates:** 25 confirmations in 18 stocks (24 with a complete outcome window): 10 / 20 / 40 sessions later
+  the median move was -0.7% / +1.4% / +5.7%, up in 42% / 58% / 58% of cases, none made a new low within 40 sessions (LOW
+  SAMPLE). Neither candidate had a confirmation in the stored months. Baselines: put spread 22 trades, -16,959; bull call
+  spread with the 20-35 day window 59 trades of 125 attempts, -116,041 (PF 0.36).
+
+### M1 progress since the requirement table
+| Gap | State |
+|---|---|
+| EVENT_COVERAGE_UNKNOWN (was a conflict: no events meant a pass) | **Done**: `stock_selling.event_coverage`, `manual_data` COVERAGE rows; tests `test_ACCEPTANCE_event_coverage_unknown_blocks_an_actionable_signal_and_keeps_the_research_candidate`, `test_events_csv_coverage_rows_parse_and_round_trip` |
+| Synchronized 5-minute execution; exit policies on it | **Done** (correction 3) |
+| MARKET_WEAK | **Done**: `stock_profile.market_weak`, `breadth_pct`, `OptionEngine.breadth_at`, `shortlist.breadth_on`; `market_block` in config (breadth of the watchlist stocks above their 50-session average, minimum 40%; NIFTY against its 200-day average). Tests `test_ACCEPTANCE_market_weak_blocks_put_selling_and_unknown_market_data_blocks_too`, `test_backtest_market_block_uses_breadth_known_at_each_close`. Also an open-position alert and rows in the rule-effect table |
+| Bypassed checks listed in every option report | **Done** (`backtest.BYPASSED_CHECKS`) |
+| Whole-lot sizing and ZERO_SIZE | Open |
+| Confirmed pivots (5 bars each side) for support, resistance, swings, stall zones | Open |
+| CORRELATED_LIMIT, CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN, max_open_spreads, max_total_risk_pct | Open |
+| Research / actionable labels with the snapshot timestamp | Open |
+| Open campaigns at the cutoff reported as open | Open |
+| Config keys renamed to the specification's names; full parameter table in docs/implementation.md | Open |
+| Monthly candidates and trades; hold-through-gap sensitivity; VIX spike and expected-move definitions of section 2 | Open |
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1085,12 +1185,16 @@ pivots not).
 | 60 | 9 | Bull call spread baseline almost never enters: 65 days before expiry stock options have no traded strike | Open: the entry window of that candidate needs a decision |
 | 61 | 9 | Stock daily bars stop at 2026-11-12 while the index has 2026-11-13, so the reversal watch list and profile views show no stock as of the latest session | Waiting for user: run `python -m app.history` |
 | 62 | 9 | Assumed thresholds | Closed 2026-11-14: replaced by the section 2 defaults |
-| 63 | 9 | Section 9.1: the stock-option capital for Phase 9 backtests was received as a placeholder | Waiting for user: give the rupee amount |
+| 63 | 9 | Section 9.1: the stock-option capital for Phase 9 backtests was received as a placeholder | Closed 2026-11-14: Rs 10,00,000 (`stock_option_selling.backtest.capital_inr`) |
 | 64 | 9 | With the section 2 defaults and Rs 2,00,000 capital the stored period has no trade (illiquid 45, max loss 27 of 90 baseline attempts) | Reported; no default changed |
-| 65 | 9 | Events: with no verified event source a stock passes the event rule; the specification requires EVENT_COVERAGE_UNKNOWN to block | Open (M1) |
+| 65 | 9 | Events: with no verified event source a stock passes the event rule; the specification requires EVENT_COVERAGE_UNKNOWN to block | Fixed 2026-11-14 for live and research candidates; backtests list it as a bypassed check |
 | 66 | 9 | 5-minute backtest execution conflicts with section 8.1 (stale leg price, daily entry and fallback); exit-policy comparison not yet on 5-minute bars | Fixed 2026-11-14: synchronized execution; exit policies run on both. Hold-through-gap sensitivity analysis still to build |
 | 67 | 9 | Open campaigns at the cutoff are closed and counted as trades; the specification wants them reported as open | Open (M1) |
-| 68 | 9 | Bull call candidate's 20-65 day window is not in section 2 and its baseline almost never enters | Waiting for user: decide the window |
+| 68 | 9 | Bull call candidate's 20-65 day window is not in section 2 and its baseline almost never enters | Closed 2026-11-14: 20-35 days; the baseline now enters (59 of 125 attempts) |
+| 69 | 9 | `min_credit_to_max_loss`: no stored spread reaches 0.20 (median 0.10, 75th percentile 0.135, n 28) | Waiting for user: set the value once; not applied meanwhile |
+| 70 | 9 | The research pages still use `account.capital_inr` Rs 2,00,000; only the Phase 9 backtests use Rs 10,00,000 | Waiting for user |
+| 71 | 9 | MARKET_WEAK is applied to put selling only (a weak market is not held against a bear call spread); unknown market data gives MARKET_UNKNOWN | Waiting for user: confirm |
+| 72 | 9 | Open interest minimum of 200 lots skips 159 of 250 baseline attempts in the stored period | Reported; no default changed |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
@@ -1180,3 +1284,9 @@ pivots not).
 | 2026-11-14 | Synchronized 5-minute execution (section 8.1), as built: a "synchronized bar" is a 5-minute bar in which every leg of the spread traded. A "required leg bar is missing" when a session of the holding period has no synchronized bar at all, or a leg's 5-minute bars for that session are not stored; the campaign is then data-incomplete and excluded. An entry session without a synchronized bar gives no entry. Rules decided at the session's close (time exit, strike breach, alert) are filled at the next session's first synchronized bar. User to confirm this reading, because thinly traded hedge strikes will exclude many campaigns |
 | 2026-11-14 | Roll decision inside a session (stop reached at a synchronized close): the replacement is chosen and judged by the entry rules on the last completed session's data; the roll net credit is priced from that bar's closes of all four legs; a replacement leg with no bar there leaves the roll unpriced and the answer is exit. The roll fills at the first later bar in which all four legs traded, else the spread is just closed (`ROLL_NOT_FILLED`) |
 | 2026-11-14 | The stale-leg setting `intraday_leg_max_age_minutes` is removed. 5-minute bars are still stored only from 40 to 5 days before each expiry: a roll into a contract more than 40 days out cannot be filled on synchronized bars and is recorded as not made |
+| 2026-11-14 | Phase 9 backtests run at Rs 10,00,000 (`stock_option_selling.backtest.capital_inr`); the account capital in config.yaml is unchanged |
+| 2026-11-14 | Event coverage: a COVERAGE row in events.csv (symbol, source, retrieved_at, covered_through), at most 7 days old and covering expiry, is required for a live or research candidate; without it the candidate is listed with EVENT_COVERAGE_UNKNOWN and gives no signal. Stored in the events table with the note `source=...; covered_through=...` |
+| 2026-11-14 | `min_credit_to_max_loss` is not applied (0) until the user sets it from the distribution |
+| 2026-11-14 | MARKET_WEAK: breadth = share of the watchlist stocks that traded that day and closed above their 50-session average; unknown when under 80% of them have 50 closes. Applied to put selling only. New reason code MARKET_UNKNOWN for missing market data |
+| 2026-11-14 | Credit / max-loss distribution: one observation per stock, expiry and side, on the first day the spread passes every other rule; campaign limit off because it depends on results |
+| 2026-11-14 | Sensitivity run for data-incomplete campaigns: a session without a synchronized bar is judged on the legs' daily closes; an exit decided there still fills at the next session's first synchronized bar; made only when more than 30% of the strategy's or the baseline's campaigns are excluded |
