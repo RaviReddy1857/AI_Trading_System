@@ -334,6 +334,7 @@ stock_option_selling:
   max_short_delta: 0.20
   hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
   max_loss_per_stock_spread_pct: 10   # one lot's max loss at most this % of capital (ASSUMPTION, yours to set)
+  min_net_credit_pct_of_max_loss: 10  # CREDIT_TOO_SMALL: credit after hedge and charges under 10% of the max loss (ASSUMPTION)
   entry_min_days_to_expiry: 20
   entry_max_days_to_expiry: 35
   profit_target_pct_of_credit: 50
@@ -358,6 +359,12 @@ stock_option_selling:
     max_stopped_trades: 2       # this many stopped trades in the window ...
     max_cumulative_loss_pct: 5  # ... or a net loss of this % of capital in the window (ASSUMPTION, yours to set)
     cooling_off_days: 45        # no new signal in that stock for this long (ASSUMPTION, yours to set)
+  roll:                         # a roll is suggested only if every rule holds; otherwise the alert is "exit"
+    max_rolls: 1                # rolls allowed in one campaign (the original trade and its rolls)
+    min_net_credit_pct_of_width: 10   # new credit after hedge cost and charges: above zero and at least 10% of the new width (ASSUMPTION)
+    stuck_time_value_pct: 10    # stuck: sold option in the money with time value under 10% of its price (ASSUMPTION)
+    pre_expiry_window_days: 10  # stuck: this close to expiry (ASSUMPTION)
+    max_days_to_expiry: 65      # a roll may use the next monthly expiry up to this far away (a new entry stops at 35) (ASSUMPTION)
   profile:                      # range and speed profile, scenario history, alert levels (data from 2019-01-22 only)
     windows_years: [2, 5]
     swing_pct: 8                # a swing low/high needs a move of at least 8%
@@ -373,6 +380,7 @@ stock_option_selling:
     exit_checks: [intraday, daily]   # first = main result; target and stop on 5-minute option bars, or on daily closes
     intraday_leg_max_age_minutes: 30 # 5-minute check: a leg's last trade may be this old at most
     exit_on_strike_breach: true      # close at the next open when the stock closes beyond the sold strike
+    exit_policies: [stop, roll_rules, roll_always]   # compared on the same entries: stop at 2x credit / roll by the rules / roll every month
 
 # ---- Phase 3: backtest and walk-forward ----
 backtest:

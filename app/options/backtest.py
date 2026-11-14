@@ -69,6 +69,7 @@ from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
 from .stock_profile import ClosedTrade, Snapshot, alert_kinds, snapshot
+from .stock_selling import SpreadPosition, roll_choices
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
                              discover_expiries, simulated_expiries, stock_iv_series)
 
@@ -119,6 +120,9 @@ class OptionTrade:
     iv_rank: float | None = None
     why_now: list[str] = field(default_factory=list)
     entry_conditions: dict = field(default_factory=dict)   # phase 9: what was known at the signal (state, IV rank, ...)
+    campaign_id: str = ""         # phase 9: the original signal's id; a roll keeps its original trade's id
+    roll_no: int = 0              # 0 = the original trade, 1 = its first roll, ...
+    max_profit_inr: float | None = None
     exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
 
@@ -210,6 +214,10 @@ class _Position:
     variant: str
     pending_exit: str | None = None
     pending_basis: str = ""
+    campaign_id: str = ""
+    roll_no: int = 0
+    realised: float = 0.0         # net P&L of the campaign's earlier positions
+    pending_roll: Signal | None = None   # the spread to open when this one is closed (exit policies with rolls)
 
 
 class OptionEngine:
@@ -408,7 +416,9 @@ class OptionEngine:
             gross_pnl=float(gross), costs=total.as_dict(), net_pnl=float(gross - total.total),
             price_source=self.prices.label, max_loss_inr=sig.details.get("max_loss_inr"),
             iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
-            entry_conditions=dict(sig.details.get("entry_conditions") or {}), exit_check=exit_check, exit_basis=basis)
+            entry_conditions=dict(sig.details.get("entry_conditions") or {}),
+            campaign_id=pos.campaign_id or sig.signal_id, roll_no=pos.roll_no,
+            max_profit_inr=sig.details.get("max_profit_inr"), exit_check=exit_check, exit_basis=basis)
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -429,7 +439,8 @@ class OptionEngine:
         return out
 
     def _manage(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
-                skipped: Counter, exit_check: str = "daily", spot: float | None = None, alerts: tuple = ()):
+                skipped: Counter, exit_check: str = "daily", spot: float | None = None, alerts: tuple = (),
+                roll_ctx=None):
         """Position at the close of day d. Returns ('trade', OptionTrade) | ('drop',) | ('hold',)."""
         bars = self._leg_bars(sym, pos.legs, d)
         if bars is None:
@@ -460,11 +471,13 @@ class OptionEngine:
                 return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check,
                                              "rule at the close"))
             value = sum(b.close * s for s, b in zip(signs, bars))
+            policy = getattr(strategy, "exit_policy", "stop")
+            never_stop = policy == "roll_always"                # "roll every month": no stop, no breach exit
             if value <= sig.target:
                 pos.pending_exit, pos.pending_basis = "TARGET", "daily close"
-            elif value >= sig.stop:
+            elif not never_stop and value >= sig.stop:
                 pos.pending_exit, pos.pending_basis = "STOP", "daily close"
-            elif (getattr(strategy, "threat_exit", False) and spot is not None
+            elif (not never_stop and getattr(strategy, "threat_exit", False) and spot is not None
                   and (spot < pos.legs[0].strike if pos.legs[0].right == "PE" else spot > pos.legs[0].strike)):
                 pos.pending_exit, pos.pending_basis = "STRIKE_BREACHED", "rule at the close"
             elif alerts and any(a in strategy.alert_exits for a in alerts[0 if pos.legs[0].right == "PE" else 1]):
@@ -472,6 +485,14 @@ class OptionEngine:
                 pos.pending_exit, pos.pending_basis = "ALERT_" + kind, "alert at the close"
             elif (expiry - nxt).days <= exit_days:
                 pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
+            credit = float(sum((f * s for f, s in zip(pos.fills, signs)), Decimal(0)))
+            wants_roll = (policy == "roll_rules" and pos.pending_exit in ("STOP", "STRIKE_BREACHED")) or \
+                         (policy == "roll_always" and pos.pending_exit == "TIME" and value > credit)
+            if wants_roll and roll_ctx is not None:
+                short, long_ = pos.legs[0], pos.legs[1]
+                held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
+                pos.pending_roll = roll_choices(strategy, roll_ctx(), held, value, pos.roll_no, pos.realised,
+                                                unlimited=never_stop)["roll_signal"]
             return ("hold",)
         b = bars[0]
         hit = Engine._hit("LONG", Bar(sym, daily_start(d), b.open, b.high, b.low, b.close), sig.stop, sig.target,
@@ -513,7 +534,11 @@ class OptionEngine:
 
     # ---- one stream: one strategy (or one of its baselines) on one underlying ----
     def run_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
-                   skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily") -> list[OptionTrade]:
+                   skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily",
+                   record: list | None = None, replay: dict | None = None) -> list[OptionTrade]:
+        """`record`: every entry signal is appended to it as (signal day, signal). `replay`:
+        {signal day: [signals]} - these signals are entered instead of evaluating the strategy, so
+        different exit policies can be compared on exactly the same entries."""
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
         allowed = set(sessions)
@@ -578,8 +603,17 @@ class OptionEngine:
                 if legs_bars is None:
                     skipped["DROPPED_MISSING_OPTION_BAR"] += 1
                 else:
-                    trades.append(self._close(pos, sym, d, [b.open for b in legs_bars], True, pos.pending_exit,
-                                              strategy, exit_check, pos.pending_basis))
+                    rolled = None
+                    if pos.pending_roll is not None and not gap:     # close this spread and open the next at the same open
+                        rolled = self._enter(pos.pending_roll, sym, d, i, variant, Counter())
+                    done = self._close(pos, sym, d, [b.open for b in legs_bars], True,
+                                       "ROLLED" if rolled is not None else pos.pending_exit, strategy, exit_check,
+                                       pos.pending_basis)
+                    trades.append(done)
+                    if rolled is not None:
+                        rolled.campaign_id, rolled.roll_no = done.campaign_id, pos.roll_no + 1
+                        rolled.realised = pos.realised + done.net_pnl
+                        keep.append(rolled)
             positions = keep
             # ---- entries from the previous close's signals, at this open ----
             for sig, row in pending:
@@ -606,13 +640,17 @@ class OptionEngine:
                                    for right in ("PE", "CE"))
                 prev_snap = snap
             for pos in positions:
-                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts)
+                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts,
+                                 lambda: self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed()))
                 if r[0] == "trade":
                     trades.append(r[1])
                 elif r[0] == "hold":
                     keep.append(pos)
             positions = keep
             if d not in allowed or d >= last_allowed:
+                continue
+            if replay is not None:                               # the same entries as a recorded run
+                pending += [(sig, None) for sig in replay.get(d, ())]
                 continue
             # ---- baseline: the fixed schedule, one attempt each, never retried ----
             if baseline:
@@ -631,6 +669,8 @@ class OptionEngine:
                         row.update(result="skipped", reason=reasons[0])
                         continue
                     pending.append((out[0], row))
+                    if record is not None:
+                        record.append((d, out[0]))
                 continue
             # ---- strategy: a new signal from the close of day d, only when flat ----
             if positions or pending:
@@ -665,6 +705,8 @@ class OptionEngine:
                     skipped["NO_SIGNAL:" + reason.split(":")[0]] += 1
                 continue
             pending.append((out[0], None))
+            if record is not None:
+                record.append((d, out[0]))
             if not is_long:
                 used_expiries.add(out[0].legs[0].expiry)
         # a scheduled day inside the tested period on which the underlying has no bar: skipped, not retried

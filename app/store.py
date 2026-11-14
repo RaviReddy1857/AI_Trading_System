@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS shortlist (
     rank INTEGER, status TEXT NOT NULL, score REAL, scores_json TEXT NOT NULL, reasons_json TEXT NOT NULL,
     created_utc TEXT NOT NULL, PRIMARY KEY (session_date, stock, expiry, side)
 );
+CREATE TABLE IF NOT EXISTS campaigns (
+    campaign_id TEXT PRIMARY KEY, stock TEXT NOT NULL, updated_utc TEXT NOT NULL, summary_json TEXT NOT NULL
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -484,6 +487,23 @@ class Store:
             self._db.execute("INSERT INTO request_budget VALUES (?,?,?) ON CONFLICT(day, kind)"
                              " DO UPDATE SET requests = requests + excluded.requests", (day.isoformat(), kind, n))
             self._db.commit()
+
+    # ---------------- phase 9: campaigns (an original spread and its rolls) ----------------
+    def save_campaign(self, summary: dict, updated: datetime) -> None:
+        """Store a campaign summary (app/options/campaign.py: campaign_summary). Replaces the campaign's row."""
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO campaigns VALUES (?,?,?,?)",
+                             (summary["campaign_id"], summary["stock"], updated.isoformat(),
+                              json.dumps(summary, sort_keys=True, default=str)))
+            self._db.commit()
+
+    def campaigns(self, stock: str | None = None) -> list[dict]:
+        """Stored campaigns, most recently updated first."""
+        with self._lock:
+            rows = self._db.execute("SELECT summary_json, updated_utc FROM campaigns"
+                                    + (" WHERE stock=?" if stock else "") + " ORDER BY updated_utc DESC",
+                                    (stock,) if stock else ()).fetchall()
+        return [{**json.loads(r[0]), "updated_utc": r[1]} for r in rows]
 
     # ---------------- phase 9: daily shortlist ----------------
     def save_shortlist(self, session_date: date, rows: list[dict], created: datetime) -> int:

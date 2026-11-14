@@ -495,11 +495,17 @@ class StockSellingBacktest(StrictModel):
     # 5-minute check: a leg's last traded price may be this old at most (stock options do not trade every bar).
     intraday_leg_max_age_minutes: int = Field(30, ge=5, le=375)
     exit_on_strike_breach: bool = True                  # close (next open) when the stock closes beyond the sold strike
+    # Exit policies compared on the SAME entries (daily exit check): "stop" = close at the stop; "roll_rules" =
+    # roll a threatened spread when the roll rules allow it, else close; "roll_always" = never stop, roll a
+    # losing spread into the next month at the forced exit, without limit.
+    exit_policies: list[Literal["stop", "roll_rules", "roll_always"]] = ["stop", "roll_rules", "roll_always"]
 
     @model_validator(mode="after")
     def distinct(self) -> "StockSellingBacktest":
         if not self.exit_checks or len(set(self.exit_checks)) != len(self.exit_checks):
             raise ValueError("stock_option_selling.backtest.exit_checks must list each mode once")
+        if not self.exit_policies or self.exit_policies[0] != "stop" or len(set(self.exit_policies)) != len(self.exit_policies):
+            raise ValueError("stock_option_selling.backtest.exit_policies must start with 'stop' and list each policy once")
         return self
 
 
@@ -523,6 +529,16 @@ class CampaignLimit(StrictModel):
     max_stopped_trades: int = Field(2, ge=1, le=20)
     max_cumulative_loss_pct: float = Field(5.0, gt=0, le=100)      # net loss in the window, % of capital
     cooling_off_days: int = Field(45, ge=1, le=365)
+
+
+class RollRules(StrictModel):
+    """When a threatened spread may be rolled instead of closed. Anything else is "exit"."""
+    max_rolls: int = Field(1, ge=0, le=12)                         # rolls allowed in one campaign
+    min_net_credit_pct_of_width: float = Field(10.0, ge=0, le=100)  # new credit after hedge and charges, % of the new width
+    stuck_time_value_pct: float = Field(10.0, ge=0, le=100)        # sold option in the money with time value below this % of its price
+    pre_expiry_window_days: int = Field(10, ge=0, le=60)           # this close to expiry a roll earns little: exit
+    # A roll may go into the next monthly expiry even when that is further away than a new entry may be.
+    max_days_to_expiry: int = Field(65, ge=8, le=120)
 
 
 class StockProfile(StrictModel):
@@ -554,6 +570,8 @@ class StockOptionSelling(StrictModel):
     max_short_delta: float = Field(0.20, gt=0, lt=0.5)
     hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
     max_loss_per_stock_spread_pct: float = Field(10.0, gt=0, le=100)   # one lot's max loss, % of capital, at most this
+    # Net credit after the hedge and all charges must be at least this % of the max loss (CREDIT_TOO_SMALL). 0 = off.
+    min_net_credit_pct_of_max_loss: float = Field(10.0, ge=0, le=100)
     entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
     entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
     profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)
@@ -567,6 +585,7 @@ class StockOptionSelling(StrictModel):
     weights: ShortlistWeights = ShortlistWeights()
     trend_block: TrendBlock = TrendBlock()
     campaign_limit: CampaignLimit = CampaignLimit()
+    roll: RollRules = RollRules()
     profile: StockProfile = StockProfile()
     backtest: StockSellingBacktest = StockSellingBacktest()
 

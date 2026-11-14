@@ -302,6 +302,14 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                             "manual positions arrive after phase 6."})
         return out
 
+    @app.get("/api/stock-option-selling/campaigns")
+    def stock_option_selling_campaigns():
+        """Campaigns (an original spread and its rolls) with realised P&L, hedge cost, charges and the best
+        possible remaining outcome. Read-only; positions are recorded from phase 6 on."""
+        return {"campaigns": store.campaigns(),
+                "note": "A campaign is an original trade and every roll of it. Positions are recorded once the "
+                        "journal and manual position form exist (after phase 6)."}
+
     @app.get("/api/stock-option-selling/profile/{stock}")
     def stock_option_selling_profile(stock: str):
         """Range and speed profile and scenario history of one stock. History, not a forecast. Read-only."""

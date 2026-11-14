@@ -136,6 +136,10 @@ class OptionContext:
     # No-filter baseline (backtests): the same structure with no entry rules.
     no_filter: bool = False
     baseline_right: str | None = None  # credit spread baseline: which side to sell (PE | CE)
+    # Phase 9 roll of an open spread (side = baseline_right): "rules" = the structure, event and credit
+    # rules apply but not the entry trend and IV-rank rules; "any" = the next month whatever it costs
+    # (backtest comparison only). "" = a new entry.
+    rolling: str = ""
     events: tuple = field(default_factory=tuple)   # manual_data.Event rows (results, board meetings, corporate actions)
     daily: tuple = field(default_factory=tuple)    # the underlying's daily bars up to asof (phase 9: trend, support, resistance)
     index_daily: tuple = field(default_factory=tuple)   # the index's daily bars up to asof (phase 9: relative return)

@@ -459,9 +459,11 @@ def test_ACCEPTANCE_report_shows_the_effect_of_each_rule_and_alert_against_the_b
 
     out = rule_effects(cfg, eng, ["RELIANCE"], dev, {"intraday": split("intraday")})
     rows = {r["label"]: r for r in out["rule_effects"]["rows"]}
-    assert list(rows)[:6] == ["strategy: all rules", "strategy without the trend block", "strategy without the campaign limit",
-                              "baseline: no rules", "baseline + trend block", "baseline + campaign limit"]
-    assert len(rows) == 6 + len(ALERT_SETS) + 1 and out["rule_effects"]["exit_check"] == "intraday"
+    assert list(rows)[:8] == ["strategy: all rules", "strategy without the minimum net credit",
+                              "strategy without the trend block", "strategy without the campaign limit",
+                              "baseline: no rules", "baseline + trend block", "baseline + campaign limit",
+                              "baseline + minimum net credit"]
+    assert len(rows) == 8 + len(ALERT_SETS) + 1 and out["rule_effects"]["exit_check"] == "intraday"
     assert rows["strategy: all rules"]["net_pnl_inr"] == res["report"]["overall"]["net_pnl_inr"]
     assert rows["baseline: no rules"]["net_pnl_inr"] == res["report"]["baseline"]["overall"]["net_pnl_inr"]
     assert rows["baseline + trend block"]["trades"] < rows["baseline: no rules"]["trades"]

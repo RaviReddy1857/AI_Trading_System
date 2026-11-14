@@ -178,8 +178,15 @@ function optionBlock(rep){
  <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
  <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead>
  <tbody>${row('strategy',rep.overall,'')}${row('baseline (all)',b.overall,'')}${variants}${unders}</tbody></table>
- ${bothWays(rep)}${effects(rep)}
+ ${bothWays(rep)}${policies(rep)}${effects(rep)}
  <div class="mute">Baseline skipped: ${esc(JSON.stringify(b.skipped_signals))}; dropped for missing data: ${esc(JSON.stringify(b.data_exclusions))}. Strategy dropped for missing data: ${esc(JSON.stringify(rep.data_exclusions))}.${rep.download&&rep.download.contracts_wanted_but_not_stored?` <b class="down">INCOMPLETE: ${rep.download.contracts_wanted_but_not_stored} option contracts were wanted but are not stored (run with --download).</b>`:''}</div>`;
+}
+function policies(rep){
+ const pc=rep.exit_policy_comparison; if(!pc) return '';
+ const tr=(g,r)=>`<tr><td>${g}: ${esc(r.label)}</td><td>${r.campaigns}</td><td>${r.rolls} (max ${r.max_rolls_in_a_campaign})</td><td>${fmt(r.win_rate_pct,1)}</td><td class="${r.net_pnl_inr>0?'up':(r.net_pnl_inr<0?'down':'')}">${fmt(r.net_pnl_inr)}</td><td>${fmt(r.per_campaign_inr)}</td><td>${fmt(r.worst_campaign_inr)}</td><td>${fmt(r.max_drawdown_inr)}</td><td>${fmt(r.hedge_cost_inr)}</td><td>${fmt(r.costs_inr)}</td><td>${r.rolled_when_recovery_was_not_possible}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`;
+ return `<h2 style="margin-top:12px">Exit policies on the same entries (per campaign, ${esc(pc.exit_check)} exit check)</h2>
+ <table><thead><tr><th></th><th>Campaigns</th><th>Rolls</th><th>Win %</th><th>Net</th><th>Per campaign</th><th>Worst campaign</th><th>Max DD</th><th>Hedge cost</th><th>Charges</th><th>Rolled with no recovery possible</th><th>Sample</th></tr></thead>
+ <tbody>${pc.strategy.map(r=>tr('strategy',r)).join('')}${pc.baseline.map(r=>tr('baseline',r)).join('')}</tbody></table><div class="mute">${esc(pc.note)}</div>`;
 }
 function effects(rep){
  const fx=rep.rule_effects; if(!fx) return '';
@@ -349,6 +356,8 @@ SHORTLIST_HTML = """<!doctype html>
  <div class="card"><h2>Stock profile and scenario history <span class="tag warn">history, not a forecast</span></h2>
   <select id="psym"></select> <span class="mute">daily bars from 2019-01-22 only</span>
   <div id="prof" class="mute" style="margin-top:8px">Pick a stock.</div></div>
+ <div class="card"><h2>Campaigns (an original trade and its rolls)</h2>
+  <table><thead><tr><th>Stock</th><th>Side</th><th>Rolls</th><th>Realised P&amp;L</th><th>Hedge cost paid</th><th>Charges</th><th>Best possible outcome</th><th style="text-align:left">Note</th></tr></thead><tbody id="camps"></tbody></table></div>
  <div class="card"><h2>Not on the list today, and why</h2>
   <table><thead><tr><th>Stock</th><th>Side</th><th>Expiry</th><th style="text-align:left">Reason</th></tr></thead><tbody id="rest"></tbody></table></div>
 </main>
@@ -375,6 +384,8 @@ async function profile(sym){
  document.getElementById("asof").textContent=r.session_date?`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`:"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
  document.getElementById("note").textContent=r.note+" Weights: "+JSON.stringify(r.weights)+".";
  const top=r.rows.filter(x=>x.status==="SHORTLISTED"), rest=r.rows.filter(x=>x.status!=="SHORTLISTED");
+ const cs=await (await fetch("/api/stock-option-selling/campaigns")).json();
+ document.getElementById("camps").innerHTML=cs.campaigns.map(c=>`<tr><td>${esc(c.stock)}</td><td>${side(c.side)}</td><td>${c.rolls}</td><td>${f(c.realised_pnl_inr)}</td><td>${f(c.hedge_cost_inr)}</td><td>${f(c.charges_inr)}</td><td>${f(c.best_possible_outcome_inr)}</td><td style="text-align:left" class="${c.message?'down':''}">${esc(c.message||(c.open?'open':'closed'))}</td></tr>`).join("")||`<tr><td colspan="8" class="mute">${esc(cs.note)}</td></tr>`;
  const ps=document.getElementById("psym"); ps.innerHTML='<option value="">-</option>'+(r.stocks||[]).map(s=>`<option>${esc(s)}</option>`).join(""); ps.onchange=()=>ps.value&&profile(ps.value);
  document.getElementById("top").innerHTML=top.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry)}</td><td>${f(x.score)}</td><td>${f(x.scores.iv_rank)}</td><td>${f(x.scores.trend_clarity)}</td><td>${f(x.scores.distance)}</td><td>${f(x.scores.liquidity)}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="10" class="mute">no stock passes every rule today</td></tr>';
  document.getElementById("rest").innerHTML=rest.map(x=>`<tr><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry||"-")}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="4" class="mute">-</td></tr>';

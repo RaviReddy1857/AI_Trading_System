@@ -44,11 +44,17 @@ from ..quality import IST
 from ..store import Store
 from . import build_option_strategies
 from .backtest import (OptionEngine, baseline_variants, prepare_history, print_report, run_option_backtest)
+from .campaign import campaigns_from_trades
 from .option_history import OptionHistory, OptionIntraday, budgeted_fetcher
 from .stock_selling import StockOptionSelling, build_stock_selling
 
 log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
+# What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
+# contracts it did not want before (2: the roll exit policies); older marks are then checked again.
+PLAN_VERSION = 2
+POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
+                "roll_always": "never stop; roll a losing spread every month, without limit"}
 
 
 def liquid_stocks(settings: Settings, engine: OptionEngine, before: date | None = None) -> list[dict]:
@@ -104,7 +110,7 @@ def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict
     s = stats(trades, settings.account.capital_inr, settings.backtest.min_trades)
     blocked = {k.split(":", 1)[1]: v for k, v in skipped.items()
                if k.startswith("NO_SIGNAL:") and k.split(":", 1)[1] in ("DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT",
-                                                                         "INSUFFICIENT_HISTORY")}
+                                                                         "INSUFFICIENT_HISTORY", "CREDIT_TOO_SMALL")}
     return {"label": label, "trades": s["trades"], "win_rate_pct": s["win_rate_pct"], "net_pnl_inr": s["net_pnl_inr"],
             "per_trade_inr": round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None,
             "profit_factor": s["profit_factor"], "max_drawdown_inr": s["max_drawdown_inr"], "low_sample": s["low_sample"],
@@ -134,12 +140,16 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
                 out += eng.run_stream(st, sym, dev, v, sk, exit_check=mode)
         return out, sk
 
+    no_min = variant(settings)
+    no_min.params = no_min.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
     rows = [_row("strategy: all rules", trades, skipped, settings),
+            _row("strategy without the minimum net credit", *run(no_min, False), settings),
             _row("strategy without the trend block", *run(variant(settings, off=("trend_block",)), False), settings),
             _row("strategy without the campaign limit", *run(variant(settings, off=("campaign_limit",)), False), settings),
             _row("baseline: no rules", base_trades, base_skipped, settings),
             _row("baseline + trend block", *run(variant(settings, baseline_rules=("trend_block",)), True), settings),
-            _row("baseline + campaign limit", *run(variant(settings, baseline_rules=("campaign_limit",)), True), settings)]
+            _row("baseline + campaign limit", *run(variant(settings, baseline_rules=("campaign_limit",)), True), settings),
+            _row("baseline + minimum net credit", *run(variant(settings, baseline_rules=("min_credit",)), True), settings)]
     for name, kinds in ALERT_SETS.items():
         rows.append(_row(f"baseline + exit on alert: {name}", *run(variant(settings, alert_exits=kinds), True), settings))
     every = set().union(*ALERT_SETS.values())
@@ -174,7 +184,75 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
             "baseline_by_entry_condition": by_cond}
 
 
+def policy_runs(settings: Settings, eng: OptionEngine, sym: str, sessions: list[date]) -> dict:
+    """{"strategy" | "baseline": {policy: trades}} for one stock. The "stop" policy is run first and its
+    entry signals are recorded; every other policy enters exactly those signals (daily exit check)."""
+    policies = settings.stock_option_selling.backtest.exit_policies
+    ref = variant(settings)
+    out = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
+    recorded = {}
+    for name in ["strategy"] + baseline_variants(ref):
+        rec: list = []
+        group = "strategy" if name == "strategy" else "baseline"
+        out[group]["stop"] += eng.run_stream(ref, sym, sessions, name, Counter(), exit_check="daily", record=rec)
+        recorded[name] = rec
+    for policy in policies[1:]:
+        st = variant(settings)
+        st.exit_policy = policy
+        for name, rec in recorded.items():
+            replay: dict = {}
+            for d, sig in rec:
+                replay.setdefault(d, []).append(sig)
+            group = "strategy" if name == "strategy" else "baseline"
+            out[group][policy] += eng.run_stream(st, sym, sessions, name, Counter(), exit_check="daily", replay=replay)
+    return out
+
+
+def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
+    """The exit policies on the same entries, counted per campaign (an original trade and its rolls)."""
+    policies = settings.stock_option_selling.backtest.exit_policies
+    total = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
+    for sym in syms:
+        got = policy_runs(settings, eng, sym, dev)
+        for group in total:
+            for p in policies:
+                total[group][p] += got[group][p]
+    min_n = settings.backtest.min_trades
+
+    def row(policy: str, trades: list) -> dict:
+        camps = campaigns_from_trades(trades)
+        nets = [c["realised_pnl_inr"] for c in camps]
+        s = stats(trades, settings.account.capital_inr, min_n)
+        n = len(camps)
+        return {"policy": policy, "label": POLICY_LABEL[policy], "campaigns": n, "positions": len(trades),
+                "rolls": sum(c["rolls"] for c in camps), "campaigns_rolled": sum(1 for c in camps if c["rolls"]),
+                "max_rolls_in_a_campaign": max((c["rolls"] for c in camps), default=0),
+                "win_rate_pct": round(sum(1 for x in nets if x > 0) / n * 100, 1) if n else None,
+                "net_pnl_inr": s["net_pnl_inr"], "per_campaign_inr": round(s["net_pnl_inr"] / n, 2) if n else None,
+                "worst_campaign_inr": min(nets) if nets else None, "max_drawdown_inr": s["max_drawdown_inr"],
+                "costs_inr": s["costs_inr"], "hedge_cost_inr": round(sum(c["hedge_cost_inr"] for c in camps), 2),
+                "rolled_when_recovery_was_not_possible": sum(1 for c in camps if c["rolled_when_recovery_was_not_possible"]),
+                "low_sample": n < min_n}
+
+    return {"exit_policy_comparison": {
+        "exit_check": "daily",
+        "note": "Every policy enters exactly the same signals (recorded from the stop policy). Decisions are taken on "
+                "daily closes and filled at the next session's open; a roll closes the old spread and opens the new "
+                "one at the same open, one lot each. Results are per campaign: an original trade and all its rolls.",
+        "strategy": [row(p, total["strategy"][p]) for p in policies],
+        "baseline": [row(p, total["baseline"][p]) for p in policies]}}
+
+
 def print_effects(rep: dict) -> None:
+    pc = rep.get("exit_policy_comparison")
+    if pc:
+        print("  exit policies on the same entries (daily exit check, per campaign):")
+        for group in ("strategy", "baseline"):
+            for r in pc[group]:
+                print(f"    {group:9s} {r['policy']:12s} campaigns {r['campaigns']:4d}  rolls {r['rolls']:4d} (max "
+                      f"{r['max_rolls_in_a_campaign']})  win {r['win_rate_pct']}%  net Rs {r['net_pnl_inr']:>12,.2f}  "
+                      f"per campaign Rs {r['per_campaign_inr']}  worst Rs {r['worst_campaign_inr']}"
+                      + ("  LOW SAMPLE" if r["low_sample"] else ""))
     fx = rep.get("rule_effects")
     if not fx:
         return
@@ -215,6 +293,8 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
     hist: OptionHistory = engine.prices
     intr = engine.intraday
     years = sorted({d.year for d in dev}, reverse=True)
+    if status.get("plan") != PLAN_VERSION:                   # the backtest wants more than the old marks covered
+        status["complete"], status["plan"] = {}, PLAN_VERSION
     done = {s: set(v) for s, v in status.get("complete", {}).items()}
     engine.last_session = dev[-1] if dev else None           # nothing of the holdout period is asked for
     stopped = None
@@ -224,7 +304,7 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
         return len(hist.not_stored) + (len(intr.not_stored) if intr is not None else 0)
 
     for year in years:
-        block = [d for d in dev if d.year == year]
+        block = [d for d in dev if d.year >= year]           # to the end: a rolled campaign can run past the year
         engine.set_expiry_floor(date(year - 1, 1, 1))        # a year of earlier months for the IV rank
         for sym in stocks:
             if year in done.get(sym, set()):
@@ -236,10 +316,12 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
                 stopped = "request budget used"
                 break
             before, used = missing(), hist.fetcher.requests
-            for st, names in ((strategy, ["strategy"] + baseline_variants(strategy)),
-                              (variant(settings, off=("trend_block", "campaign_limit")), ["strategy"])):
+            loose = variant(settings, off=("trend_block", "campaign_limit"))
+            loose.params = loose.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+            for st, names in ((strategy, ["strategy"] + baseline_variants(strategy)), (loose, ["strategy"])):
                 for name in names:                           # the rule-effect rows need no other contracts than these
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
+            policy_runs(settings, engine, sym, block)        # the spreads the roll policies open
             if missing() == before and hist.error is None:
                 done.setdefault(sym, set()).add(year)
                 newly += 1
@@ -373,7 +455,8 @@ def main(argv: list[str] | None = None) -> int:
               f"use --all-data for everything stored")
     res = run_option_backtest(settings, store, "breeze", strategy, hist, use_stocks, engine=eng,
                               exit_checks=tuple(bt.exit_checks), first_session=first, coverage_note=note,
-                              extra=lambda e, syms, d, by_mode: rule_effects(settings, e, syms, d, by_mode))
+                              extra=lambda e, syms, d, by_mode: {**rule_effects(settings, e, syms, d, by_mode),
+                                                                 **policy_comparison(settings, e, syms, d)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
     return 0

@@ -149,6 +149,7 @@ def test_ACCEPTANCE_bear_call_short_strike_is_above_resistance(s, strat):
     bars = stock_bars(start=1200, drift=-1.0)
     spot = bars[-1].close
     _, resistance = support_resistance(bars, 20)
+    strat = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 5}))
     sig = strat.evaluate(ctx_for(s, bars, chain(spot)))
     assert sig, strat.last_no_trade
     short, long_ = legs_of(sig[0])
@@ -455,10 +456,10 @@ def test_ACCEPTANCE_threat_shows_exit_and_roll_with_numbers_and_a_roll_is_never_
     now_legs = legs_of(strat.evaluate(ctx_for(s, bars))[0])
     same = SpreadPosition("RELIANCE", "PE", now_legs[0].strike, now_legs[1].strike, EXP, 4.0, LOT)
     assert roll_choices(strat, ctx_for(s, bars), same, 7.0)["roll"] is None
-    # when the entry rules fail (the trend flipped) there is no valid roll, and it says so
+    # a falling stock does not pass the falling-stock block: the alert is "exit", and it says why
     down = stock_bars(start=1200, drift=-1.0)
     out = roll_choices(strat, ctx_for(s, down, chain(down[-1].close)), held, 7.0)
-    assert out["roll"] is None and out["roll_note"].startswith("no valid roll")
+    assert out["action"] == "EXIT" and out["roll"] is None and out["roll_note"].startswith("exit: DOWNTREND_BLOCK")
 
 
 # ---------------- 5-minute exit check ----------------
@@ -631,7 +632,7 @@ def weekdays(a, b):
     return out
 
 
-def stock_world(materialise=True, shocks=None):
+def stock_world(materialise=True, shocks=None, drift=0.5, hi=1500):
     """`shocks`: {date: rupees} - the stock's price level shifts by that much from that session on."""
     cfg = settings(backtest={"test_start": {"1day": date(2025, 6, 2)}, "holdout_start": {"1day": date(2025, 10, 1)}},
                    options={"iv_rank_min_history_days": 20, "iv_rank_lookback_days": 60})
@@ -642,7 +643,7 @@ def stock_world(materialise=True, shocks=None):
         bars.append(Bar("NIFTY", daily_start(d), px - 10, px + 45, px - 45, px, None))
         v = 24 + i * 0.01
         bars.append(Bar("INDIAVIX", daily_start(d), v, v + 0.2, v - 0.2, v, None))
-        sp = 1000 + 0.5 * i + 8 * math.sin(i / 4) + sum(v for k, v in (shocks or {}).items() if d >= k)
+        sp = 1000 + drift * i + 8 * math.sin(i / 4) + sum(v for k, v in (shocks or {}).items() if d >= k)
         bars.append(Bar("RELIANCE", daily_start(d), sp - 1, sp + 6, sp - 6, sp, 2e6))
     store.save_history_bars("bars_1d", bars, "sim")
     base = Engine(cfg, store, "sim", MarketCalendar(), regime=FixedRegime("RANGE"))
@@ -650,7 +651,7 @@ def stock_world(materialise=True, shocks=None):
     for exp, _ in model.expiries("RELIANCE"):
         store.save_option_expiry("sim", "NIFTY", exp, "monthly", NOW)       # stocks expire with the index monthly
     if materialise:
-        write_option_history(store, model)
+        write_option_history(store, model, hi=hi)
     return cfg, store, base, model
 
 
