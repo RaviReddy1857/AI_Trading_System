@@ -879,6 +879,155 @@ Built on the user's instruction to do the core of phase 9 now. Phase 5 was NOT s
 Both files can also be pasted through `POST /data/import/fii_dii` and `/data/import/events`. Restart the app (or rerun the
 command) afterwards.
 
+## Phase 9 final specification (received 2026-11-14): corrections and reconciliation
+
+The consolidated Phase 9 specification replaces all earlier Phase 9 instructions. Phase 5 is not started; no holdout was
+opened; no threshold was tuned. This section records the five corrections asked for first, and the requirement-to-code
+table of section 10. **Waiting for the user: the stock-option capital for section 9.1 arrived as a placeholder
+(`<YOUR STOCK-OPTION CAPITAL>`); `account.capital_inr` is still Rs 2,00,000 and was not changed.**
+
+### Corrections
+
+| # | Correction | State |
+|---|---|---|
+| 1 | Roll net credit = new spread credit - debit to close the old spread - all roll charges (four executions), each leg priced once with adverse slippage; ratio to replacement width x lot x lots must be ABOVE `min_net_credit_pct_of_width`. The replacement must also pass every entry rule a new trade would (trend, IV rank, events, blocks, campaign limit, strikes, hedge, risk budget, liquidity, 20-35 day window, minimum credit, margin), same side, same or later expiry, strike strictly lower (puts) / higher (calls). | **Done.** `stock_selling.roll_net_credit`, `roll_choices`; tests `test_ACCEPTANCE_roll_net_credit_is_new_credit_less_the_debit_to_close_less_all_roll_charges` (by hand, live and history) and `..._a_positive_new_premium_alone_does_not_qualify_and_each_rule_can_refuse_a_roll`. The earlier relaxed roll mode (no trend/IV rule, expiry up to 65 days) is removed. Every refusal is recorded on the trade (`roll_refused`) and counted in the report. |
+| 2 | Section 2 defaults replace the assumed thresholds | **Done for the parameters that exist** (table below). Tests pin their fixtures' thresholds explicitly; `test_shipped_defaults_are_the_section_2_values` checks config.yaml. Parameters whose rule is not built yet are listed as gaps. |
+| 3 | Exit-policy comparison on synchronized five-minute bars | **Not done yet.** The comparison still uses the daily exit check. The present 5-minute check also conflicts with section 8.1 (see table): it prices a leg that did not trade in a bar at its last trade (up to 30 minutes old) and falls back to the daily close when a day's bars are not stored. To be rebuilt in M1. |
+| 4 | Widened hedge rule accepted | **Done** (already in code): a bought option of the same underlying, right and expiry at a different strike with at least the sold quantity. Issue 59 closed. |
+| 5 | Report the bull call entry-window problem and trace the "no roll passed" result | **Done**, below. |
+
+**Rerun of the exit-policy comparison (correction 1):** with the section 2 defaults and capital Rs 2,00,000 the stored
+period (9 stocks, Jan-Jun 2026) has **no trade at all**, so there is nothing to compare yet. Of 90 scheduled baseline
+attempts: 45 `ILLIQUID` (open interest under 200 lots on a traded strike), 27 `MAX_LOSS_ABOVE_LIMIT` (one lot's max loss
+above 2.5% of capital = Rs 5,000), 11 no priced hedge strike, 7 no strike. The strategy stream: 40 max-loss, 35
+`UPTREND_BLOCK`, 22 illiquid, 15 `INSUFFICIENT_HISTORY`. No default was changed to get trades. The comparison will be
+rerun when the capital is set and more history is stored. (The run also wanted 198 contracts that are not stored: the new
+thresholds pick other strikes.)
+
+**Why the earlier run made no roll (traced with the earlier commit's code and thresholds, 9 stocks, Jan-Jun 2026).** The
+roll policy took 15 roll decisions (the 13 stops and 2 strike breaches of the baseline):
+
+| Decisions | Outcome | Rule |
+|---|---|---|
+| 7 | exit | `DOWNTREND_BLOCK` (stock below its 200-day average; RELIANCE x3, ICICIBANK, BHARTIARTL, INFY x2) |
+| 4 | exit | `INSUFFICIENT_HISTORY`: fewer than 252 daily bars since an unadjusted price break (HDFCBANK x3, BSE) - issue 25 |
+| 2 | exit | no replacement passed: `CREDIT_TOO_SMALL` (RELIANCE call spread), no expiry 20-65 days away (ICICIBANK) |
+| 2 | roll approved, not made | BHARTIARTL (2026-04-30) and INFY (2026-06-02) call spreads: the replacement could not be entered at the next open (entry rules at the fill), so the spread was simply closed |
+
+Under the corrected rule a roll is rarer still: closing a stopped spread costs at least twice its credit, and a new spread
+at the rules' strikes pays about one credit, so the roll net credit is negative unless the open spread is cheap to close.
+
+**Bull call spread candidate: entry-window problem.** Its no-filter baseline makes one attempt per expiry on the first
+session the expiry is inside its 20-65 day window, that is about 65 days before expiry. Stock options hardly trade that far
+out: 35 of 36 attempts found no priced strike. The candidate itself (entered on a confirmation day) picks the nearest
+expiry at least 20 days away, so it is not affected the same way, but its baseline is not a fair comparison as built. The
+window (20-65 days) is not in section 2; it needs the user's decision (for example the same 20-35 days as the put spread).
+
+**Other finding to report (not acted on):** with a 0.20 delta limit and the bought strike 2 strikes out, a spread's credit
+after charges is roughly 13-19% of its max loss in the fixtures and in the stored data, so `min_credit_to_max_loss` 0.20
+blocks most otherwise valid setups. Together with the 200-lot open-interest minimum and the 2.5% risk budget, section 2
+may produce very few candidates. This is reported as an outcome; no default was changed.
+
+### Section 2 parameters: what config.yaml holds now
+
+| Specification name | Value | config.yaml key (`stock_option_selling.`) | Built |
+|---|---|---|---|
+| sma_long / sma_mid / sma_short | 200 / 50 / 20 | `trend_block.long_sma_days`, `trend_slow_sma`, `trend_fast_sma` | yes |
+| new_low_lookback; 52-week low = lowest close over 252 | 20; 252 | `trend_block.extreme_recent_sessions`, `extreme_lookback_sessions` | yes (changed from lowest low to lowest close) |
+| rel_strength_lookback / max_lag_pct | 63 / 5 | `trend_block.relative_return_sessions`, `max_underperformance_pct` | yes (was 10) |
+| stock_loss_window_days / max_stops / max_pct_capital / cooloff | 90 / 2 / 1.5 / 30 | `campaign_limit.*` | yes (was 5% and 45 days) |
+| max_risk_per_position_pct | 2.5 | `max_loss_per_stock_spread_pct` | yes (was 10); whole-lot sizing not built |
+| min_credit_to_max_loss | 0.20 | `min_net_credit_pct_of_max_loss` = 20 | yes (was 10) |
+| short_delta_max; hedge_strikes_out | 0.20; 2 (2-3) | `max_short_delta`, `hedge_strikes_out` | yes |
+| entry_dte_min / max | 20 / 35 | `entry_min_days_to_expiry`, `entry_max_days_to_expiry` | yes |
+| profit_target_pct_of_credit; stop_spread_value_multiple | 50; 2.0 | `profit_target_pct_of_credit`, `stop_multiple_of_credit` | yes |
+| time_exit_dte; forced_exit_trading_days_before_expiry | 10; 5 | `exit_days_before_expiry`, `forced_exit_trading_days_before_expiry` | yes (was 7 calendar days) |
+| max_rolls; min_roll_net_credit_pct_of_width | 1; 10 | `roll.max_rolls`, `roll.min_net_credit_pct_of_width` | yes |
+| stuck_time_value_pct | 20 | `roll.stuck_time_value_pct` | yes (was 10; the stuck window is now the forced-exit window) |
+| min_open_interest_lots; max_bid_ask_pct_of_mid | 200; 5 | `min_open_interest`, `max_bid_ask_spread_pct` | yes (were 100 and 10) |
+| washed_out_drawdown_pct; 63 sessions below sma_long | 25; 63 | `reversal.drawdown_pct`, `reversal.min_sessions_below_long` | yes |
+| base_no_new_low_sessions; base_range_contraction | 15; ATR(10) < 0.8 x ATR(20) | `reversal.base_no_new_low_sessions`, `range_sessions`, `range_compare_sessions`, `range_shrink_ratio` | yes |
+| fii_streak_sessions | 3 | `bias.streak_days` (existing) | yes |
+| iv_rank_lookback | 252 | `options.iv_rank_lookback_days` (existing) | yes |
+| market_breadth_min_pct | 40 | - | **no** (MARKET_WEAK not built) |
+| max_open_spreads; max_total_risk_pct | 6; 10 | - | **no** (portfolio limits not built) |
+| correlation_window / threshold / min_overlap; group_max_positions / risk | 60 / 0.7 / 50; 2 / 5 | - | **no** (CORRELATED_LIMIT, CORRELATION_UNKNOWN not built) |
+| iv_falling | IV <= 90% of its 20-session maximum | - | **no** (score factor) |
+| expected_move | spot x IV x sqrt(DTE/365) | - | **no** (the profile shows IV x sqrt(holding sessions/252) instead) |
+| hist_fall_percentile | 90th percentile of 21-session falls | - | **no** |
+| swing_pivot_bars | 5 each side, usable after 5 confirming sessions | - | **no** (support = 20-session low; swings by a % zigzag) |
+| vix_spike | up 20% over 5 sessions or above its 80th percentile | `profile.vix_spike_pct` = 15% in one session | **no, differs** |
+
+The config keys keep their earlier names; renaming them to the specification's names, and the full parameter table in
+docs/implementation.md (unit, lookback, comparison, missing-data behaviour), are part of M1.
+
+### Requirement-to-code/test table (section 10)
+
+C = compliant, P = partial, G = gap (not built), X = conflict with the specification as built.
+
+| Spec | Requirement | Code | Tests | State |
+|---|---|---|---|---|
+| 0 | No order code, routes or SDK calls | whole app | `tests/test_safety.py` | C |
+| 0 | Sold option needs an adequate hedge to construct, enter or save (hedge further out or nearer the money) | `models.unhedged_short_legs`, `Signal`, `OptionEngine._enter`, `Store.save_backtest` | test_phase4, test_review5_fixes, test_phase9_core (property test), test_phase9_reversal | C |
+| 0 | Unknown never passes, never becomes zero | throughout | many | P: holds for what is built; see X rows (events, 5-minute fallback) |
+| 0 | No history before 2019-01-22 in tested outcomes or statistics | `backtest.test_start`, reversal scanner, profile view | test_phase4, test_phase9_rules, test_phase9_reversal | P: averages, 52-week levels and the 2-year breach history at decisions in 2019-2020 still read bars before 2019-01-22 |
+| 0 | Nothing alerts until approved; paper tracking | `strategies.status`, `reversal.alerts_approved` | test_phase9_core, test_phase9_reversal | C for alerts; paper tracking **not available** (phase 6) |
+| 1.1 | Universe: F&O stocks with price history here, filtered by option liquidity | `stock_backtest.liquid_stocks`, `shortlist.universe`, `liquidity_problem` | test_phase9_core | C (the watchlist stocks are the ones with price history) |
+| 1.2 | Research candidates and actionable signals kept separate | `shortlist.run_shortlist` (session snapshot) vs `StockOptionSelling.evaluate` on a live context | test_phase9_core | P: the snapshot timestamp is the session date only; the shortlist context is marked LIVE internally; no live stock loop (phase 6) |
+| 1.3 | Sold strike beyond the nearest CONFIRMED support/resistance, beyond highest OI, within delta | `stock_selling.assess`, `base.pick_short_strike` | test_phase9_core (3 acceptance tests) | P: support/resistance is the 20-session low/high, not a confirmed pivot |
+| 1.4 | Hedge 2-3 strikes out, liquid, within the risk budget | `stock_selling.pick_hedge` | test_phase9_core | C |
+| 1.5 | Entry 20-35 days to expiry, never in expiry week | `CreditSpread.pick` | test_phase9_core | C |
+| 1.6 | Every candidate: net credit after hedge, charges and slippage; max loss; breakevens; margin; capital-fit label; why-now with values | `assess`, `CreditSpread.finish` | test_phase9_rolls, test_phase9_core | P: capital-fit label not built; in history the credit on the signal is not slipped (fills are) |
+| 1.7 | Sizing: risk budget, whole lots, round down, ZERO_SIZE | - | - | G: one lot always; a lot above the budget is `MAX_LOSS_ABOVE_LIMIT` |
+| 2 | Parameter table in docs/implementation.md | - | - | G (table above is the start) |
+| 3 | UNHEDGED_SHORT, EVENT_BEFORE_EXPIRY, DOWNTREND/UPTREND_BLOCK, STOCK_LOSS_LIMIT, CREDIT_TOO_SMALL, DATA_STALE, MARGIN_UNKNOWN | `stock_selling`, `stock_profile` | test_phase9_core, test_phase9_rules, test_phase9_rolls | C |
+| 3 | EVENT_COVERAGE_UNKNOWN | - | - | **X: with no events file a stock passes the event rule today.** Must block actionable signals until a verified, fresh event source covers the stock to expiry |
+| 3 | MARKET_WEAK | - | - | G |
+| 3 | CORRELATED_LIMIT, CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN, max_open_spreads, max_total_risk_pct | - | - | G (needs positions: phase 6 for live; buildable now for the backtest) |
+| 3 | REVERSAL_CONFIRMED lifts only DOWNTREND_BLOCK, only for a put spread below the base low | `stock_selling.assess` | test_phase9_reversal | C |
+| 4 | Score 0-100, six equal-weight factors, contributions shown, blocked candidates listed separately | `stock_selling.weighted_score` (four factors, 0-1) | test_phase9_core | G: to be rebuilt in M2 |
+| 5.1 | Range and speed profile, 2 and 5 years | `stock_profile.range_speed_profile`, `shortlist.stock_view` | test_phase9_rules | P: swings by a % zigzag not 5-bar pivots; implied move not by the section 2 formula |
+| 5.2 | Scenario history, point in time, low sample, "history, not a forecast" | `stock_profile.scenario_history` | test_phase9_rules | P: VIX spike definition differs from section 2 |
+| 5.3 | Missing FII/DII, RBI, results: fixtures, "no data", files reported | `shortlist.scenario_triggers`, README, this file | test_phase9_rules | C |
+| 6.1 | Exit at the first of target, stop, time exit, forced exit | `exit_calls`, engine `_manage` | test_phase9_core | P: the backtest applies the time exit (10 days); the forced exit (5 trading days) exists in `exit_calls` only |
+| 6.2 | Campaigns: realised P&L, hedge cost, charges, best possible outcome, "recovery not possible" | `campaign.py`, store `campaigns` | test_phase9_rolls | C (live recording waits for phase 6) |
+| 6.3 | Roll rules | `roll_choices`, `roll_net_credit` | test_phase9_rolls, test_phase9_core | C (correction 1) |
+| 6.4 | Stuck position: "exit; rolling earns little" | `stuck_position` | test_phase9_rolls | C |
+| 6.5 | No recovery sizing | `assess` (one lot, `sizing_note`) | test_phase9_rolls | C |
+| 6.6 | Open-position guidance shown locally; unknown roll inputs never hide the exit | `position_alerts`, `alert_kinds` | test_phase9_rules, test_phase9_reversal | P: MARKET_WEAK missing; guidance is computed but no page shows it (no positions before phase 6) |
+| 7 | Washed-out list, base forming, REVERSAL_CONFIRMED, two research candidates, stall zones | `reversal.py`, `shortlist.reversal_watch` | test_phase9_reversal | P: swing high and stall zones by a 5% zigzag, not 5-bar pivots |
+| 8.1 | Synchronized five-minute execution, data-incomplete campaigns excluded, no daily fallback | `backtest.intraday_spread_exit` | test_phase9_core | **X: uses a leg's last trade up to 30 minutes old, enters at daily opens, and falls back to the daily close (counted)** |
+| 8.2 | No-filter baseline, one attempt per expiry | `OptionEngine.baseline_schedule` | test_phase4, test_review5_fixes, test_phase9_core | C |
+| 8.3 | Isolated comparisons of each block; bypassed rules reported | `stock_backtest.rule_effects` | test_phase9_rules | P: blocks yes; score factors no; the list of bypassed rules is not in the report |
+| 8.4 | Three exit policies on the same entries | `stock_backtest.policy_runs`, `policy_comparison` | test_phase9_rolls | P: daily check only (correction 3 open) |
+| 8.5 | Score bands by the candidates available at each decision time | - | - | G (M2) |
+| 8.6 | Reversal analysis | `reversal.reversal_outcomes`, `run_reversal_reports` | test_phase9_reversal | C |
+| 8.7 | Point-in-time outcome statistics; exclusions counted | `scenario_history`, `breach_frequency` | test_phase9_rules | P: exclusions are not counted in the output |
+| 8.8 | Monthly candidates after blocks and trades taken | - | - | G |
+| 8.9 | Open campaigns at the cutoff reported as open, with unrealised P&L kept apart | engine `PERIOD_END` | - | **X: an open spread is closed at the cutoff session's close and counted as a closed trade** |
+| 8.10 | Counts, win rate, average win/loss, net, drawdown, profit factor, low sample under 30 | `backtest.stats` | test_phase3, test_phase9_* | C |
+| 9.1 | Stock-option capital for Phase 9 backtests | - | - | **Waiting for the user (placeholder received)** |
+| 9.2 | Budgeted, resumable download; `--recheck`; universe-selection date and method | `stock_backtest`, `option_history` | test_phase9_core | P: the selection method is recorded; the selection date is not stored with the status |
+| 9.3 | Authentication failure stops cleanly | `OptionHistory.error`, `download_blocks` | test_phase9_core | C |
+| 9.4 | Standalone / depends on phases 5-6 / research-only list | below | - | C (documentation) |
+| 9.5 | Phase 6 and 7 documentation | docs/implementation.md | - | P: Phase 7 addition is there; "followed signal / broke rule" classification and the Phase 6 notes to be added |
+
+**Milestones:** M1 partial (universe, strikes, hedge, entry window, existing blocks, exits, baseline, isolated block
+reporting are in; sizing, research/actionable labels, confirmed pivots, MARKET_WEAK, correlation and portfolio blocks,
+EVENT_COVERAGE_UNKNOWN, synchronized 5-minute execution and open-campaign reporting are not). M2 not started (score and
+bands). M3 partial (campaigns, roll rules, stuck and open-position guidance done; 5-minute exit-policy comparison not).
+M4 partial (profiles and scenarios done to the earlier definitions). M5 partial (detector and research comparisons done;
+pivots not).
+
+### What Phase 9 does standalone now, and what waits for phases 5 and 6
+- **Standalone now:** research candidates after the close (shortlist, profile, scenario history, reversal watch), every
+  entry rule and block listed as C above, exit and roll decisions as functions, campaign arithmetic, the backtests and the
+  download.
+- **Depends on phase 5:** position sizing in whole lots, portfolio risk limits (they can be built for the backtest first).
+- **Depends on phase 6:** actionable live signals for stocks (live price, live chain, margin recheck), signal cards with
+  the capital-fit label, Telegram alerts, repeating exit calls, manual positions under /journal/, paper tracking.
+- **Therefore research-only or unavailable today:** every Phase 9 output. **No paper trading is running.** No alert is sent.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -930,11 +1079,17 @@ command) afterwards.
 | 55 | 9 | Stock option history is only partly downloaded (9 stocks, Jan-Jun 2026); every stock result is LOW SAMPLE | Open: run `python -m app.options.stock_backtest --download` each day with a fresh Breeze login (3,500 requests a day) |
 | 56 | 9 | Today's last download run was stopped by the system because the machine was low on memory; about 1,900 of the day's requests were not used | Waiting for user: rerun the download command (close other programs first) |
 | 57 | 9 | Scenario history has no FII/DII, RBI or results dates | Waiting for user: fill `data/fii_dii.csv` and `data/events.csv` (table above) |
-| 58 | 9 | The roll-by-rules policy made no roll in the downloaded period; not yet checked which rule refused each of the 13 stopped baseline trades | Open: look at it when more history is stored |
-| 59 | 9 | Hedge rule widened: a bought option nearer the money now also covers a sold option (needed for the bull call spread) | Waiting for user: confirm (decisions log) |
+| 58 | 9 | The roll-by-rules policy made no roll in the downloaded period; not yet checked which rule refused each of the 13 stopped baseline trades | Closed 2026-11-14: traced (7 falling-stock block, 4 too little history after a price break, 2 no qualifying replacement, 2 approved but not fillable); refusals are now recorded on every trade |
+| 59 | 9 | Hedge rule widened: a bought option nearer the money now also covers a sold option (needed for the bull call spread) | Closed 2026-11-14: accepted by the user (specification section 0) |
 | 60 | 9 | Bull call spread baseline almost never enters: 65 days before expiry stock options have no traded strike | Open: the entry window of that candidate needs a decision |
 | 61 | 9 | Stock daily bars stop at 2026-11-12 while the index has 2026-11-13, so the reversal watch list and profile views show no stock as of the latest session | Waiting for user: run `python -m app.history` |
-| 62 | 9 | Assumed thresholds (marked ASSUMPTION in config.yaml): max loss per spread 10% of capital, minimum net credit 10% of max loss, campaign loss 5% of capital and 45-day cooling-off, roll minimum credit 10% of width, stuck time value 10%, pre-expiry window 10 days, roll up to 65 days out, reversal thresholds | Waiting for user |
+| 62 | 9 | Assumed thresholds | Closed 2026-11-14: replaced by the section 2 defaults |
+| 63 | 9 | Section 9.1: the stock-option capital for Phase 9 backtests was received as a placeholder | Waiting for user: give the rupee amount |
+| 64 | 9 | With the section 2 defaults and Rs 2,00,000 capital the stored period has no trade (illiquid 45, max loss 27 of 90 baseline attempts) | Reported; no default changed |
+| 65 | 9 | Events: with no verified event source a stock passes the event rule; the specification requires EVENT_COVERAGE_UNKNOWN to block | Open (M1) |
+| 66 | 9 | 5-minute backtest execution conflicts with section 8.1 (stale leg price, daily entry and fallback); exit-policy comparison not yet on 5-minute bars | Open (M1 / M3) |
+| 67 | 9 | Open campaigns at the cutoff are closed and counted as trades; the specification wants them reported as open | Open (M1) |
+| 68 | 9 | Bull call candidate's 20-65 day window is not in section 2 and its baseline almost never enters | Waiting for user: decide the window |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
@@ -1015,3 +1170,9 @@ command) afterwards.
 | 2026-11-14 | Hedge rule widened for debit spreads: a sold option is covered by a bought option of the same right and expiry at any different strike with at least as many shares. Two review tests were changed from "not further out" to "same strike". User to confirm |
 | 2026-11-14 | Reversal: "washed out" needs every session of the last 3 months more than 30% below the 52-week high and the close below the 200-day average; "shrinking ranges" compares the last 10 sessions with the 30 before; the scanner uses bars from 2019-01-22 only. Candidates are shown for 20 sessions after confirmation while the base low holds. Nothing alerts until `reversal.alerts_approved` is set |
 | 2026-11-14 | Scenario history: a move runs from the close of the trigger day to the close 30 calendar days later; only cases whose 30 days had passed are counted |
+| 2026-11-14 | Final Phase 9 specification received; it replaces earlier Phase 9 instructions. Corrections 1, 2, 4 and 5 done; correction 3 open |
+| 2026-11-14 | A roll's replacement is judged by the full entry rules, on the same side; the relaxed roll mode and the 65-day roll window are removed (specification section 6) |
+| 2026-11-14 | In history the four roll legs are priced at the last trade moved against us by the options slippage once; live they are the bid and the ask with no further slippage |
+| 2026-11-14 | "Washed out": 25% or more below the 52-week high (highest high of 252 sessions) and at least 63 sessions IN A ROW closing below the 200-day average; "base range contraction": mean true range of the last 10 sessions below 0.8 x that of the last 20 |
+| 2026-11-14 | Stuck window = the forced-exit window (5 trading days, counted as weekdays unless a calendar is passed). Time exit: 10 calendar days before expiry |
+| 2026-11-14 | Phase 9 tests pin their fixtures' thresholds (tests/test_phase9_core.py `FIXTURE_SOS`) so a default change does not move them; one test checks the shipped defaults against section 2. Reason for the test changes: the specification changed the roll rule, the exit windows and the defaults |
