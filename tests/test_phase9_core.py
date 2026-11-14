@@ -1142,3 +1142,92 @@ def test_coverage_uses_only_completely_downloaded_stocks_and_years():
     assert coverage(status, ["B", "C", "D"], [2024, 2025, 2026]) == ([2025, 2026], ["B"])
     assert coverage(status, ["C", "D"], [2024, 2025, 2026]) == ([2026], ["C"])
     assert coverage({}, ["A"], [2025]) == ([], [])
+
+
+# ---------------- data-incomplete share and its sensitivity run; credit / max-loss distribution ----------------
+def drop_session(store, day):
+    """Remove every stored 5-minute option bar of one session (as if nothing traded in step that day)."""
+    lo = datetime.combine(day, time(0, 0), IST).astimezone(UTC).isoformat()
+    hi = datetime.combine(day + timedelta(days=1), time(0, 0), IST).astimezone(UTC).isoformat()
+    store._db.execute("DELETE FROM option_bars WHERE interval=? AND start_utc>=? AND start_utc<?", (INTRADAY, lo, hi))
+    store._db.commit()
+
+
+def summary_of(w):
+    from app.options.stock_backtest import incomplete_sensitivity
+    cfg, store, base, _ = w
+    hist = OptionHistory(store, "sim")
+    eng = engine_for(cfg, store, base, hist)
+    eng.set_expiry_floor(BT_FIRST)
+    dev = [d for d in base.session_dates() if date(2025, 6, 2) <= d < date(2025, 10, 1)]
+    st = build_stock_selling(cfg)
+    sk, bsk = Counter(), Counter()
+    tr = eng.run_stream(st, "RELIANCE", dev, "strategy", sk, exit_check="intraday")
+    btr = [t for v in ("baseline:PE", "baseline:CE") for t in eng.run_stream(st, "RELIANCE", dev, v, bsk, exit_check="intraday")]
+    return incomplete_sensitivity(cfg, eng, ["RELIANCE"], dev, {"intraday": (tr, btr, sk, bsk, [])})["data_incomplete_summary"], btr
+
+
+def test_ACCEPTANCE_excluded_campaigns_are_counted_and_above_30_percent_a_labelled_sensitivity_run_is_added():
+    clean, all_trades = summary_of(stock_world())
+    assert clean["baseline"]["excluded"] == 0 and clean["baseline"]["excluded_share_pct"] == 0.0 and clean["sensitivity"] is None
+    total = clean["baseline"]["kept"]
+    # one session without bars: the campaigns open that day are left out; 2 of 8 is under the 30% line
+    w = stock_world()
+    drop_session(w[1], date(2025, 7, 3))
+    one, _ = summary_of(w)
+    assert one["baseline"]["excluded"] == 2 and one["baseline"]["kept"] == total - 2
+    assert one["baseline"]["excluded_share_pct"] == pytest.approx(2 / total * 100, abs=0.1)
+    assert one["baseline"]["excluded_share_pct"] <= 30 and one["sensitivity"] is None
+    # sessions without bars in two months: above 30%, so the sensitivity run is added, clearly labelled
+    drop_session(w[1], date(2025, 8, 1))
+    two, kept = summary_of(w)
+    assert two["baseline"]["excluded"] == 4 and two["baseline"]["excluded_share_pct"] > 30 and two["threshold_pct"] == 30.0
+    sv = two["sensitivity"]
+    assert sv is not None and sv["label"].startswith("SENSITIVITY, not the primary result")
+    assert sv["baseline"]["trades"] == total and sv["still_excluded"]["baseline"] == 0     # judged at the daily close instead
+    assert len(kept) == total - 4                                    # the primary result still leaves them out
+    assert all("sensitivity" not in t.exit_basis for t in kept)
+
+
+def test_ACCEPTANCE_credit_to_max_loss_distribution_uses_decision_time_data_only(world):
+    from app.options.stock_backtest import credit_ratio_distribution
+    cfg, store, base, _ = world
+
+    def dist():
+        eng = engine_for(cfg, store, base, OptionHistory(store, "sim"))
+        eng.set_expiry_floor(BT_FIRST)
+        dev = [d for d in base.session_dates() if date(2025, 6, 2) <= d < date(2025, 10, 1)]
+        eng.last_session = dev[-1]
+        return credit_ratio_distribution(cfg, eng, ["RELIANCE"], dev)
+
+    d = dist()
+    x = d["passing_every_other_rule"]
+    assert x["observations"] == len(d["observations"]) >= 3 and x["low_sample"] is True
+    assert x["min"] <= x["p25"] <= x["median"] <= x["p75"] <= x["max"] and 0 < x["median"] < 1
+    assert x["puts"]["observations"] + x["calls"]["observations"] == x["observations"]
+    assert "share_at_or_above_0.20_pct" in x and d["no_filter_structure"]["observations"] >= x["observations"]
+    assert "no outcome" in d["what"] and any("minimum net credit" in r for r in d["rules_not_applied"])
+    # one observation by hand: the ratio is the signal's own figure on its decision day
+    o = d["observations"][0]
+    eng = engine_for(cfg, store, base, OptionHistory(store, "sim"))
+    eng.set_expiry_floor(BT_FIRST)
+    eng.last_session = date(2025, 9, 30)
+    bars = base.daily("RELIANCE")
+    i = next(k for k, b in enumerate(bars) if ist_date(b.start.isoformat()) == date.fromisoformat(o["date"]))
+    from app.options.stock_backtest import variant
+    st = variant(cfg, off=("campaign_limit",))
+    sig = st.evaluate(eng.context(st, "RELIANCE", date.fromisoformat(o["date"]), bars[i].close, "strategy", None,
+                                  tuple(bars[max(0, i - 1299):i + 1]), ()))[0]
+    assert o["ratio"] == pytest.approx(sig.details["net_credit_after_costs_inr"] / sig.details["max_loss_inr"], abs=1e-4)
+    # prices after the decision day do not enter: changing a later bar of that spread's sold leg changes nothing
+    exp, sell = date.fromisoformat(o["expiry"]), sig.legs[0]
+    later = date.fromisoformat(o["date"]) + timedelta(days=7)
+    while later.weekday() >= 5:
+        later += timedelta(days=1)
+    old = next(b for b in store.option_bars("sim", "RELIANCE")[(exp, sell.strike, sell.right)] if b[0] == daily_start(later))
+    try:
+        store.save_option_bars("sim", "RELIANCE", exp, sell.strike, sell.right, "1day",
+                               [(old[0].isoformat(), old[1] * 3, old[2] * 3, old[3] * 3, old[4] * 3, *old[5:])], NOW)
+        assert dist()["observations"][0] == o
+    finally:
+        store.save_option_bars("sim", "RELIANCE", exp, sell.strike, sell.right, "1day", [(old[0].isoformat(), *old[1:])], NOW)

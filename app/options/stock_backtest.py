@@ -285,7 +285,119 @@ def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], de
     return {"exit_policy_comparison": out}
 
 
+SENSITIVITY_SHARE_PCT = 30.0     # above this share of data-incomplete campaigns a sensitivity run is added (user, 2026-11-14)
+SENSITIVITY_LABEL = ("SENSITIVITY, not the primary result: a session of an open spread without a synchronized 5-minute bar "
+                     "is judged on the legs' daily closes instead of excluding the campaign")
+
+
+def incomplete_sensitivity(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], by_mode: dict) -> dict:
+    """Number and share of campaigns the synchronized run left out as data-incomplete. When the share is
+    above 30% for the strategy or the baseline, the same streams are run once more with the missing
+    sessions judged at the daily close, as a separately labelled sensitivity result."""
+    if "intraday" not in by_mode:
+        return {}
+    trades, base_trades, sk, bsk, _ = by_mode["intraday"]
+    out = {"strategy": {"kept": len(trades), "excluded": sk.get("DATA_INCOMPLETE_CAMPAIGNS", 0)},
+           "baseline": {"kept": len(base_trades), "excluded": bsk.get("DATA_INCOMPLETE_CAMPAIGNS", 0)}}
+    for g in out.values():
+        n = g["kept"] + g["excluded"]
+        g["excluded_share_pct"] = round(g["excluded"] / n * 100, 1) if n else None
+    out["threshold_pct"] = SENSITIVITY_SHARE_PCT
+    out["sensitivity"] = None
+    if not any((g["excluded_share_pct"] or 0) > SENSITIVITY_SHARE_PCT for g in (out["strategy"], out["baseline"])):
+        return {"data_incomplete_summary": out}
+    st = variant(settings)
+    eng.sync_missing_at_daily_close = True
+    try:
+        s_tr, b_tr, s_sk, b_sk = [], [], Counter(), Counter()
+        for sym in syms:
+            s_tr += eng.run_stream(st, sym, dev, "strategy", s_sk, exit_check="intraday")
+            for v in baseline_variants(st):
+                b_tr += eng.run_stream(st, sym, dev, v, b_sk, exit_check="intraday")
+    finally:
+        eng.sync_missing_at_daily_close = False
+    cap, n = settings.account.capital_inr, settings.backtest.min_trades
+    out["sensitivity"] = {
+        "label": SENSITIVITY_LABEL, "strategy": stats(s_tr, cap, n), "baseline": stats(b_tr, cap, n),
+        "still_excluded": {"strategy": s_sk.get("DATA_INCOMPLETE_CAMPAIGNS", 0), "baseline": b_sk.get("DATA_INCOMPLETE_CAMPAIGNS", 0)},
+        "exits_decided_on_a_daily_close": sum(1 for t in s_tr + b_tr if "sensitivity" in t.exit_basis)}
+    return {"data_incomplete_summary": out}
+
+
+def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
+    """Net credit after hedge and charges divided by cost-inclusive maximum loss, for the spreads that
+    pass every other rule, at their decision time. NO OUTCOME IS LOOKED AT: each stock is scanned day
+    by day; the first day a spread on an expiry passes the rules gives one observation (per stock,
+    expiry and side). The minimum-credit rule itself is off, and so is the campaign limit, which
+    depends on earlier results. Also given for the no-filter structure (baseline attempts), for reference."""
+    scan = variant(settings, off=("campaign_limit",))
+    scan.params = scan.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+    allowed = set(dev)
+
+    def collect(st, variants) -> list[dict]:
+        rows, seen = [], set()
+        for sym in syms:
+            bars = eng.base.daily(sym)
+            brk = set(eng.base.breaks(sym))
+            start = 0
+            for name in variants:
+                for i, bar in enumerate(bars):
+                    if i in brk:
+                        start = i
+                    d = bar_date(bar)
+                    if d not in allowed:
+                        continue
+                    if name != "strategy":
+                        want = eng.baseline_schedule(st, sym).get(d)
+                        if not want:
+                            continue
+                    ctx = eng.context(st, sym, d, bar.close, name, None, tuple(bars[max(start, i - 1299):i + 1]), ())
+                    for sig in st.evaluate(ctx):
+                        key = (sym, sig.details["expiry"], sig.details["side"], name)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        rows.append({"stock": sym, "date": d.isoformat(), "expiry": sig.details["expiry"],
+                                     "side": sig.details["side"], "ratio": sig.details["net_credit_pct_of_max_loss"] / 100.0})
+        return rows
+
+    def summary(rows: list[dict]) -> dict:
+        xs = sorted(r["ratio"] for r in rows if r["ratio"] is not None)
+        if not xs:
+            return {"observations": 0, "median": None, "p25": None, "p75": None, "min": None, "max": None}
+        from ..indicators import percentile
+        out = {"observations": len(xs), "median": round(statistics.median(xs), 4), "p25": round(percentile(xs, 25), 4),
+               "p75": round(percentile(xs, 75), 4), "min": round(xs[0], 4), "max": round(xs[-1], 4),
+               "low_sample": len(xs) < settings.backtest.min_trades}
+        for level in (0.10, 0.15, 0.20, 0.25):
+            out[f"share_at_or_above_{level:.2f}_pct"] = round(sum(1 for x in xs if x >= level) / len(xs) * 100, 1)
+        return out
+
+    rules = collect(scan, ["strategy"])
+    structure = collect(scan, baseline_variants(scan))
+    return {"what": "net credit after hedge and charges / cost-inclusive maximum loss, one lot, at the decision time; "
+                    "no outcome was looked at",
+            "passing_every_other_rule": {**summary(rules),
+                                         "puts": summary([r for r in rules if r["side"] == "PE"]),
+                                         "calls": summary([r for r in rules if r["side"] == "CE"])},
+            "no_filter_structure": summary(structure), "stocks": len(syms),
+            "period": {"from": dev[0].isoformat() if dev else None, "to": dev[-1].isoformat() if dev else None},
+            "rules_not_applied": ["minimum net credit (the rule being measured)", "per-stock campaign limit (depends on results)"],
+            "observations": rules}
+
+
 def print_effects(rep: dict) -> None:
+    di = rep.get("data_incomplete_summary")
+    if di:
+        for g in ("strategy", "baseline"):
+            print(f"  data-incomplete ({g}): {di[g]['excluded']} of {di[g]['kept'] + di[g]['excluded']} campaigns left out "
+                  f"({di[g]['excluded_share_pct']}%)")
+        if di["sensitivity"]:
+            sv = di["sensitivity"]
+            print(f"  {sv['label']}:")
+            for g in ("strategy", "baseline"):
+                x = sv[g]
+                print(f"    {g:9s} trades {x['trades']:4d}  win {x['win_rate_pct']}%  net Rs {x['net_pnl_inr']:>12,.2f}  PF {x['profit_factor']}")
     for mode, pc in (rep.get("exit_policy_comparison") or {}).items():
         print(f"  exit policies on the same entries ({mode} execution, per campaign):")
         for group in ("strategy", "baseline"):
@@ -458,6 +570,9 @@ def main(argv: list[str] | None = None) -> int:
                                                            "history is already completely stored (after an interrupted run)")
     ap.add_argument("--years", nargs="*", type=int, help="with --recheck: only these years")
     ap.add_argument("--no-report", action="store_true", help="download or recheck only; do not run the reports")
+    ap.add_argument("--credit-distribution", action="store_true",
+                    help="only show the distribution of net credit / max loss of the spreads that pass every other rule "
+                         "(no outcomes are looked at)")
     ap.add_argument("--all-data", action="store_true", help="report on every priority stock and the whole period, "
                                                             "also where contracts are missing (marked INCOMPLETE)")
     args = ap.parse_args(argv)
@@ -565,10 +680,31 @@ def main(argv: list[str] | None = None) -> int:
                 f"whose option history is completely downloaded. The rest is not in this result.")
         print(f"\nreport covers {len(covered)} stocks, {years[0]}..{years[-1]} (completely downloaded); "
               f"use --all-data for everything stored")
+    if args.credit_distribution:
+        span = [d for d in dev if first is None or d >= first]
+        eng.last_session = dev[-1]
+        dist = credit_ratio_distribution(settings, eng, use_stocks, span)
+        out_path = settings.path("data/diagnostics/credit_ratio_distribution.json")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(dist, indent=2), encoding="utf-8")
+        print(f"\n{dist['what']}")
+        print(f"  {dist['stocks']} stocks, {dist['period']['from']} .. {dist['period']['to']}; not applied: {dist['rules_not_applied']}")
+        for name in ("passing_every_other_rule", "no_filter_structure"):
+            x = dist[name]
+            print(f"  {name:26s} n {x['observations']:4d}  median {x['median']}  25th {x['p25']}  75th {x['p75']}  "
+                  f"min {x['min']}  max {x['max']}" + ("  LOW SAMPLE" if x.get("low_sample") else ""))
+            for k in [k for k in x if k.startswith("share_at_or_above")]:
+                print(f"      {k}: {x[k]}")
+        for side in ("puts", "calls"):
+            x = dist["passing_every_other_rule"][side]
+            print(f"    {side:5s} n {x['observations']:4d}  median {x['median']}  25th {x['p25']}  75th {x['p75']}")
+        print(f"  written to {out_path}")
+        return 0
     res = run_option_backtest(settings, store, "breeze", strategy, hist, use_stocks, engine=eng,
                               exit_checks=tuple(bt.exit_checks), first_session=first, coverage_note=note,
                               extra=lambda e, syms, d, by_mode: {**rule_effects(settings, e, syms, d, by_mode),
-                                                                 **policy_comparison(settings, e, syms, d)})
+                                                                 **policy_comparison(settings, e, syms, d),
+                                                                 **incomplete_sensitivity(settings, e, syms, d, by_mode)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
     rev = run_reversal_reports(settings, store, eng, use_stocks, [r["stock"] for r in ranked], dev, first, note)

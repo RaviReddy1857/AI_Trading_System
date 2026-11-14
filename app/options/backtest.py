@@ -248,6 +248,9 @@ class OptionEngine:
                  lot_sizes: dict[str, int] | None = None, intraday: OptionIntraday | None = None):
         self.s, self.store, self.source, self.prices = settings, store, source, prices
         self.intraday = intraday         # 5-minute option bars (exit_check "intraday"); None = not available
+        # SENSITIVITY ONLY (never the primary result): a session of an open spread without a synchronized bar
+        # is judged on the legs' daily closes instead of making the campaign data-incomplete.
+        self.sync_missing_at_daily_close = False
         self.base = base or Engine(settings, store, source, calendar=load_calendar(settings, store))
         self.costs = self.base.costs
         self.o = settings.options
@@ -586,7 +589,23 @@ class OptionEngine:
             sync = [x for x in sync if x[0] > pos.last_bar]
         if not sync and not opened_here:
             skipped["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] += 1
-            return ("incomplete",)
+            if not self.sync_missing_at_daily_close:
+                return ("incomplete",)
+            # sensitivity run: the session is judged at the legs' daily closes; an exit decided there is still
+            # filled at the next session's first synchronized bar. No daily bar for a leg: incomplete after all.
+            daily = self._leg_bars(sym, pos.legs, d)
+            nxt = self.base.next_session(d)
+            if daily is None or pos.pending_exit or d >= last_allowed or nxt is None or nxt > expiry:
+                return ("incomplete",) if daily is None or d >= last_allowed or nxt is None or nxt > expiry else ("hold",)
+            cost = sum((1 if leg.action == "SELL" else -1) * b.close for leg, b in zip(pos.legs, daily))
+            never = getattr(strategy, "exit_policy", "stop") == "roll_always"
+            if cost <= sig.target:
+                pos.pending_exit, pos.pending_basis = "TARGET", "daily close (sensitivity: no synchronized bar that session)"
+            elif not never and cost >= sig.stop:
+                pos.pending_exit, pos.pending_basis = "STOP", "daily close (sensitivity: no synchronized bar that session)"
+            elif (expiry - nxt).days <= self._exit_days(strategy, sym):
+                pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
+            return ("hold",)
         signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
         policy = getattr(strategy, "exit_policy", "stop")
         never_stop = policy == "roll_always"
@@ -951,6 +970,11 @@ def _by(trades: list[OptionTrade], key) -> dict[str, list[OptionTrade]]:
     return dict(sorted(out.items()))
 
 
+def _share(excluded: int, kept: int) -> float | None:
+    """Excluded campaigns as a % of all campaigns that were entered (kept + excluded)."""
+    return round(excluded / (excluded + kept) * 100, 1) if excluded + kept else None
+
+
 def compare(strategy_stats: dict, baseline_stats: dict) -> dict:
     """Strategy against its no-filter baseline, both after costs, per trade (they trade different numbers of times)."""
     def avg(s):
@@ -1029,7 +1053,9 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             # synchronized execution: campaigns left out because a session had no bar in which every leg traded
             # (or its 5-minute bars are not stored), and the sessions that caused it
             "data_incomplete": {"strategy": {k: ms.get(k, 0) for k in DATA_INCOMPLETE_KEYS},
-                                "baseline": {k: mbs.get(k, 0) for k in DATA_INCOMPLETE_KEYS}},
+                                "baseline": {k: mbs.get(k, 0) for k in DATA_INCOMPLETE_KEYS},
+                                "strategy_share_pct": _share(ms.get("DATA_INCOMPLETE_CAMPAIGNS", 0), len(mt)),
+                                "baseline_share_pct": _share(mbs.get("DATA_INCOMPLETE_CAMPAIGNS", 0), len(mb))},
             "comparison": compare(so, bo)}
     wf = []
     for w in windows(dev, cfg.window_sessions * 3, cfg.step_sessions * 3):
