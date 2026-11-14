@@ -345,6 +345,12 @@ class Store:
                 (d.isoformat(), limit)).fetchall()
         return [{"date": date.fromisoformat(r[0]), "fii_net_cr": r[1], "dii_net_cr": r[2]} for r in rows]
 
+    def fii_dii_all(self) -> list[dict]:
+        """Every stored FII/DII row, oldest first."""
+        with self._lock:
+            rows = self._db.execute("SELECT date,fii_net_cr,dii_net_cr FROM fii_dii ORDER BY date").fetchall()
+        return [{"date": date.fromisoformat(r[0]), "fii_net_cr": r[1], "dii_net_cr": r[2]} for r in rows]
+
     # ---------------- regime log ----------------
     def save_regime(self, at: datetime, session_date: date, regime: str, bias: str,
                     reasons: dict, rules_version: str, basis: str) -> None:

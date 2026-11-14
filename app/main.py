@@ -24,6 +24,7 @@ from .options.analytics import OptionDesk
 from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
+from .options.shortlist import stock_view
 from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
 from .regime import RegimeService
@@ -295,10 +296,19 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         sos = settings.stock_option_selling
         status = settings.strategies.status_of("stock_option_selling")
         out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.weights.model_dump(),
+                    "stocks": [i.symbol for i in settings.watchlist if i.kind == "stock"],
                     "label": status.label, "alerts": status.alerts,
                     "note": "Research only. A shortlist row is a candidate, not a signal: signal cards, alerts and "
                             "manual positions arrive after phase 6."})
         return out
+
+    @app.get("/api/stock-option-selling/profile/{stock}")
+    def stock_option_selling_profile(stock: str):
+        """Range and speed profile and scenario history of one stock. History, not a forecast. Read-only."""
+        sym = stock.upper()
+        if sym not in {i.symbol for i in settings.watchlist if i.kind == "stock"}:
+            raise HTTPException(404, "unknown stock")
+        return stock_view(settings, store, feed.name, sym)
 
     @app.get("/stock-option-selling", response_class=HTMLResponse)
     def stock_option_selling_page():

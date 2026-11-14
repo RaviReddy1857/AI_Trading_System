@@ -60,6 +60,7 @@ from ..costs import CostBreakdown, money
 from ..history import bar_date, daily_start
 from ..models import Bar, Signal, utcnow
 from ..quality import IST
+from ..regime import fii_bias
 from ..store import Store
 from ..strategies import MarketContext, build_strategies
 from . import build_option_strategies
@@ -67,6 +68,7 @@ from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_co
 from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
+from .stock_profile import ClosedTrade, Snapshot, alert_kinds, snapshot
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
                              discover_expiries, simulated_expiries, stock_iv_series)
 
@@ -116,6 +118,7 @@ class OptionTrade:
     max_loss_inr: float | None = None
     iv_rank: float | None = None
     why_now: list[str] = field(default_factory=list)
+    entry_conditions: dict = field(default_factory=dict)   # phase 9: what was known at the signal (state, IV rank, ...)
     exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
 
@@ -226,6 +229,7 @@ class OptionEngine:
         self._ref_iv = {bar_date(b): b.close for b in ref}
         self._iv: dict[str, tuple[list[date], list[float]]] = {}
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
+        self._market: dict[date, dict] = {}
         self._trigger = None
         self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
         # Last session a run tests. A stock's IV history then leaves out the at-the-money calls of
@@ -283,13 +287,34 @@ class OptionEngine:
         hist = vs[max(0, i - self.o.iv_rank_lookback_days):i]
         return vs[i], iv_rank(vs[i], hist, self.o.iv_rank_min_history_days)
 
+    def market_at(self, d: date) -> dict:
+        """Market facts known after the close of day d: the FII bias for the next session (from the
+        flows up to d; None when the figures are not in the data file) and India VIX's change on d."""
+        if d not in self._market:
+            nxt = self.base.next_session(d) or d + timedelta(days=1)
+            streak = self.s.bias.streak_days
+            bias, _ = fii_bias(self.store.fii_dii_before(nxt, streak + 3), nxt, self.base.calendar, streak)
+            dates = self.base.session_dates()
+            i = bisect.bisect_left(dates, d)
+            prev = self._ref_iv.get(dates[i - 1]) if 0 < i < len(dates) and dates[i] == d else None
+            now = self._ref_iv.get(d)
+            self._market[d] = {"fii_bias": None if bias == "UNKNOWN" else bias,
+                               "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None}
+        return self._market[d]
+
+    def snapshot_at(self, sym: str, bars: tuple, d: date) -> Snapshot | None:
+        sos = self.s.stock_option_selling
+        m = self.market_at(d)
+        return snapshot(bars, sos.support_resistance_lookback_days, sos.trend_block, m["fii_bias"], m["vix_change_pct"],
+                        self.base.regime.at_close(d).regime)
+
     def trigger_strategy(self):
         if self._trigger is None:
             self._trigger = build_strategies(self.s, [self.o.backtest.trigger])[0]
         return self._trigger
 
     def context(self, strategy: OptionStrategy, sym: str, d: date, spot: float, variant: str,
-                trigger: Signal | None = None, daily: tuple = ()) -> OptionContext:
+                trigger: Signal | None = None, daily: tuple = (), closed_trades: tuple = ()) -> OptionContext:
         kind = self.kinds.get(sym, "stock")
         cfg = self.s.option_underlying(sym)
         iv, rank = self.iv_at(sym, d)
@@ -305,7 +330,8 @@ class OptionEngine:
             require_margin=False, historical=True, max_spread_pct=self.o.chain.max_spread_pct,
             min_oi_lots=self.o.chain.min_open_interest_lots, search_steps=self.o.backtest.strike_search_steps,
             no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None,
-            daily=daily)
+            daily=daily, index_daily=self.base.index_daily(d)[-400:] if daily else (),
+            closed_trades=closed_trades, market=self.market_at(d) if daily else {})
 
     # ---- fills ----
     def _leg_bars(self, sym: str, legs, d: date):
@@ -381,7 +407,8 @@ class OptionEngine:
             exit_time=t_exit.isoformat(), exit_net=float(exit_net), exit_reason=reason,
             gross_pnl=float(gross), costs=total.as_dict(), net_pnl=float(gross - total.total),
             price_source=self.prices.label, max_loss_inr=sig.details.get("max_loss_inr"),
-            iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now), exit_check=exit_check, exit_basis=basis)
+            iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
+            entry_conditions=dict(sig.details.get("entry_conditions") or {}), exit_check=exit_check, exit_basis=basis)
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -402,7 +429,7 @@ class OptionEngine:
         return out
 
     def _manage(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
-                skipped: Counter, exit_check: str = "daily", spot: float | None = None):
+                skipped: Counter, exit_check: str = "daily", spot: float | None = None, alerts: tuple = ()):
         """Position at the close of day d. Returns ('trade', OptionTrade) | ('drop',) | ('hold',)."""
         bars = self._leg_bars(sym, pos.legs, d)
         if bars is None:
@@ -440,6 +467,9 @@ class OptionEngine:
             elif (getattr(strategy, "threat_exit", False) and spot is not None
                   and (spot < pos.legs[0].strike if pos.legs[0].right == "PE" else spot > pos.legs[0].strike)):
                 pos.pending_exit, pos.pending_basis = "STRIKE_BREACHED", "rule at the close"
+            elif alerts and any(a in strategy.alert_exits for a in alerts[0 if pos.legs[0].right == "PE" else 1]):
+                kind = next(a for a in alerts[0 if pos.legs[0].right == "PE" else 1] if a in strategy.alert_exits)
+                pos.pending_exit, pos.pending_basis = "ALERT_" + kind, "alert at the close"
             elif (expiry - nxt).days <= exit_days:
                 pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
             return ("hold",)
@@ -502,8 +532,18 @@ class OptionEngine:
         start = 0
         needs_daily = getattr(strategy, "needs_daily", False)
 
+        alert_exits = getattr(strategy, "alert_exits", frozenset())
+        spike = self.s.stock_option_selling.profile.vix_spike_pct
+        prev_snap = None
+
         def recent(i: int) -> tuple:
-            return tuple(bars[max(start, i - 399):i + 1]) if needs_daily else ()
+            return tuple(bars[max(start, i - 1299):i + 1]) if needs_daily else ()
+
+        def closed() -> tuple:
+            if not needs_daily:
+                return ()
+            return tuple(ClosedTrade(datetime.fromisoformat(t.exit_time).astimezone(IST).date(), t.exit_reason == "STOP",
+                                     t.net_pnl) for t in trades)
 
         def scheduled(d: date, item) -> dict:
             row = {"underlying": sym, "variant": variant, "scheduled_day": d.isoformat(),
@@ -558,8 +598,15 @@ class OptionEngine:
             pending = []
             # ---- every open position at this close ----
             keep = []
+            alerts = ()
+            if alert_exits:
+                snap = self.snapshot_at(sym, recent(i), d)
+                if positions:
+                    alerts = tuple(tuple(a["kind"] for a in alert_kinds(prev_snap, snap, right, spike))
+                                   for right in ("PE", "CE"))
+                prev_snap = snap
             for pos in positions:
-                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close)
+                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts)
                 if r[0] == "trade":
                     trades.append(r[1])
                 elif r[0] == "hold":
@@ -572,7 +619,7 @@ class OptionEngine:
                 for item in schedule.get(d, ()):
                     attempted.add(d)
                     row = scheduled(d, item)
-                    ctx = self.context(strategy, sym, d, bar.close, variant, None, recent(i))
+                    ctx = self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed())
                     if item is not None:
                         ctx = replace(ctx, expiries=tuple(x for x in ctx.expiries if x.expiry == item[0])
                                       or (ExpiryInfo(item[0], item[1], self.lot_size(sym)),))
@@ -599,7 +646,7 @@ class OptionEngine:
                 if not got:
                     continue
                 trigger = got[0]
-            ctx = self.context(strategy, sym, d, bar.close, variant, trigger, recent(i))
+            ctx = self.context(strategy, sym, d, bar.close, variant, trigger, recent(i), closed())
             if not is_long:
                 if not strategy.entry_checks(ctx):
                     continue
@@ -669,7 +716,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
                         underlyings: list[str] | None = None, engine: OptionEngine | None = None,
                         save: bool = True, now: datetime | None = None,
                         exit_checks: tuple[str, ...] = ("daily",), first_session: date | None = None,
-                        coverage_note: str = "") -> dict:
+                        coverage_note: str = "", extra=None) -> dict:
     """`exit_checks`: how target and stop are checked while a spread is open. The first mode is the
     main result; the report also shows the strategy and its baseline under every other mode listed."""
     eng = engine or OptionEngine(settings, store, source, prices)
@@ -791,6 +838,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             "A trade is dropped if a leg or the underlying has no bar for a session while it is open (data_exclusions).",
         ] + ([coverage_note] if coverage_note else []),
     }
+    if extra is not None:                    # further tables computed on the same engine, sessions and stocks
+        rep.update(extra(eng, syms, dev, by_mode))
     run_id = f"{strategy.id}-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
     rep["run_id"], rep["created_utc"] = run_id, now.isoformat()
     all_trades = [asdict(t) for mode in exit_checks for part in by_mode[mode][:2] for t in part]

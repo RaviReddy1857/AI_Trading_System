@@ -35,8 +35,9 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
-from ..backtest import Engine, dev_holdout, load_calendar
+from ..backtest import Engine, dev_holdout, load_calendar, stats
 from ..config import Settings
+from ..config import StockOptionSelling as StockOptionSellingParams
 from ..history import bar_date
 from ..models import utcnow
 from ..quality import IST
@@ -75,6 +76,118 @@ def priority_stocks(settings: Settings, engine: OptionEngine) -> list[str]:
     hold = settings.backtest.holdout_start.get("1day")
     ranked = liquid_stocks(settings, engine, hold)
     return [r["stock"] for r in ranked[:settings.stock_option_selling.backtest.priority_stocks]]
+
+
+# ---------------- the effect of each rule and alert, against the baseline ----------------
+ALERT_SETS = {
+    "close beyond support / resistance": {"BELOW_SUPPORT", "ABOVE_RESISTANCE"},
+    "new 52-week low / high": {"NEW_52W_LOW", "NEW_52W_HIGH"},
+    "break of the 200-day average": {"BROKE_LONG_AVERAGE"},
+    "FII streak begins": {"FII_STREAK"},
+    "India VIX spike": {"VIX_SPIKE"},
+    "regime turns VOLATILE or EVENT": {"REGIME_TURN"},
+}
+
+
+def variant(settings: Settings, off: tuple[str, ...] = (), baseline_rules: tuple[str, ...] = (),
+            alert_exits=()) -> StockOptionSelling:
+    """The strategy with some rules switched off, or with rules and alert exits added to its baseline."""
+    raw = settings.stock_option_selling.model_dump()
+    for rule in off:
+        raw[rule]["enabled"] = False
+    st = StockOptionSelling(StockOptionSellingParams.model_validate(raw))
+    st.baseline_rules, st.alert_exits = frozenset(baseline_rules), frozenset(alert_exits)
+    return st
+
+
+def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict:
+    s = stats(trades, settings.account.capital_inr, settings.backtest.min_trades)
+    blocked = {k.split(":", 1)[1]: v for k, v in skipped.items()
+               if k.startswith("NO_SIGNAL:") and k.split(":", 1)[1] in ("DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT",
+                                                                         "INSUFFICIENT_HISTORY")}
+    return {"label": label, "trades": s["trades"], "win_rate_pct": s["win_rate_pct"], "net_pnl_inr": s["net_pnl_inr"],
+            "per_trade_inr": round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None,
+            "profit_factor": s["profit_factor"], "max_drawdown_inr": s["max_drawdown_inr"], "low_sample": s["low_sample"],
+            "blocked": blocked, "alert_exits": sum(1 for t in trades if t.exit_reason.startswith("ALERT_")),
+            "stops": sum(1 for t in trades if t.exit_reason == "STOP")}
+
+
+def _bucket(trades: list, key) -> dict:
+    groups: dict[str, list] = {}
+    for t in trades:
+        groups.setdefault(key(t.entry_conditions or {}), []).append(t)
+    return groups
+
+
+def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], by_mode: dict) -> dict:
+    """What each entry rule and each open-position alert does to the result, on the same stocks,
+    sessions, prices and exit check as the main result: the strategy with one rule removed, and the
+    no-filter baseline with one rule (or one alert used as an exit at the next open) added. Also the
+    baseline's trades split by what was known at entry."""
+    mode = next(iter(by_mode))
+    trades, base_trades, skipped, base_skipped, _ = by_mode[mode]
+
+    def run(st: StockOptionSelling, baseline: bool) -> tuple[list, Counter]:
+        out, sk = [], Counter()
+        for sym in syms:
+            for v in (baseline_variants(st) if baseline else ["strategy"]):
+                out += eng.run_stream(st, sym, dev, v, sk, exit_check=mode)
+        return out, sk
+
+    rows = [_row("strategy: all rules", trades, skipped, settings),
+            _row("strategy without the trend block", *run(variant(settings, off=("trend_block",)), False), settings),
+            _row("strategy without the campaign limit", *run(variant(settings, off=("campaign_limit",)), False), settings),
+            _row("baseline: no rules", base_trades, base_skipped, settings),
+            _row("baseline + trend block", *run(variant(settings, baseline_rules=("trend_block",)), True), settings),
+            _row("baseline + campaign limit", *run(variant(settings, baseline_rules=("campaign_limit",)), True), settings)]
+    for name, kinds in ALERT_SETS.items():
+        rows.append(_row(f"baseline + exit on alert: {name}", *run(variant(settings, alert_exits=kinds), True), settings))
+    every = set().union(*ALERT_SETS.values())
+    rows.append(_row("baseline + exit on any alert", *run(variant(settings, alert_exits=every), True), settings))
+
+    sos = settings.stock_option_selling
+
+    def breach_bucket(c: dict) -> str:
+        v = c.get("breach_history_pct")
+        return "unknown" if v is None else ("under 10%" if v < 10 else ("10-25%" if v <= 25 else "over 25%"))
+
+    splits = {
+        "stock state at entry": lambda c: c.get("state") or "unknown",
+        "past breach rate of a strike this far away": breach_bucket,
+        "IV rank at entry": lambda c: "unknown" if c.get("iv_rank") is None
+        else (f"at or above {sos.min_iv_rank:g}" if c["iv_rank"] >= sos.min_iv_rank else f"below {sos.min_iv_rank:g}"),
+        "FII bias at entry": lambda c: c.get("fii_bias") or "no data",
+        "India VIX on the entry signal day": lambda c: "unknown" if c.get("vix_change_pct") is None
+        else ("spike" if c["vix_change_pct"] >= sos.profile.vix_spike_pct else "no spike"),
+    }
+    by_cond = {}
+    for title, key in splits.items():
+        by_cond[title] = []
+        for name, ts in sorted(_bucket(base_trades, key).items()):
+            r = _row(name, ts, Counter(), settings)
+            r["closed_beyond_sold_strike_or_stopped_pct"] = round(
+                sum(1 for t in ts if t.exit_reason in ("STOP", "STRIKE_BREACHED")) / len(ts) * 100, 1)
+            by_cond[title].append(r)
+    return {"rule_effects": {"exit_check": mode, "rows": rows,
+                             "note": "Each row uses the same stocks, sessions, prices, costs and exit check. An alert "
+                                     "exit closes the spread at the next session's open after the alert."},
+            "baseline_by_entry_condition": by_cond}
+
+
+def print_effects(rep: dict) -> None:
+    fx = rep.get("rule_effects")
+    if not fx:
+        return
+    print(f"  effect of each rule and alert ({fx['exit_check']} exit check):")
+    for r in fx["rows"]:
+        print(f"    {r['label']:52s} trades {r['trades']:4d}  win {r['win_rate_pct']}%  net Rs {r['net_pnl_inr']:>12,.2f}  "
+              f"per trade Rs {r['per_trade_inr']}  PF {r['profit_factor']}"
+              + (f"  blocked {r['blocked']}" if r["blocked"] else "") + (f"  alert exits {r['alert_exits']}" if r["alert_exits"] else ""))
+    for title, rows in rep.get("baseline_by_entry_condition", {}).items():
+        print(f"  baseline by {title}:")
+        for r in rows:
+            print(f"    {r['label']:28s} trades {r['trades']:4d}  win {r['win_rate_pct']}%  per trade Rs {r['per_trade_inr']}  "
+                  f"stopped or strike passed {r['closed_beyond_sold_strike_or_stopped_pct']}%")
 
 
 def read_status(settings: Settings) -> dict:
@@ -123,8 +236,10 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
                 stopped = "request budget used"
                 break
             before, used = missing(), hist.fetcher.requests
-            for variant in ["strategy"] + baseline_variants(strategy):
-                engine.run_stream(strategy, sym, block, variant, Counter(), exit_check="intraday")
+            for st, names in ((strategy, ["strategy"] + baseline_variants(strategy)),
+                              (variant(settings, off=("trend_block", "campaign_limit")), ["strategy"])):
+                for name in names:                           # the rule-effect rows need no other contracts than these
+                    engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
             if missing() == before and hist.error is None:
                 done.setdefault(sym, set()).add(year)
                 newly += 1
@@ -257,8 +372,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nreport covers {len(covered)} stocks, {years[0]}..{years[-1]} (completely downloaded); "
               f"use --all-data for everything stored")
     res = run_option_backtest(settings, store, "breeze", strategy, hist, use_stocks, engine=eng,
-                              exit_checks=tuple(bt.exit_checks), first_session=first, coverage_note=note)
+                              exit_checks=tuple(bt.exit_checks), first_session=first, coverage_note=note,
+                              extra=lambda e, syms, d, by_mode: rule_effects(settings, e, syms, d, by_mode))
     print_report(res["report"], "breeze")
+    print_effects(res["report"])
     return 0
 
 

@@ -138,6 +138,12 @@ class OptionContext:
     baseline_right: str | None = None  # credit spread baseline: which side to sell (PE | CE)
     events: tuple = field(default_factory=tuple)   # manual_data.Event rows (results, board meetings, corporate actions)
     daily: tuple = field(default_factory=tuple)    # the underlying's daily bars up to asof (phase 9: trend, support, resistance)
+    index_daily: tuple = field(default_factory=tuple)   # the index's daily bars up to asof (phase 9: relative return)
+    # phase 9 campaign limit: this stock's closed positions, signals and manual ones alike, as
+    # stock_profile.ClosedTrade (exit date, stopped or not, net P&L)
+    closed_trades: tuple = field(default_factory=tuple)
+    # phase 9 entry conditions recorded on the signal: fii_bias, vix_change_pct (None = unknown)
+    market: dict = field(default_factory=dict)
 
     def __post_init__(self):
         # Margin and bid/ask are required for every live signal. Only a backtest context (historical:

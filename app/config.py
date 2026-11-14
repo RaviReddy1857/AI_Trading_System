@@ -503,6 +503,46 @@ class StockSellingBacktest(StrictModel):
         return self
 
 
+class TrendBlock(StrictModel):
+    """Falling-stock block (DOWNTREND_BLOCK): no put selling in a stock that is below its long
+    average, made a 52-week low recently, or trails NIFTY badly. Mirrored for call selling in a
+    strong uptrend."""
+    enabled: bool = True
+    long_sma_days: int = Field(200, ge=20, le=400)
+    extreme_lookback_sessions: int = Field(252, ge=60, le=400)     # "52-week" low / high
+    extreme_recent_sessions: int = Field(20, ge=1, le=120)         # ... made within this many sessions
+    relative_return_sessions: int = Field(63, ge=10, le=260)       # about 3 months
+    max_underperformance_pct: float = Field(10.0, gt=0, le=100)    # stock return minus NIFTY return, in points
+
+
+class CampaignLimit(StrictModel):
+    """Per-stock campaign limit (STOCK_LOSS_LIMIT): after repeated stops or a large loss in one stock,
+    no new signal in that stock for a cooling-off period. Closed manual positions count too."""
+    enabled: bool = True
+    window_days: int = Field(90, ge=7, le=730)
+    max_stopped_trades: int = Field(2, ge=1, le=20)
+    max_cumulative_loss_pct: float = Field(5.0, gt=0, le=100)      # net loss in the window, % of capital
+    cooling_off_days: int = Field(45, ge=1, le=365)
+
+
+class StockProfile(StrictModel):
+    """Range and speed profile, scenario history and the levels the open-position alerts use."""
+    windows_years: list[int] = [2, 5]
+    swing_pct: float = Field(8.0, gt=0, le=50)                     # a swing is a move of at least this % (zigzag)
+    state_lookback_sessions: int = Field(20, ge=5, le=120)
+    trending_efficiency: float = Field(0.30, gt=0, lt=1)           # net move / path length at or above this = trending
+    holding_sessions: int = Field(20, ge=1, le=120)                # a spread is held about this long
+    scenario_horizon_days: int = Field(30, ge=1, le=180)           # calendar days
+    scenario_min_cases: int = Field(10, ge=1, le=1000)             # fewer cases: LOW SAMPLE
+    vix_spike_pct: float = Field(15.0, gt=0, le=200)               # India VIX close up this % in one session
+
+    @model_validator(mode="after")
+    def windows(self) -> "StockProfile":
+        if not self.windows_years or any(not (1 <= y <= 20) for y in self.windows_years):
+            raise ValueError("stock_option_selling.profile.windows_years must list years between 1 and 20")
+        return self
+
+
 class StockOptionSelling(StrictModel):
     """Phase 9: monthly hedged credit spreads on F&O stocks (bull put in an up trend, bear call in a down
     trend). Every sold option is paired with a bought option of the same expiry. Stock options settle
@@ -525,6 +565,9 @@ class StockOptionSelling(StrictModel):
     support_resistance_lookback_days: int = Field(20, ge=5, le=250)   # support = lowest low, resistance = highest high
     shortlist_size: int = Field(10, ge=1, le=100)
     weights: ShortlistWeights = ShortlistWeights()
+    trend_block: TrendBlock = TrendBlock()
+    campaign_limit: CampaignLimit = CampaignLimit()
+    profile: StockProfile = StockProfile()
     backtest: StockSellingBacktest = StockSellingBacktest()
 
     @model_validator(mode="after")

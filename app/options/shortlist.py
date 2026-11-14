@@ -37,6 +37,7 @@ from .chain import stored_quotes, wanted_specs
 from .greeks import days_to_expiry, years_to_expiry
 from .instruments import InstrumentBook
 from .margin import MarginBook
+from .stock_profile import HISTORY_LABEL, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
 from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling
 
 log = logging.getLogger("shortlist")
@@ -89,6 +90,86 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         require_margin=True, historical=False, max_spread_pct=sos.max_bid_ask_spread_pct,
         min_oi_lots=sos.min_open_interest, search_steps=o.backtest.strike_search_steps, events=events,
         daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct))), None
+
+
+# What to fill in when a scenario has no input data. Nothing is ever invented for a missing file.
+DATA_NEEDED = {
+    "after an FII selling streak": (
+        "no data: data/fii_dii.csv has no rows. Fill it with one row per session: date,fii_net_cr,dii_net_cr "
+        "(FII/FPI and DII net cash-market figures in Rs crore, selling negative)"),
+    "after an RBI rate decision": (
+        "no data: data/events.csv has no RBI_POLICY rows. Add one row per past decision day: "
+        "date,type,note,symbol with type RBI_POLICY and symbol left blank"),
+    "after its own results": (
+        "no data: data/events.csv has no RESULTS rows for this stock. Add one row per past results day: "
+        "date,type,note,symbol with type RESULTS and the stock's symbol"),
+}
+
+
+def scenario_triggers(settings: Settings, store: Store, source: str, sym: str, floor: date, session: date) -> dict:
+    """Trigger dates of each scenario from the stored data files, or None (with what to fill in)
+    when a file has nothing for it. Dates are only read, never made up."""
+    p = settings.stock_option_selling.profile
+    sessions = [bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source)]
+    fii = [(r["date"], r["fii_net_cr"]) for r in store.fii_dii_all()]
+    events = store.events_between(floor, session)
+    rbi = [e["date"] for e in events if e["type"] == "RBI_POLICY"]
+    results = [e["date"] for e in events if e["type"] == "RESULTS" and e["symbol"] == sym]
+    vix = [b for b in store.history_bars("bars_1d", settings.options.iv_reference_symbol, source) if bar_date(b) >= floor]
+    return {
+        "after an FII selling streak": {
+            "dates": fii_streak_starts(fii, settings.bias.streak_days, True, sessions) if fii else None,
+            "missing": DATA_NEEDED["after an FII selling streak"]},
+        f"after an India VIX spike ({p.vix_spike_pct:g}% in a session)": {
+            "dates": vix_spike_dates(vix, p.vix_spike_pct, floor) if len(vix) > 1 else None,
+            "missing": "no data: no India VIX daily history stored (run python -m app.history)"},
+        "after an RBI rate decision": {"dates": rbi or None, "missing": DATA_NEEDED["after an RBI rate decision"]},
+        "after its own results": {"dates": results or None, "missing": DATA_NEEDED["after its own results"]},
+    }
+
+
+def stock_view(settings: Settings, store: Store, source: str, sym: str, now: datetime | None = None) -> dict:
+    """Range and speed profile and scenario history of one stock, from stored daily bars on or after
+    backtest.test_start (2019-01-22) and after its last unadjusted price break, up to the newest
+    stored session. With a fresh option chain it also shows the move implied by option prices and,
+    when the rules reach a sold strike, how often a strike that far away was passed before."""
+    now = now or utcnow()
+    sos = settings.stock_option_selling
+    floor = settings.backtest.test_start.get("1day")
+    session = session_date(settings, store, source)
+    stored = store.history_bars("bars_1d", sym, source)
+    bars = after_last_break(stored, settings.history.max_overnight_gap_pct)
+    cut = len(bars) < len(stored)
+    bars = [b for b in bars if floor is None or bar_date(b) >= floor]
+    out = {"stock": sym, "label": HISTORY_LABEL, "session_date": session.isoformat() if session else None,
+           "profile": None, "scenarios": [], "setup": None, "notes": []}
+    if not bars or session is None:
+        out["notes"].append("no daily bars stored for this stock (run python -m app.history)")
+        return out
+    if cut and (floor is None or bar_date(bars[0]) > floor):
+        out["notes"].append(f"history starts {bar_date(bars[0]):%d-%b-%Y}: an unadjusted price break (split, bonus or "
+                            f"demerger) before it makes older prices unusable, so the windows are shorter than asked")
+    right = distance = iv = None
+    try:
+        costs = CostModel(settings.costs)
+        costs.require("options")
+        book = InstrumentBook(store, source)
+        desk = OptionDesk(settings, store, source, lambda s: None, lambda: "UNKNOWN", lambda: now)
+        margins = MarginBook.from_store(store, settings.options.margin.max_age_days)
+        ctx, why = stock_context(settings, store, source, book, desk, costs, margins, sym, session, now)
+    except Exception as e:      # noqa: BLE001 - missing cost rates and the like: the history is still shown
+        ctx, why = None, f"{type(e).__name__}: {e}"
+    if ctx is None:
+        out["notes"].append(f"no option-price figures: {why}")
+    else:
+        a = build_stock_selling(settings).assess(ctx)
+        right, distance, iv = a.side, a.distance_pct, ctx.iv_reference_pct
+        out["setup"] = {"status": a.status, "side": a.side, "expiry": a.expiry.isoformat() if a.expiry else None,
+                        "short_strike": a.short_strike, "distance_pct": a.distance_pct, "reasons": a.reasons}
+    out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv)
+    out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
+                                                                bar_date(bars[-1])), sos.profile, floor)
+    return out
 
 
 def run_shortlist(settings: Settings, store: Store, source: str, now: datetime | None = None,

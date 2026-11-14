@@ -178,8 +178,16 @@ function optionBlock(rep){
  <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
  <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead>
  <tbody>${row('strategy',rep.overall,'')}${row('baseline (all)',b.overall,'')}${variants}${unders}</tbody></table>
- ${bothWays(rep)}
+ ${bothWays(rep)}${effects(rep)}
  <div class="mute">Baseline skipped: ${esc(JSON.stringify(b.skipped_signals))}; dropped for missing data: ${esc(JSON.stringify(b.data_exclusions))}. Strategy dropped for missing data: ${esc(JSON.stringify(rep.data_exclusions))}.${rep.download&&rep.download.contracts_wanted_but_not_stored?` <b class="down">INCOMPLETE: ${rep.download.contracts_wanted_but_not_stored} option contracts were wanted but are not stored (run with --download).</b>`:''}</div>`;
+}
+function effects(rep){
+ const fx=rep.rule_effects; if(!fx) return '';
+ const tr=r=>`<tr><td>${esc(r.label)}</td><td>${r.trades}</td><td>${fmt(r.win_rate_pct,1)}</td><td class="${r.net_pnl_inr>0?'up':(r.net_pnl_inr<0?'down':'')}">${fmt(r.net_pnl_inr)}</td><td>${fmt(r.per_trade_inr)}</td><td>${fmt(r.profit_factor)}</td><td>${fmt(r.max_drawdown_inr)}</td><td>${esc(Object.keys(r.blocked||{}).length?JSON.stringify(r.blocked):'-')}</td><td>${r.alert_exits||'-'}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`;
+ const cond=Object.entries(rep.baseline_by_entry_condition||{}).map(([k,rows])=>`<h3>Baseline by ${esc(k)}</h3><table><thead><tr><th></th><th>Trades</th><th>Win %</th><th>Net</th><th>Per trade</th><th>PF</th><th>Stopped or strike passed %</th><th>Sample</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.label)}</td><td>${r.trades}</td><td>${fmt(r.win_rate_pct,1)}</td><td>${fmt(r.net_pnl_inr)}</td><td>${fmt(r.per_trade_inr)}</td><td>${fmt(r.profit_factor)}</td><td>${fmt(r.closed_beyond_sold_strike_or_stopped_pct,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}</tbody></table>`).join('');
+ return `<h2 style="margin-top:12px">Effect of each rule and alert (${esc(fx.exit_check)} exit check)</h2>
+ <table><thead><tr><th></th><th>Trades</th><th>Win %</th><th>Net</th><th>Per trade</th><th>PF</th><th>Max DD</th><th>Signals blocked</th><th>Alert exits</th><th>Sample</th></tr></thead><tbody>${fx.rows.map(tr).join('')}</tbody></table>
+ <div class="mute">${esc(fx.note)}</div>${cond}`;
 }
 function bothWays(rep){
  const x=rep.exit_check_comparison; if(!x||Object.keys(x).length<2) return rep.exit_check_label?`<div class="mute">Exits: ${esc(rep.exit_check_label)}.</div>`:'';
@@ -338,6 +346,9 @@ SHORTLIST_HTML = """<!doctype html>
  <div class="card"><h2>Shortlist</h2><div class="mute" id="asof"></div>
   <table><thead><tr><th>Rank</th><th>Stock</th><th>Side</th><th>Expiry</th><th>Score</th><th>IV rank</th><th>Trend</th><th>Distance</th><th>Liquidity</th><th style="text-align:left">Why</th></tr></thead><tbody id="top"></tbody></table>
   <div class="mute" id="note" style="margin-top:8px"></div></div>
+ <div class="card"><h2>Stock profile and scenario history <span class="tag warn">history, not a forecast</span></h2>
+  <select id="psym"></select> <span class="mute">daily bars from 2019-01-22 only</span>
+  <div id="prof" class="mute" style="margin-top:8px">Pick a stock.</div></div>
  <div class="card"><h2>Not on the list today, and why</h2>
   <table><thead><tr><th>Stock</th><th>Side</th><th>Expiry</th><th style="text-align:left">Reason</th></tr></thead><tbody id="rest"></tbody></table></div>
 </main>
@@ -345,12 +356,26 @@ SHORTLIST_HTML = """<!doctype html>
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const f=x=>x==null?"-":Number(x).toFixed(2);
 const side=s=>s==="PE"?"bull put":(s==="CE"?"bear call":"-");
+const n=(x,u="")=>x==null?"-":(Number(x).toFixed(1)+u);
+async function profile(sym){
+ const el=document.getElementById("prof"); el.textContent="Loading...";
+ const r=await (await fetch("/api/stock-option-selling/profile/"+encodeURIComponent(sym))).json(); const p=r.profile;
+ if(!p){el.innerHTML=r.notes.map(esc).join("<br>");return}
+ const w=Object.values(p.windows).map(x=>`<tr><td>last ${x.years} years (${x.bars} sessions from ${esc(x.from)})</td><td>${n(x.monthly_range_median_pct,"%")}</td><td>${n(x.monthly_range_p80_pct,"%")}</td><td>${n(x.avg_sessions_low_to_high)} (${x.upswings})</td><td>${n(x.avg_sessions_high_to_low)} (${x.downswings})</td><td>${n(x.typical_move_pct,"%")}</td><td>${n(x.move_p80_pct,"%")}</td><td>${x.breach?`${n(x.breach.breached_pct,"%")} of ${x.breach.cases} (strike ${n(x.breach.distance_pct,"%")} away)`:"-"}</td></tr>`).join("");
+ const sc=r.scenarios.map(x=>`<tr><td>${esc(x.scenario)}</td><td>${x.cases}</td><td class="${x.status==="ok"?"":"warn"}">${esc(x.status)}</td><td>${n(x.median_pct,"%")}</td><td>${n(x.p10_pct,"%")}</td><td>${n(x.p90_pct,"%")}</td><td>${n(x.worst_pct,"%")}</td><td>${n(x.down_pct_of_cases,"%")}</td><td style="text-align:left;white-space:normal">${esc(x.note)}</td></tr>`).join("");
+ el.innerHTML=`<div class="kv"><span>State now: <b>${esc(p.state_now||"unknown")}</b></span><span>Move implied by option prices over ${Object.values(p.windows)[0].holding_sessions} sessions: <b>${n(p.implied_move_pct,"%")}</b></span><span>As of ${esc(p.as_of)}</span></div>
+ <div class="mute">${esc(p.state_note)}. ${esc(p.implied_move_note)}.${r.setup?` Rules today: ${esc(r.setup.status)}${r.setup.short_strike?`, sold strike ${r.setup.short_strike} (${n(r.setup.distance_pct,"%")} away)`:""}.`:""} ${r.notes.map(esc).join(" ")}</div>
+ <table style="margin-top:8px"><thead><tr><th>Window</th><th>Monthly high-low range (median)</th><th>80th pct</th><th>Sessions swing low to high (count)</th><th>Sessions high to low (count)</th><th>Typical move over the holding period</th><th>80th pct</th><th>Strike passed within the holding period</th></tr></thead><tbody>${w}</tbody></table>
+ <h3>30-day moves after past events: history, not a forecast</h3>
+ <table><thead><tr><th>Scenario</th><th>Cases</th><th>Sample</th><th>Median</th><th>10th pct</th><th>90th pct</th><th>Worst</th><th>Share of cases down</th><th style="text-align:left">Note</th></tr></thead><tbody>${sc}</tbody></table>`;
+}
 (async()=>{
  const r=await (await fetch("/api/stock-option-selling/shortlist")).json();
  document.getElementById("label").textContent=r.label+(r.alerts?"":" - no alerts");
  document.getElementById("asof").textContent=r.session_date?`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`:"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
  document.getElementById("note").textContent=r.note+" Weights: "+JSON.stringify(r.weights)+".";
  const top=r.rows.filter(x=>x.status==="SHORTLISTED"), rest=r.rows.filter(x=>x.status!=="SHORTLISTED");
+ const ps=document.getElementById("psym"); ps.innerHTML='<option value="">-</option>'+(r.stocks||[]).map(s=>`<option>${esc(s)}</option>`).join(""); ps.onchange=()=>ps.value&&profile(ps.value);
  document.getElementById("top").innerHTML=top.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry)}</td><td>${f(x.score)}</td><td>${f(x.scores.iv_rank)}</td><td>${f(x.scores.trend_clarity)}</td><td>${f(x.scores.distance)}</td><td>${f(x.scores.liquidity)}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="10" class="mute">no stock passes every rule today</td></tr>';
  document.getElementById("rest").innerHTML=rest.map(x=>`<tr><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry||"-")}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="4" class="mute">-</td></tr>';
 })();

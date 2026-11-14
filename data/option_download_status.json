@@ -1,0 +1,51 @@
+{
+  "complete": {
+    "HDFCBANK": [
+      2026
+    ]
+  },
+  "runs": [
+    {
+      "at": "2026-11-14T01:13:06+00:00",
+      "index_requests": 12,
+      "index_contracts_still_missing": 0,
+      "stopped": "request budget used",
+      "stock_years_completed_this_run": 1,
+      "requests_this_run": 150,
+      "requests_used_today": 150
+    }
+  ],
+  "updated": "2026-11-14T01:13:06+00:00",
+  "stocks": [
+    "HDFCBANK",
+    "RELIANCE",
+    "ICICIBANK",
+    "SBIN",
+    "BHARTIARTL",
+    "INFY",
+    "BSE",
+    "LT",
+    "M&M",
+    "ETERNAL",
+    "TCS",
+    "AXISBANK",
+    "BAJFINANCE",
+    "KOTAKBANK",
+    "INDIGO",
+    "SHRIRAMFIN",
+    "MARUTI",
+    "BEL",
+    "TATASTEEL",
+    "ITC",
+    "SUNPHARMA",
+    "HINDALCO",
+    "COALINDIA",
+    "ADANIENT",
+    "ONGC",
+    "HCLTECH",
+    "ADANIPORTS",
+    "NTPC",
+    "TITAN",
+    "ULTRACEMCO"
+  ]
+}

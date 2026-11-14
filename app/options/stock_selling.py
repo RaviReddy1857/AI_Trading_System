@@ -19,6 +19,12 @@ Entry rules (StockOptionSelling.assess; every number is computed here, none by a
 - both strikes pass the liquidity filters (open interest in lots; live also the bid-ask width).
 - the credit must be worth more than the round-trip costs (max profit above zero).
 - margin for the spread must be known for a live signal (MARGIN_UNKNOWN otherwise).
+- falling-stock block (`trend_block`): no put selling when the stock is below its 200-day average, made
+  a 52-week low in the last 20 sessions, or trails NIFTY over 3 months by more than the set margin
+  (DOWNTREND_BLOCK); mirrored for call selling in a strong uptrend (UPTREND_BLOCK).
+- per-stock campaign limit (`campaign_limit`): after 2 stopped trades or a set net loss in one stock
+  within 90 days, no new signal in it for the cooling-off period (STOCK_LOSS_LIMIT). The context's
+  `closed_trades` carries signals and manual positions alike.
 
 Support = the lowest low and resistance = the highest high of the last
 `support_resistance_lookback_days` sessions (today included).
@@ -42,12 +48,15 @@ from datetime import date
 from ..config import StockOptionSelling as StockOptionSellingParams
 from ..indicators import atr, last, sma
 from ..models import Signal
+from ..quality import IST
 from ..strategies.base import fmt, ok
 from .base import (ExpiryInfo, OptionContext, OptionQuote, leg_view, liquidity_problem, metrics, pick_short_strike,
                    round_trip_costs)
 from .credit_spread import SIDE_NAME, CreditSpread
 from .margin import MARGIN_UNKNOWN
 from .payoff import InvalidStructure, OptionLeg, credit_spread
+from .stock_profile import (STOCK_LOSS_LIMIT, Snapshot, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+                            trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
 EXCLUDING_EVENTS = ("RESULTS", "BOARD_MEETING", "CORPORATE_ACTION")
@@ -121,6 +130,8 @@ class Assessment:
     scores: dict = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     signal: Signal | None = None
+    short_strike: float | None = None   # the sold strike the rules chose, if they got that far
+    distance_pct: float | None = None   # its distance from the price, % of the price
 
 
 class StockOptionSelling(CreditSpread):
@@ -132,6 +143,13 @@ class StockOptionSelling(CreditSpread):
     expiry_kinds = ("monthly",)
     needs_daily = True                   # the context must carry the stock's daily bars
     params: StockOptionSellingParams
+    # Backtest comparisons only: entry rules ("trend_block", "campaign_limit") that the no-filter
+    # baseline should apply as well, and alert kinds on which an open spread is closed at the next open.
+    baseline_rules: frozenset = frozenset()
+    alert_exits: frozenset = frozenset()
+
+    def applies(self, rule: str, ctx: OptionContext) -> bool:
+        return getattr(self.params, rule).enabled and (not ctx.no_filter or rule in self.baseline_rules)
 
     @property
     def threat_exit(self) -> bool:
@@ -244,11 +262,21 @@ class StockOptionSelling(CreditSpread):
             self.no("NO_SIDE", "baseline needs a side")
             return stop()
         out.side = right
+        today = ctx.asof.astimezone(IST).date()
+        if self.applies("trend_block", ctx):
+            code, why_block = trend_block(ctx.daily, ctx.index_daily, right, p.trend_block)
+            if code:
+                self.no(code, "; ".join(why_block))
+                return stop()
+        if self.applies("campaign_limit", ctx):
+            limit = stock_loss_limit(ctx.closed_trades, today, p.campaign_limit, ctx.capital_inr)
+            if limit:
+                self.no(STOCK_LOSS_LIMIT, limit[1])
+                return stop()
         exp = self.pick(ctx)
         if exp is None:
             return stop()
         out.expiry = exp.expiry
-        today = ctx.asof.date()
         if not ctx.no_filter:
             ev = events_before_expiry(ctx.events, ctx.underlying, today, exp.expiry)
             if ev:
@@ -275,6 +303,7 @@ class StockOptionSelling(CreditSpread):
             self.no("NO_STRIKE", f"beyond {level_name} {fmt(level)}: {got[1]}")
             return stop()
         ks, qs, iv_s, d_s, notes = got
+        out.short_strike, out.distance_pct = ks, round(abs(ctx.spot - ks) / ctx.spot * 100, 2)
         lp = liquidity_problem(lctx, qs, exp.lot_size)
         if lp:
             self.no("ILLIQUID", lp)
@@ -305,8 +334,17 @@ class StockOptionSelling(CreditSpread):
                 out.reasons.append(setup)
             return stop()
         s = sig[0]
+        distance = abs(ctx.spot - ks) / ctx.spot * 100
+        floor_closes = closes[-504:]                         # about two years, all on or before today
         s.details.update({"side": right, "trend": direction, "support": support, "resistance": resistance,
                           "hedge_strikes_out": n_out,
+                          "entry_conditions": {
+                              "state": state_now(closes, p.profile.state_lookback_sessions, p.profile.trending_efficiency)[0],
+                              "short_strike_distance_pct": round(distance, 2),
+                              "breach_history_pct": breach_frequency(floor_closes, distance, right,
+                                                                     p.profile.holding_sessions)["breached_pct"],
+                              "iv_rank": ctx.iv_rank, "fii_bias": ctx.market.get("fii_bias"),
+                              "vix_change_pct": ctx.market.get("vix_change_pct")},
                           "warnings": ["Stock options settle physically: close before expiry week."]})
         out.signal, out.status = s, "CANDIDATE"
         out.reasons.append(setup)
@@ -447,6 +485,23 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
                    "new_max_loss_inr": d["max_loss_inr"], "new_breakevens": d["breakevens"],
                    "margin_inr": d["margin_inr"]}
     return out
+
+
+def position_alerts(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPosition, close_cost: float | None,
+                    prev: Snapshot | None, now: Snapshot | None) -> list[dict]:
+    """Alerts for an open spread: what changed since the previous close (stock_profile.alert_kinds),
+    each with the exit and roll choices in numbers. With no usable price for the legs the choices
+    say so instead of showing numbers. Phase 6 sends these (Telegram) and repeats them."""
+    changes = alert_kinds(prev, now, pos.right, strategy.params.profile.vix_spike_pct)
+    if not changes:
+        return []
+    if close_cost is None:
+        choices = {"exit": None, "roll": None, "roll_note": "no usable price for one of the legs: "
+                                                            "exit and roll cannot be priced"}
+    else:
+        choices = roll_choices(strategy, ctx, pos, close_cost)
+    return [{**c, "underlying": pos.underlying, "position": f"{SIDE_NAME[pos.right]} {pos.short_strike:g}/"
+             f"{pos.long_strike:g} {pos.expiry:%d-%b-%Y}", **choices} for c in changes]
 
 
 def build_stock_selling(settings) -> StockOptionSelling:

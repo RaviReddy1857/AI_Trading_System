@@ -345,6 +345,28 @@ stock_option_selling:
   support_resistance_lookback_days: 20   # support = lowest low, resistance = highest high of these sessions
   shortlist_size: 10
   weights: {iv_rank: 0.35, trend_clarity: 0.25, distance: 0.20, liquidity: 0.20}
+  trend_block:                  # DOWNTREND_BLOCK: no put selling in a falling stock (mirrored for calls in a strong uptrend)
+    enabled: true
+    long_sma_days: 200          # blocked below (puts) / above (calls) this average
+    extreme_lookback_sessions: 252   # 52-week low (puts) / high (calls) ...
+    extreme_recent_sessions: 20      # ... made in the last 20 sessions
+    relative_return_sessions: 63     # 3-month return against NIFTY
+    max_underperformance_pct: 10     # blocked when it trails (puts) / leads (calls) NIFTY by more than this
+  campaign_limit:               # STOCK_LOSS_LIMIT: per stock, closed manual positions included
+    enabled: true
+    window_days: 90
+    max_stopped_trades: 2       # this many stopped trades in the window ...
+    max_cumulative_loss_pct: 5  # ... or a net loss of this % of capital in the window (ASSUMPTION, yours to set)
+    cooling_off_days: 45        # no new signal in that stock for this long (ASSUMPTION, yours to set)
+  profile:                      # range and speed profile, scenario history, alert levels (data from 2019-01-22 only)
+    windows_years: [2, 5]
+    swing_pct: 8                # a swing low/high needs a move of at least 8%
+    state_lookback_sessions: 20
+    trending_efficiency: 0.30   # net move / distance travelled over the lookback; below = ranging
+    holding_sessions: 20        # breach history: a strike this far away, held this many sessions
+    scenario_horizon_days: 30
+    scenario_min_cases: 10      # fewer past cases are marked LOW SAMPLE
+    vix_spike_pct: 15           # India VIX up 15% in a session
   backtest:
     priority_stocks: 30         # the 30 most liquid watchlist F&O stocks (median daily traded value) are downloaded and tested
     liquidity_lookback_days: 60

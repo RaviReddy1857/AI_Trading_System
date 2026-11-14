@@ -48,12 +48,20 @@ def weekdays_back(end: date, n: int) -> list[date]:
     return out[::-1]
 
 
-def stock_bars(sym="RELIANCE", n=120, start=1000.0, drift=1.0, end=date(2026, 11, 13), wobble=6.0, volume=1e6):
+def stock_bars(sym="RELIANCE", n=320, start=1000.0, drift=1.0, end=date(2026, 11, 13), wobble=6.0, volume=1e6):
+    """`n` daily bars ending on `end`. The price is `start` 120 sessions before the end and moves
+    `drift` a session, with a small wave."""
     bars = []
     for i, d in enumerate(weekdays_back(end, n)):
-        px = start + drift * i + wobble * math.sin(i / 3)
+        j = i - (n - 120)
+        px = start + drift * j + wobble * math.sin(j / 3)
         bars.append(Bar(sym, daily_start(d), px - 2, px + 8, px - 8, px, volume))
     return bars
+
+
+def index_bars(bars, level=24000.0, drift=0.0):
+    return tuple(Bar("NIFTY", b.start, level + drift * i, level + drift * i + 50, level + drift * i - 50,
+                     level + drift * i, None) for i, b in enumerate(bars))
 
 
 def chain(spot, expiry=EXP, iv=0.25, lo=800, hi=1500, step=10, oi_lots=500, lot=LOT, asof=NOW, oi=None, wide=()):
@@ -80,7 +88,7 @@ def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events
         quotes=ChainQuotes(spot, chains), costs=CostModel(s.costs), capital_inr=s.account.capital_inr, rate=RATE,
         iv_reference_pct=iv * 100, iv_rank=iv_rank, margin=lambda structure, width: margin, require_margin=True,
         historical=False, max_spread_pct=sos.max_bid_ask_spread_pct, min_oi_lots=sos.min_open_interest,
-        events=tuple(events), daily=tuple(bars))
+        events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars))
     base.update(over)
     return OptionContext(**base)
 
@@ -105,7 +113,7 @@ def test_trend_and_support_resistance_by_hand():
     assert trend_of(up, 20, 50, 14)[0] == "UP" and trend_of(down, 20, 50, 14)[0] == "DOWN"
     flat = stock_bars(drift=0.0, wobble=0.0)
     assert trend_of(flat, 20, 50, 14)[0] is None                  # close equals both averages: no clear trend
-    assert trend_of(up[:30], 20, 50, 14) [0] is None               # not enough history is unknown, not a trend
+    assert trend_of(up[:30], 20, 50, 14)[0] is None                # not enough history is unknown, not a trend
     lows, highs = [b.low for b in up[-20:]], [b.high for b in up[-20:]]
     assert support_resistance(up, 20) == (min(lows), max(highs))
     assert support_resistance(up[:10], 20) == (None, None)
@@ -623,7 +631,8 @@ def weekdays(a, b):
     return out
 
 
-def stock_world(materialise=True):
+def stock_world(materialise=True, shocks=None):
+    """`shocks`: {date: rupees} - the stock's price level shifts by that much from that session on."""
     cfg = settings(backtest={"test_start": {"1day": date(2025, 6, 2)}, "holdout_start": {"1day": date(2025, 10, 1)}},
                    options={"iv_rank_min_history_days": 20, "iv_rank_lookback_days": 60})
     store = Store(":memory:")
@@ -633,7 +642,7 @@ def stock_world(materialise=True):
         bars.append(Bar("NIFTY", daily_start(d), px - 10, px + 45, px - 45, px, None))
         v = 24 + i * 0.01
         bars.append(Bar("INDIAVIX", daily_start(d), v, v + 0.2, v - 0.2, v, None))
-        sp = 1000 + 0.5 * i + 8 * math.sin(i / 4)
+        sp = 1000 + 0.5 * i + 8 * math.sin(i / 4) + sum(v for k, v in (shocks or {}).items() if d >= k)
         bars.append(Bar("RELIANCE", daily_start(d), sp - 1, sp + 6, sp - 6, sp, 2e6))
     store.save_history_bars("bars_1d", bars, "sim")
     base = Engine(cfg, store, "sim", MarketCalendar(), regime=FixedRegime("RANGE"))
