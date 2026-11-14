@@ -1367,3 +1367,24 @@ def test_ACCEPTANCE_a_position_open_at_the_cutoff_is_reported_open_not_as_a_clos
     from app.options.backtest import OptionEngine
     from app.options import build_option_strategies
     assert OptionEngine._cutoff_reason(build_option_strategies(settings(), ["credit_spread"])[0]) == "PERIOD_END"
+
+
+
+# ---------------- monthly candidates and trades ----------------
+def test_ACCEPTANCE_monthly_candidates_after_blocks_and_trades_taken_are_reported(world):
+    from app.options.stock_backtest import monthly_candidates
+    cfg, store, base, _ = world
+    res = run_bt(world, exit_checks=("daily",))
+    eng = engine_for(cfg, store, base, OptionHistory(store, "sim"))
+    eng.set_expiry_floor(BT_FIRST)
+    dev = [d for d in base.session_dates() if date(2025, 6, 2) <= d < date(2025, 10, 1)]
+    eng.last_session = dev[-1]
+    from app.options.backtest import OptionTrade
+    trades = [OptionTrade(**t) for t in res["trades"] if t["exit_check"] == "daily"]
+    out = monthly_candidates(cfg, eng, ["RELIANCE"], dev, trades)["monthly_candidates"]
+    assert [r["month"] for r in out["months"]] == ["2025-06", "2025-07", "2025-08", "2025-09"]
+    assert out["total_trades_taken"] == sum(1 for t in trades if t.variant == "strategy" and t.roll_no == 0)
+    assert out["total_candidates"] == sum(r["candidates"] for r in out["months"]) >= out["total_trades_taken"] >= 1
+    assert all(r["shortage"] == (r["candidates"] < 3 or r["trades_taken"] < 3) for r in out["months"])
+    assert "never a tuning target" in out["expectation"] and out["months_short"] >= 1
+    assert any("campaign limit" in x for x in out["not_in_candidate_count"])

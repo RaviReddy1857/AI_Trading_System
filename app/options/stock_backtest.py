@@ -361,6 +361,48 @@ def incomplete_sensitivity(settings: Settings, eng: OptionEngine, syms: list[str
     return {"data_incomplete_summary": out}
 
 
+EXPECTED_PER_MONTH = (3, 8)        # a reporting expectation (section 8.8), never a tuning target
+
+
+def monthly_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date], trades: list) -> dict:
+    """Per month: the candidates that passed every block and the trades taken (section 8.8). A
+    candidate is a setup (stock, expiry, side) that passed every entry block on some day of the month,
+    counted once, in the month it first passed; every stock is scanned every day, whether or not a
+    position is open. The per-stock campaign limit and the portfolio limits depend on positions and
+    results, so they are not part of the candidate count; the trades taken are the main result's
+    (all blocks, the portfolio limits included). Months with fewer candidates or trades than 3 are
+    reported as a shortage; no rule is loosened for it."""
+    scan = variant(settings, off=("campaign_limit",))
+    allowed = set(dev)
+    first_seen: dict[tuple, str] = {}
+    for sym in syms:
+        bars = eng.base.daily(sym)
+        brk = set(eng.base.breaks(sym))
+        start = 0
+        for i, bar in enumerate(bars):
+            if i in brk:
+                start = i
+            d = bar_date(bar)
+            if d not in allowed:
+                continue
+            ctx = eng.context(scan, sym, d, bar.close, "strategy", None, tuple(bars[max(start, i - 1299):i + 1]), ())
+            for sig in scan.evaluate(ctx):
+                first_seen.setdefault((sym, sig.details["expiry"], sig.details["side"]), d.strftime("%Y-%m"))
+    months = sorted({d.strftime("%Y-%m") for d in dev})
+    taken = Counter(datetime.fromisoformat(t.entry_time).astimezone(IST).strftime("%Y-%m") for t in trades
+                    if t.variant == "strategy" and t.roll_no == 0)
+    cands = Counter(first_seen.values())
+    stocks = {m: sorted({k[0] for k, v in first_seen.items() if v == m}) for m in months}
+    lo, hi = EXPECTED_PER_MONTH
+    rows = [{"month": m, "candidates": cands.get(m, 0), "stocks": stocks[m], "trades_taken": taken.get(m, 0),
+             "shortage": cands.get(m, 0) < lo or taken.get(m, 0) < lo} for m in months]
+    return {"monthly_candidates": {
+        "expectation": f"{lo}-{hi} a month is a reporting expectation, never a tuning target",
+        "not_in_candidate_count": ["per-stock campaign limit (depends on results)", "portfolio limits (depend on open positions)"],
+        "months": rows, "months_short": sum(1 for r in rows if r["shortage"]),
+        "total_candidates": sum(cands.values()), "total_trades_taken": sum(taken.values())}}
+
+
 def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
     """Net credit after hedge and charges divided by cost-inclusive maximum loss, for the spreads that
     pass every other rule, at their decision time. NO OUTCOME IS LOOKED AT: each stock is scanned day
@@ -439,6 +481,13 @@ def print_effects(rep: dict) -> None:
     for mode, x in (rep.get("portfolio_limits") or {}).items():
         print(f"  portfolio limits ({mode}): {x['checks']} entries checked, refused {x['refused']}, "
               f"group size of the proposed positions {x['group_size_of_proposed_positions']}")
+    mc = rep.get("monthly_candidates")
+    if mc:
+        print(f"  monthly candidates and trades ({mc['expectation']}): {mc['total_candidates']} candidates, "
+              f"{mc['total_trades_taken']} trades, {mc['months_short']} month(s) short")
+        for r in mc["months"]:
+            print(f"    {r['month']}  candidates {r['candidates']:3d}  trades {r['trades_taken']:3d}"
+                  + ("  SHORT" if r["shortage"] else ""))
     cg = rep.get("correlation_groups_at_end")
     if cg:
         print(f"  correlated groups on {cg['date']}: sizes {cg['sizes']}; problems {cg['problem_count']}")
@@ -784,6 +833,7 @@ def main(argv: list[str] | None = None) -> int:
                               extra=lambda e, syms, d, by_mode: {**rule_effects(settings, e, syms, d, by_mode),
                                                                  **policy_comparison(settings, e, syms, d),
                                                                  **incomplete_sensitivity(settings, e, syms, d, by_mode),
+                                                                 **monthly_candidates(settings, e, syms, d, by_mode[next(iter(by_mode))][0]),
                                                                  **groups_at_end(settings, e, syms, d)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
