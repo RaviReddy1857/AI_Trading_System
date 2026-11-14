@@ -29,6 +29,7 @@ PAGE_HTML = """<!doctype html>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
  <a class="tag" href="/backtests">Backtest reports</a>
  <a class="tag" href="/options">Options view</a>
+ <a class="tag" href="/stock-option-selling">Stock option selling</a>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
 <main>
  <div class="card" id="regime-card"><h2>Today's market type</h2>
@@ -177,7 +178,16 @@ function optionBlock(rep){
  <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
  <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead>
  <tbody>${row('strategy',rep.overall,'')}${row('baseline (all)',b.overall,'')}${variants}${unders}</tbody></table>
+ ${bothWays(rep)}
  <div class="mute">Baseline skipped: ${esc(JSON.stringify(b.skipped_signals))}; dropped for missing data: ${esc(JSON.stringify(b.data_exclusions))}. Strategy dropped for missing data: ${esc(JSON.stringify(rep.data_exclusions))}.${rep.download&&rep.download.contracts_wanted_but_not_stored?` <b class="down">INCOMPLETE: ${rep.download.contracts_wanted_but_not_stored} option contracts were wanted but are not stored (run with --download).</b>`:''}</div>`;
+}
+function bothWays(rep){
+ const x=rep.exit_check_comparison; if(!x||Object.keys(x).length<2) return rep.exit_check_label?`<div class="mute">Exits: ${esc(rep.exit_check_label)}.</div>`:'';
+ const rows=Object.entries(x).map(([m,o])=>row(esc(m)+' check: strategy',o.strategy,'')+row(esc(m)+' check: baseline',o.baseline,'')
+  +Object.entries(o.baseline_by_variant||{}).map(([k,v])=>row(esc(m)+' check: '+esc(k),v,'')).join('')).join('');
+ const how=Object.entries(x).map(([m,o])=>`<li class="mute"><b>${esc(m)}</b>: ${esc(o.label)}. Baseline exits ${esc(JSON.stringify(o.baseline_by_exit))}, decided on ${esc(JSON.stringify(o.baseline_by_exit_basis))}${o.days_checked_on_daily_close_instead?`; ${o.days_checked_on_daily_close_instead} position-days had no stored 5-minute bars and were checked on the daily close`:''}.</li>`).join('');
+ return `<h2 style="margin-top:12px">Target and stop checked both ways (main result: ${esc(rep.exit_check)})</h2>
+ <table><thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg win</th><th>Avg loss</th><th>Net</th><th>Costs</th><th>Max DD</th><th>PF</th><th>Sample</th></tr></thead><tbody>${rows}</tbody></table><ul>${how}</ul>`;
 }
 function stat(rep){
  const s=rep.strategy_status; if(!s) return '';
@@ -223,6 +233,7 @@ OPTIONS_HTML = """<!doctype html>
 <header><h1>Options view</h1>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
  <a class="tag" href="/">Back to prices</a> <a class="tag" href="/backtests">Backtest reports</a>
+ <a class="tag" href="/stock-option-selling">Stock option selling</a>
  <span class="tag" id="feed"></span></header>
 <main>
  <div class="card"><h2>Underlying</h2>
@@ -291,4 +302,56 @@ document.getElementById("mbtn").onclick=async()=>{const out=document.getElementB
   const x=await r.json();out.textContent=x.ok?`Saved ${x.rows_saved} row(s)`:("Not saved: "+(x.errors||[x.detail]).join("; "));out.className=x.ok?"up":"down";if(x.ok)load();
  }catch(e){out.textContent="Import failed";out.className="down"}};
 (async()=>{const o=await j("/api/options");sel.innerHTML=o.underlyings.map(u=>`<option>${esc(u)}</option>`).join("");sel.onchange=load;load();setInterval(load,30000)})();
+</script></body></html>"""
+
+
+SHORTLIST_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock Option Selling</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#16202a;--mute:#5b6875;--line:#dde2e8;--ok:#0a7a45;--bad:#b3261e;--warn:#9a6200}
+ @media (prefers-color-scheme:dark){:root{--bg:#11161c;--card:#1a212a;--ink:#e8edf2;--mute:#9aa7b4;--line:#2c3743;--ok:#4cc38a;--bad:#ff8a80;--warn:#f0b849}}
+ body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+ h1{font-size:18px;margin:0} h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600} h3{font-size:14px;margin:10px 0 4px}
+ .tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:2px 8px;color:var(--mute)}
+ .warn{color:var(--warn);border-color:var(--warn)}
+ main{padding:16px 20px;display:grid;gap:16px;max-width:1100px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+ table{border-collapse:collapse;width:100%} th,td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+ th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
+ .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
+ .badge{font-weight:700;font-size:13px;border-radius:6px;padding:3px 9px;border:2px solid currentColor}
+ .SIGNAL{color:var(--ok)} .NO_TRADE{color:var(--mute)} .mute{color:var(--mute);font-size:13px} .atm td{font-weight:700}
+ ul{margin:4px 0 0;padding-left:20px} li{margin:2px 0} .mid{text-align:center !important;font-weight:700}
+ textarea{width:100%;box-sizing:border-box;min-height:70px;font:13px ui-monospace,Consolas,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px}
+ select,button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+ details summary{cursor:pointer;color:var(--mute);font-size:13px;font-weight:600}
+ .idea{border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px}
+</style></head><body>
+<header><h1>Stock option selling: daily shortlist</h1>
+ <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
+ <a class="tag" href="/">Back to prices</a> <a class="tag" href="/options">Options view</a>
+ <a class="tag" href="/backtests">Backtest reports</a> <span class="tag warn" id="label"></span></header>
+<main>
+ <div class="card"><h2>Shortlist</h2><div class="mute" id="asof"></div>
+  <table><thead><tr><th>Rank</th><th>Stock</th><th>Side</th><th>Expiry</th><th>Score</th><th>IV rank</th><th>Trend</th><th>Distance</th><th>Liquidity</th><th style="text-align:left">Why</th></tr></thead><tbody id="top"></tbody></table>
+  <div class="mute" id="note" style="margin-top:8px"></div></div>
+ <div class="card"><h2>Not on the list today, and why</h2>
+  <table><thead><tr><th>Stock</th><th>Side</th><th>Expiry</th><th style="text-align:left">Reason</th></tr></thead><tbody id="rest"></tbody></table></div>
+</main>
+<script>
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const f=x=>x==null?"-":Number(x).toFixed(2);
+const side=s=>s==="PE"?"bull put":(s==="CE"?"bear call":"-");
+(async()=>{
+ const r=await (await fetch("/api/stock-option-selling/shortlist")).json();
+ document.getElementById("label").textContent=r.label+(r.alerts?"":" - no alerts");
+ document.getElementById("asof").textContent=r.session_date?`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`:"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
+ document.getElementById("note").textContent=r.note+" Weights: "+JSON.stringify(r.weights)+".";
+ const top=r.rows.filter(x=>x.status==="SHORTLISTED"), rest=r.rows.filter(x=>x.status!=="SHORTLISTED");
+ document.getElementById("top").innerHTML=top.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry)}</td><td>${f(x.score)}</td><td>${f(x.scores.iv_rank)}</td><td>${f(x.scores.trend_clarity)}</td><td>${f(x.scores.distance)}</td><td>${f(x.scores.liquidity)}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="10" class="mute">no stock passes every rule today</td></tr>';
+ document.getElementById("rest").innerHTML=rest.map(x=>`<tr><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry||"-")}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="4" class="mute">-</td></tr>';
+})();
 </script></body></html>"""

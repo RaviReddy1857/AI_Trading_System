@@ -190,6 +190,8 @@ strategies:
     long_option: {alerts: false, mode: paper_only, label: "no edge vs baseline"}
     credit_spread: {alerts: false, mode: paper_only, label: "no edge vs baseline (6 backtest trades: low sample)"}
     iron_condor: {alerts: false, mode: paper_only, label: "UNPROVEN: 1 backtest trade, no track record"}
+    # Phase 9 (core only so far): no alerts until the cards and paper tracking exist (after phase 6)
+    stock_option_selling: {alerts: false, mode: paper_only, label: "UNPROVEN: no track record yet"}
   orb:                          # opening-range breakout, intraday
     range_minutes: 15           # opening range = 09:15-09:30
     breakout_buffer_pct: 0.05   # close must clear the range by this %
@@ -319,7 +321,36 @@ options:
       iron_condor: 2024-01-01   # weekly option history is downloaded from here (extend if wanted)
     trigger: swing_pullback_v2  # long_option backtests use this daily trigger (intraday triggers are not backtested)
     max_requests_per_run: 1500
+    daily_request_budget: 3500  # option-history requests to Breeze per day (IST), counted across runs; downloads resume the next day
     strike_search_steps: 8
+
+# ---- Phase 9: stock option selling (monthly hedged credit spreads on F&O stocks). Core rules and backtest; ----
+# ---- signal cards, alerts and manual positions come after phase 6. ----
+stock_option_selling:
+  enabled: true
+  min_iv_rank: 50               # sell only when the stock's IV rank is at least this
+  min_open_interest: 100        # each traded strike: open interest, in lots, at least this
+  max_bid_ask_spread_pct: 10    # each traded strike (live): bid-ask width within 10% of the mid price
+  max_short_delta: 0.20
+  hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
+  max_loss_per_stock_spread_pct: 10   # one lot's max loss at most this % of capital (ASSUMPTION, yours to set)
+  entry_min_days_to_expiry: 20
+  entry_max_days_to_expiry: 35
+  profit_target_pct_of_credit: 50
+  stop_multiple_of_credit: 2.0  # close when buying the spread back costs 2x the credit
+  exit_days_before_expiry: 7    # out at the open of the first session within 7 days of expiry: never held in expiry week
+  trend_fast_sma: 20            # swing trend rule: close above the 50-day average and 20-day above 50-day = up trend
+  trend_slow_sma: 50
+  atr_days: 14
+  support_resistance_lookback_days: 20   # support = lowest low, resistance = highest high of these sessions
+  shortlist_size: 10
+  weights: {iv_rank: 0.35, trend_clarity: 0.25, distance: 0.20, liquidity: 0.20}
+  backtest:
+    priority_stocks: 30         # the 30 most liquid watchlist F&O stocks (median daily traded value) are downloaded and tested
+    liquidity_lookback_days: 60
+    exit_checks: [intraday, daily]   # first = main result; target and stop on 5-minute option bars, or on daily closes
+    intraday_leg_max_age_minutes: 30 # 5-minute check: a leg's last trade may be this old at most
+    exit_on_strike_breach: true      # close at the next open when the stock closes beyond the sold strike
 
 # ---- Phase 3: backtest and walk-forward ----
 backtest:

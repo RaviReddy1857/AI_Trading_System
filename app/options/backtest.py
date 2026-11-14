@@ -67,8 +67,8 @@ from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_co
 from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
-from .option_history import (BreezeOptionFetcher, ModelPrices, OptionHistory, atm_candidates, discover_expiries,
-                             simulated_expiries, stock_iv_series)
+from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
+                             discover_expiries, simulated_expiries, stock_iv_series)
 
 log = logging.getLogger("option_backtest")
 
@@ -79,6 +79,12 @@ PRICE_SOURCE_LABEL = {
 DATA_EXCLUSION_KEYS = ("DROPPED_MISSING_OPTION_BAR", "DROPPED_MISSING_DAILY_BAR_DURING_TRADE",
                        "DROPPED_DATA_BREAK_DURING_TRADE", "NO_OPTION_BAR_AT_ENTRY")
 ELIGIBILITY_LABEL = "excludes margin and bid/ask eligibility checks"
+IV_EXPIRY_REACH_DAYS = 75     # stock IV history: an at-the-money call is used at most 70 days before its expiry
+EXIT_CHECK_LABEL = {
+    "daily": "target and stop checked on the legs' daily closes, filled at the next session's open",
+    "intraday": "target and stop checked on the legs' 5-minute bars, filled at the next 5-minute bar's open "
+                "(the daily close is the fallback when a day's 5-minute bars are not stored)",
+}
 ELIGIBILITY_NOTE = ("Backtest results exclude the margin and bid/ask eligibility checks: past margins are not known and "
                     "option history has traded prices only (no bid/ask). A live signal still needs a current margin "
                     "entry and a bid and an ask within the width limit on every traded strike.")
@@ -110,6 +116,51 @@ class OptionTrade:
     max_loss_inr: float | None = None
     iv_rank: float | None = None
     why_now: list[str] = field(default_factory=list)
+    exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
+    exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
+
+
+def intraday_spread_exit(leg_bars: list[list], signs: list[int], target: float, stop: float,
+                         max_age: timedelta):
+    """Target and stop of a spread on its legs' 5-minute bars for ONE session.
+
+    `leg_bars`: each leg's bars of the session, oldest first. `signs`: +1 for a sold leg, -1 for a bought
+    one, so sum(sign x price) is the cost to buy the spread back. At the close of every 5-minute bar the
+    cost is compared with the target (at or below) and the stop (at or above). A leg that did not trade
+    in that bar is priced at its last traded close if that is at most `max_age` old; older than that the
+    cost is unknown and nothing is decided. A decision is filled at the open of the NEXT 5-minute bar
+    (never the same bar), each leg at that bar's open or, if it did not trade in it, at its last close
+    within `max_age`.
+
+    Returns (reason, fill_time, [fill price per leg]) when filled in this session, (reason, None, None)
+    when decided but not fillable before the close (the caller fills it at the next session's open),
+    or None when neither level was reached."""
+    by_start = [{b.start: b for b in bars} for bars in leg_bars]
+    times = sorted({b.start for bars in leg_bars for b in bars})
+
+    def price(i: int, at: datetime, what: str) -> float | None:
+        b = by_start[i].get(at)
+        if b is not None:
+            return b.open if what == "open" else b.close
+        older = [x for x in leg_bars[i] if x.start < at and at - x.start <= max_age]
+        return older[-1].close if older else None
+
+    decision = None
+    for at in times:
+        if decision is not None:
+            fills = [price(i, at, "open") for i in range(len(leg_bars))]
+            if all(f is not None for f in fills):
+                return decision, at, fills
+            continue
+        closes = [price(i, at, "close") for i in range(len(leg_bars))]
+        if any(c is None for c in closes):
+            continue
+        cost = sum(s * c for s, c in zip(signs, closes))
+        if cost <= target:
+            decision = "TARGET"
+        elif cost >= stop:
+            decision = "STOP"
+    return (decision, None, None) if decision else None
 
 
 class HistoryQuotes:
@@ -155,12 +206,15 @@ class _Position:
     entry_i: int
     variant: str
     pending_exit: str | None = None
+    pending_basis: str = ""
 
 
 class OptionEngine:
     def __init__(self, settings: Settings, store: Store, source: str, prices, base: Engine | None = None,
-                 lot_sizes: dict[str, int] | None = None):
+                 lot_sizes: dict[str, int] | None = None, intraday: OptionIntraday | None = None):
         self.s, self.store, self.source, self.prices = settings, store, source, prices
+        self.intraday = intraday         # 5-minute option bars (exit_check "intraday"); None = not available
+        self.max_leg_age = timedelta(minutes=settings.stock_option_selling.backtest.intraday_leg_max_age_minutes)
         self.base = base or Engine(settings, store, source, calendar=load_calendar(settings, store))
         self.costs = self.base.costs
         self.o = settings.options
@@ -173,6 +227,17 @@ class OptionEngine:
         self._iv: dict[str, tuple[list[date], list[float]]] = {}
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
         self._trigger = None
+        self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
+        # Last session a run tests. A stock's IV history then leaves out the at-the-money calls of
+        # expiries more than IV_EXPIRY_REACH_DAYS after it: they cannot matter, and they would be
+        # option prices of the holdout period.
+        self.last_session: date | None = None
+
+    def set_expiry_floor(self, floor: date | None) -> None:
+        """Limit the expiries the engine looks at (used while downloading history block by block, so a
+        block does not ask for the at-the-money contracts of every older month). Clears the IV cache."""
+        self.expiry_floor = floor
+        self._iv.clear()
 
     # ---- inputs ----
     def lot_size(self, sym: str) -> int | None:
@@ -182,8 +247,10 @@ class OptionEngine:
         """Stored expiries. Stock monthly contracts expire with the index monthly contract, so a stock
         uses the index's monthly dates (a wrong date simply has no data and the trade is skipped)."""
         if self.kinds.get(sym) == "stock":
-            return [(e, k) for e, k in self.prices.expiries(self.s.regime.index_symbol) if k == "monthly"]
-        return self.prices.expiries(sym)
+            out = [(e, k) for e, k in self.prices.expiries(self.s.regime.index_symbol) if k == "monthly"]
+        else:
+            out = self.prices.expiries(sym)
+        return [(e, k) for e, k in out if self.expiry_floor is None or e >= self.expiry_floor]
 
     def iv_series(self, sym: str) -> tuple[list[date], list[float]]:
         """Implied-volatility measure by date: India VIX for an index; for a stock, the implied
@@ -198,7 +265,9 @@ class OptionEngine:
             else:
                 closes = {bar_date(b): b.close for b in self.base.daily(sym)}
                 cfg = self.s.option_underlying(sym)
-                series = stock_iv_series(self.prices, sym, [e for e, _ in self.expiries(sym)], closes,
+                reach = None if self.last_session is None else self.last_session + timedelta(days=IV_EXPIRY_REACH_DAYS)
+                series = stock_iv_series(self.prices, sym,
+                                         [e for e, _ in self.expiries(sym) if reach is None or e <= reach], closes,
                                          cfg.backtest_strike_step if cfg else None, self.rate,
                                          (cfg.dividend_yield_pct if cfg else 0) / 100.0)
             ds = sorted(series)
@@ -220,7 +289,7 @@ class OptionEngine:
         return self._trigger
 
     def context(self, strategy: OptionStrategy, sym: str, d: date, spot: float, variant: str,
-                trigger: Signal | None = None) -> OptionContext:
+                trigger: Signal | None = None, daily: tuple = ()) -> OptionContext:
         kind = self.kinds.get(sym, "stock")
         cfg = self.s.option_underlying(sym)
         iv, rank = self.iv_at(sym, d)
@@ -235,7 +304,8 @@ class OptionEngine:
             trigger=trigger, allowed_kinds=tuple(cfg.expiries) if cfg else ("monthly",), margin=None,
             require_margin=False, historical=True, max_spread_pct=self.o.chain.max_spread_pct,
             min_oi_lots=self.o.chain.min_open_interest_lots, search_steps=self.o.backtest.strike_search_steps,
-            no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None)
+            no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None,
+            daily=daily)
 
     # ---- fills ----
     def _leg_bars(self, sym: str, legs, d: date):
@@ -279,7 +349,8 @@ class OptionEngine:
         return _Position(sig, list(sig.legs), fills, d, i, variant)
 
     def _close(self, pos: _Position, sym: str, d: date, raw_exit: list[float], at_open: bool, reason: str,
-               strategy: OptionStrategy) -> OptionTrade:
+               strategy: OptionStrategy, exit_check: str = "daily", basis: str = "",
+               exit_dt: datetime | None = None) -> OptionTrade:
         gross = Decimal(0)
         total = CostBreakdown()
         legs_out, exit_net = [], Decimal(0)
@@ -300,7 +371,7 @@ class OptionEngine:
                              "entry_price": float(fill), "exit_price": float(out)})
         entry_net = sum((f * (1 if leg.action == "SELL" else -1) for leg, f in zip(pos.legs, pos.fills)), Decimal(0))
         sig = pos.sig
-        t_exit = datetime.combine(d, time(9, 15) if at_open else time(15, 30), IST).astimezone(timezone.utc)
+        t_exit = exit_dt or datetime.combine(d, time(9, 15) if at_open else time(15, 30), IST).astimezone(timezone.utc)
         return OptionTrade(
             strategy_id=strategy.id, strategy_version=strategy.version, variant=pos.variant, symbol=sym,
             structure=sig.details["structure"], expiry=pos.legs[0].expiry.isoformat(), legs=legs_out,
@@ -310,7 +381,7 @@ class OptionEngine:
             exit_time=t_exit.isoformat(), exit_net=float(exit_net), exit_reason=reason,
             gross_pnl=float(gross), costs=total.as_dict(), net_pnl=float(gross - total.total),
             price_source=self.prices.label, max_loss_inr=sig.details.get("max_loss_inr"),
-            iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now))
+            iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now), exit_check=exit_check, exit_basis=basis)
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -318,8 +389,20 @@ class OptionEngine:
             return p.exit_days_before_expiry
         return p.stock_exit_days_before_expiry if self.kinds.get(sym) == "stock" else p.index_exit_days_before_expiry
 
+    def _leg_sessions(self, sym: str, legs, d: date):
+        """Each leg's 5-minute bars of session d, or None if any leg's are unknown."""
+        if self.intraday is None:
+            return None
+        out = []
+        for leg in legs:
+            bars = self.intraday.session(sym, leg.expiry, leg.strike, leg.right, d)
+            if bars is None:
+                return None
+            out.append(bars)
+        return out
+
     def _manage(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
-                skipped: Counter):
+                skipped: Counter, exit_check: str = "daily", spot: float | None = None):
         """Position at the close of day d. Returns ('trade', OptionTrade) | ('drop',) | ('hold',)."""
         bars = self._leg_bars(sym, pos.legs, d)
         if bars is None:
@@ -331,16 +414,34 @@ class OptionEngine:
         closes = [b.close for b in bars]
         if sig.direction == "SPREAD":
             if d >= expiry or nxt is None or nxt > expiry:
-                return ("trade", self._close(pos, sym, d, closes, False, "EXPIRY_EXIT", strategy))
+                return ("trade", self._close(pos, sym, d, closes, False, "EXPIRY_EXIT", strategy, exit_check,
+                                             "rule at the close"))
+            signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
+            if exit_check == "intraday":
+                sess = self._leg_sessions(sym, pos.legs, d)
+                if sess is None:
+                    skipped["INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE"] += 1
+                else:
+                    r = intraday_spread_exit(sess, signs, sig.target, sig.stop, self.max_leg_age)
+                    if r is not None and r[1] is not None:
+                        return ("trade", self._close(pos, sym, d, r[2], False, r[0], strategy, exit_check,
+                                                     "5-minute bar", exit_dt=r[1] ))
+                    if r is not None:
+                        pos.pending_exit, pos.pending_basis = r[0], "5-minute bar, filled at the next session's open"
+                        return ("hold",)
             if d >= last_allowed:
-                return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy))
-            value = sum(b.close * (1 if leg.action == "SELL" else -1) for leg, b in zip(pos.legs, bars))
+                return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check,
+                                             "rule at the close"))
+            value = sum(b.close * s for s, b in zip(signs, bars))
             if value <= sig.target:
-                pos.pending_exit = "TARGET"
+                pos.pending_exit, pos.pending_basis = "TARGET", "daily close"
             elif value >= sig.stop:
-                pos.pending_exit = "STOP"
+                pos.pending_exit, pos.pending_basis = "STOP", "daily close"
+            elif (getattr(strategy, "threat_exit", False) and spot is not None
+                  and (spot < pos.legs[0].strike if pos.legs[0].right == "PE" else spot > pos.legs[0].strike)):
+                pos.pending_exit, pos.pending_basis = "STRIKE_BREACHED", "rule at the close"
             elif (expiry - nxt).days <= exit_days:
-                pos.pending_exit = "TIME"
+                pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
             return ("hold",)
         b = bars[0]
         hit = Engine._hit("LONG", Bar(sym, daily_start(d), b.open, b.high, b.low, b.close), sig.stop, sig.target,
@@ -382,7 +483,7 @@ class OptionEngine:
 
     # ---- one stream: one strategy (or one of its baselines) on one underlying ----
     def run_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
-                   skipped: Counter, schedule_log: list | None = None) -> list[OptionTrade]:
+                   skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily") -> list[OptionTrade]:
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
         allowed = set(sessions)
@@ -399,6 +500,10 @@ class OptionEngine:
         pending: list[tuple[Signal, dict | None]] = []      # (signal, its schedule row for a baseline attempt)
         used_expiries: set[date] = set()
         start = 0
+        needs_daily = getattr(strategy, "needs_daily", False)
+
+        def recent(i: int) -> tuple:
+            return tuple(bars[max(start, i - 399):i + 1]) if needs_daily else ()
 
         def scheduled(d: date, item) -> dict:
             row = {"underlying": sym, "variant": variant, "scheduled_day": d.isoformat(),
@@ -433,7 +538,8 @@ class OptionEngine:
                 if legs_bars is None:
                     skipped["DROPPED_MISSING_OPTION_BAR"] += 1
                 else:
-                    trades.append(self._close(pos, sym, d, [b.open for b in legs_bars], True, pos.pending_exit, strategy))
+                    trades.append(self._close(pos, sym, d, [b.open for b in legs_bars], True, pos.pending_exit,
+                                              strategy, exit_check, pos.pending_basis))
             positions = keep
             # ---- entries from the previous close's signals, at this open ----
             for sig, row in pending:
@@ -453,7 +559,7 @@ class OptionEngine:
             # ---- every open position at this close ----
             keep = []
             for pos in positions:
-                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped)
+                r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close)
                 if r[0] == "trade":
                     trades.append(r[1])
                 elif r[0] == "hold":
@@ -466,7 +572,7 @@ class OptionEngine:
                 for item in schedule.get(d, ()):
                     attempted.add(d)
                     row = scheduled(d, item)
-                    ctx = self.context(strategy, sym, d, bar.close, variant, None)
+                    ctx = self.context(strategy, sym, d, bar.close, variant, None, recent(i))
                     if item is not None:
                         ctx = replace(ctx, expiries=tuple(x for x in ctx.expiries if x.expiry == item[0])
                                       or (ExpiryInfo(item[0], item[1], self.lot_size(sym)),))
@@ -493,7 +599,7 @@ class OptionEngine:
                 if not got:
                     continue
                 trigger = got[0]
-            ctx = self.context(strategy, sym, d, bar.close, variant, trigger)
+            ctx = self.context(strategy, sym, d, bar.close, variant, trigger, recent(i))
             if not is_long:
                 if not strategy.entry_checks(ctx):
                     continue
@@ -556,12 +662,16 @@ def compare(strategy_stats: dict, baseline_stats: dict) -> dict:
 
 
 def baseline_variants(strategy: OptionStrategy) -> list[str]:
-    return ["baseline:PE", "baseline:CE"] if strategy.id == "credit_spread" else ["baseline"]
+    return ["baseline:PE", "baseline:CE"] if strategy.id in ("credit_spread", "stock_option_selling") else ["baseline"]
 
 
 def run_option_backtest(settings: Settings, store: Store, source: str, strategy: OptionStrategy, prices,
                         underlyings: list[str] | None = None, engine: OptionEngine | None = None,
-                        save: bool = True, now: datetime | None = None) -> dict:
+                        save: bool = True, now: datetime | None = None,
+                        exit_checks: tuple[str, ...] = ("daily",), first_session: date | None = None,
+                        coverage_note: str = "") -> dict:
+    """`exit_checks`: how target and stop are checked while a spread is open. The first mode is the
+    main result; the report also shows the strategy and its baseline under every other mode listed."""
     eng = engine or OptionEngine(settings, store, source, prices)
     eng.costs.require("options")
     now = now or utcnow()
@@ -570,24 +680,47 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
     syms = [u for u in (underlyings or bt.underlyings.get(strategy.id, [])) if u in known]
     sessions = eng.base.session_dates()
     dev, hold = dev_holdout(settings, sessions, "1day")
-    first = bt.start.get(strategy.id)
+    first = max([x for x in (bt.start.get(strategy.id), first_session) if x is not None], default=None)
     if first is not None:
         dev = [d for d in dev if d >= first]
     cap = settings.account.capital_inr
+    if dev and eng.last_session != dev[-1]:
+        eng.last_session = dev[-1]
+        eng._iv.clear()
     strategy.rejections.clear()
-    trades: list[OptionTrade] = []
-    base_trades: list[OptionTrade] = []
-    skipped, base_skipped = Counter(), Counter()
-    schedule_log: list[dict] = []
-    notes_lot = {}
-    for sym in syms:
-        notes_lot[sym] = eng.lot_size(sym)
-        trades += eng.run_stream(strategy, sym, dev, "strategy", skipped)
-        for v in baseline_variants(strategy):
-            base_trades += eng.run_stream(strategy, sym, dev, v, base_skipped, schedule_log)
-    for ts in (trades, base_trades):
-        ts.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
+    notes_lot = {sym: eng.lot_size(sym) for sym in syms}
+    by_mode: dict[str, tuple] = {}
+    for mode in exit_checks:
+        m_trades: list[OptionTrade] = []
+        m_base: list[OptionTrade] = []
+        m_skipped, m_base_skipped = Counter(), Counter()
+        m_log: list[dict] = []
+        for sym in syms:
+            m_trades += eng.run_stream(strategy, sym, dev, "strategy", m_skipped, exit_check=mode)
+            for v in baseline_variants(strategy):
+                m_base += eng.run_stream(strategy, sym, dev, v, m_base_skipped, m_log, exit_check=mode)
+        for ts in (m_trades, m_base):
+            ts.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
+        by_mode[mode] = (m_trades, m_base, m_skipped, m_base_skipped, m_log)
+    trades, base_trades, skipped, base_skipped, schedule_log = by_mode[exit_checks[0]]
     overall, base_overall = stats(trades, cap, cfg.min_trades), stats(base_trades, cap, cfg.min_trades)
+    both_ways = {}
+    for mode, (mt, mb, ms, mbs, _) in by_mode.items():
+        so, bo = stats(mt, cap, cfg.min_trades), stats(mb, cap, cfg.min_trades)
+        both_ways[mode] = {
+            "label": EXIT_CHECK_LABEL[mode], "strategy": so, "baseline": bo,
+            "baseline_by_variant": {k: stats(v, cap, cfg.min_trades) for k, v in _by(mb, lambda t: t.variant).items()},
+            "strategy_by_exit": {k: len(v) for k, v in _by(mt, lambda t: t.exit_reason).items()},
+            "baseline_by_exit": {k: len(v) for k, v in _by(mb, lambda t: t.exit_reason).items()},
+            "baseline_by_exit_basis": {k: len(v) for k, v in _by(mb, lambda t: t.exit_basis or "-").items()},
+            "days_checked_on_daily_close_instead": ms.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0)
+            + mbs.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0),
+            "comparison": compare(so, bo)}
+    download = dict(eng.prices.download_stats())
+    if eng.intraday is not None:
+        download["intraday"] = eng.intraday.download_stats()
+        download["contracts_wanted_but_not_stored"] = (download.get("contracts_wanted_but_not_stored", 0)
+                                                       + download["intraday"]["contracts_wanted_but_not_stored"])
     wf = []
     for w in windows(dev, cfg.window_sessions * 3, cfg.step_sessions * 3):
         ws = set(w)
@@ -604,6 +737,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "price_source": label, "price_source_label": PRICE_SOURCE_LABEL[label],
         "payoff_simulation": label == "model",
         "eligibility_label": ELIGIBILITY_LABEL, "eligibility_note": ELIGIBILITY_NOTE,
+        "exit_check": exit_checks[0], "exit_check_label": EXIT_CHECK_LABEL[exit_checks[0]],
+        "exit_check_comparison": both_ways,
         "symbols": len(syms), "underlyings": syms, "lot_sizes": notes_lot,
         "period": {"from": dev[0].isoformat() if dev else None, "to": dev[-1].isoformat() if dev else None,
                    "sessions": len(dev)},
@@ -643,22 +778,22 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "data_exclusions": {k: skipped.get(k, 0) for k in DATA_EXCLUSION_KEYS},
         "filtered_signals": {},
         "strategy_status": {"alerts": strategy.alerts_enabled, "mode": strategy.mode, "label": strategy.status_label},
-        "download": eng.prices.download_stats(),
+        "download": download,
         "notes": [
             f"Price source: {PRICE_SOURCE_LABEL[label]}.",
             "Signals come from a day's close; entries fill at the next session's open of every leg plus slippage.",
-            "Spread exits are decided on closing prices and filled at the next session's open; no position is held to settlement.",
+            "Spread exits: " + EXIT_CHECK_LABEL[exit_checks[0]] + "; no position is held to settlement.",
             "Every trade is 1 lot at the lot size in today's instrument list (past lot sizes are not in the list); "
             "position sizing against capital is phase 5.",
             "The highest-OI strike rule is not applied in backtests: history has open interest per contract, not across the chain.",
             ELIGIBILITY_NOTE,
             "Baseline: one fixed scheduled attempt per expiry (or month); a skipped attempt is never retried later.",
             "A trade is dropped if a leg or the underlying has no bar for a session while it is open (data_exclusions).",
-        ],
+        ] + ([coverage_note] if coverage_note else []),
     }
     run_id = f"{strategy.id}-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
     rep["run_id"], rep["created_utc"] = run_id, now.isoformat()
-    all_trades = [asdict(t) for t in trades] + [asdict(t) for t in base_trades]
+    all_trades = [asdict(t) for mode in exit_checks for part in by_mode[mode][:2] for t in part]
     if save:
         store.save_backtest(run_id, now, strategy.id, strategy.version, rep["params"], rep, all_trades)
         out = settings.path(settings.backtest.reports_dir)
@@ -724,6 +859,42 @@ def prepare_history(settings: Settings, store: Store, engine: Engine, hist: Opti
     return out
 
 
+def print_report(r: dict, source: str) -> None:
+    o, b, c = r["overall"], r["baseline"]["overall"], r["comparison"]
+    print(f"\n{r['strategy_id']} {r['strategy_version']}  [{r['cost_label']}]  source={source}")
+    print(f"  PRICE SOURCE: {r['price_source_label']}")
+    print(f"  NOTE: {r['eligibility_label']}")
+    print(f"  EXITS: {r['exit_check_label']}")
+    print(f"  underlyings {r['underlyings']}  lot sizes {r['lot_sizes']}")
+    print(f"  period {r['period']['from']} .. {r['period']['to']} ({r['period']['sessions']} sessions); holdout untouched")
+    for name, x in (("strategy", o), ("baseline", b)):
+        print(f"  {name:9s} trades {x['trades']:4d}  win {x['win_rate_pct']}%  net Rs {x['net_pnl_inr']:>12,.2f}  "
+              f"costs Rs {x['costs_inr']:>10,.2f}  max DD Rs {x['max_drawdown_inr']:>10,.2f}  PF {x['profit_factor']}  "
+              f"{x['sample_note']}")
+    for v, x in r["baseline"]["by_variant"].items():
+        print(f"    {v:12s} trades {x['trades']:4d}  win {x['win_rate_pct']}%  net Rs {x['net_pnl_inr']:>12,.2f}  PF {x['profit_factor']}")
+    print(f"  per trade after costs: strategy Rs {c['strategy_avg_net_per_trade_inr']}, baseline Rs "
+          f"{c['baseline_avg_net_per_trade_inr']}  ->  {c['verdict'].upper()}")
+    if len(r["exit_check_comparison"]) > 1:
+        print("  both ways (how target and stop are checked):")
+        for mode, x in r["exit_check_comparison"].items():
+            for name in ("strategy", "baseline"):
+                s = x[name]
+                per = round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None
+                print(f"    {mode:8s} {name:9s} trades {s['trades']:4d}  win {s['win_rate_pct']}%  net Rs "
+                      f"{s['net_pnl_inr']:>12,.2f}  PF {s['profit_factor']}  per trade Rs {per}")
+            print(f"    {mode:8s} baseline exits {x['baseline_by_exit']}  decided on {x['baseline_by_exit_basis']}")
+    print(f"  strategy skipped {r['skipped_signals']}  exclusions {r['data_exclusions']}")
+    print(f"  baseline skipped {r['baseline']['skipped_signals']}  exclusions {r['baseline']['data_exclusions']}")
+    print(f"  exits: strategy {r['by_exit']}  baseline {r['baseline']['by_exit']}")
+    sch = r["baseline"]["schedule"]
+    print(f"  baseline schedule: {sch['attempts']} attempts, {sch['entered']} entered, {len(sch['skipped'])} skipped "
+          f"{dict(Counter(x['reason'] for x in sch['skipped']))}")
+    if r["download"].get("contracts_wanted_but_not_stored"):
+        print(f"  INCOMPLETE: {r['download']['contracts_wanted_but_not_stored']} contracts wanted but not stored")
+    print(f"  saved {r['run_id']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     from ..config import ROOT, load_settings
     ap = argparse.ArgumentParser(description="Option strategy backtests with a no-filter baseline")
@@ -750,11 +921,11 @@ def main(argv: list[str] | None = None) -> int:
             load_dotenv(ROOT / ".env")
             n = refresh_from_broker(store, settings.watchlist)
             print(f"instrument list refreshed: {n} contract expiries stored")
-            h = settings.history
-            fetcher = BreezeOptionFetcher(
-                BreezeFeed(settings.watchlist), {i.symbol: i.breeze_code for i in settings.watchlist},
-                h.request_pause_seconds, h.request_timeout_seconds, 1, h.retry_pause_seconds,
+            fetcher = budgeted_fetcher(
+                settings, store, BreezeFeed(settings.watchlist),
                 args.max_requests if args.max_requests is not None else settings.options.backtest.max_requests_per_run)
+            print(f"request budget: {fetcher.max_requests} requests may be sent in this run "
+                  f"(daily budget {settings.options.backtest.daily_request_budget})")
         prices = OptionHistory(store, "breeze", fetcher)
         if args.download:
             for r in prepare_history(settings, store, base, prices, strategies, args.underlyings):
@@ -772,28 +943,7 @@ def main(argv: list[str] | None = None) -> int:
     eng = OptionEngine(settings, store, args.source, prices, base)
     for st in strategies:
         res = run_option_backtest(settings, store, args.source, st, prices, args.underlyings, engine=eng)
-        r = res["report"]
-        o, b, c = r["overall"], r["baseline"]["overall"], r["comparison"]
-        print(f"\n{st.id} {st.version}  [{r['cost_label']}]  source={args.source}")
-        print(f"  PRICE SOURCE: {r['price_source_label']}")
-        print(f"  NOTE: {r['eligibility_label']}")
-        print(f"  underlyings {r['underlyings']}  lot sizes {r['lot_sizes']}")
-        print(f"  period {r['period']['from']} .. {r['period']['to']} ({r['period']['sessions']} sessions); holdout untouched")
-        for name, x in (("strategy", o), ("baseline", b)):
-            print(f"  {name:9s} trades {x['trades']:4d}  win {x['win_rate_pct']}%  net Rs {x['net_pnl_inr']:>12,.2f}  "
-                  f"costs Rs {x['costs_inr']:>10,.2f}  max DD Rs {x['max_drawdown_inr']:>10,.2f}  PF {x['profit_factor']}  "
-                  f"{x['sample_note']}")
-        for v, x in r["baseline"]["by_variant"].items():
-            print(f"    {v:12s} trades {x['trades']:4d}  win {x['win_rate_pct']}%  net Rs {x['net_pnl_inr']:>12,.2f}  PF {x['profit_factor']}")
-        print(f"  per trade after costs: strategy Rs {c['strategy_avg_net_per_trade_inr']}, baseline Rs "
-              f"{c['baseline_avg_net_per_trade_inr']}  ->  {c['verdict'].upper()}")
-        print(f"  strategy skipped {r['skipped_signals']}  exclusions {r['data_exclusions']}")
-        print(f"  baseline skipped {r['baseline']['skipped_signals']}  exclusions {r['baseline']['data_exclusions']}")
-        print(f"  exits: strategy {r['by_exit']}  baseline {r['baseline']['by_exit']}")
-        sch = r["baseline"]["schedule"]
-        print(f"  baseline schedule: {sch['attempts']} attempts, {sch['entered']} entered, {len(sch['skipped'])} skipped "
-              f"{dict(Counter(x['reason'] for x in sch['skipped']))}")
-        print(f"  saved {r['run_id']}")
+        print_report(res["report"], args.source)
     print(f"\ndownload: {prices.download_stats()}")
     return 0
 

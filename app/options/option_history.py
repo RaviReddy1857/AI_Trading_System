@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
-from ..history import _num, _parse_dt, call_with_timeout, daily_start
+from ..history import _num, _parse_dt, call_with_timeout, daily_start, in_session
 from ..models import Bar, utcnow
 from ..quality import IST, MARKET_OPEN
 from ..store import Store
@@ -45,6 +45,13 @@ from .instruments import nice_step
 log = logging.getLogger("option_history")
 
 DAILY = "1day"
+INTRADAY = "5minute"
+# 5-minute bars of a contract are stored for this window only: from 40 to 5 calendar days before its
+# expiry (a monthly spread is entered at most 35 days out and is closed 7 days out at the latest).
+# A day outside the window is UNKNOWN for the 5-minute source, never "no trades".
+INTRADAY_WINDOW_DAYS = (40, 5)
+PAGE_ROWS = 1000              # Breeze returns at most about 1000 candles per call
+MAX_PAGES = 6
 BREEZE_RIGHT = {"CE": "call", "PE": "put"}
 LOOKBACK_DAYS = 100           # a contract's bars are requested from this many days before its expiry
 MIN_PRICE = 0.05              # NSE option tick: the lowest price an option can trade at
@@ -69,10 +76,12 @@ class OptionBar:
     oi: float | None = None
 
 
-def parse_option_rows(rows: list[dict]) -> tuple[list[tuple], list[tuple[str, dict]]]:
-    """Raw Breeze option history rows (daily) -> storable tuples (start_utc iso, o, h, l, c, volume,
-    oi), oldest first, plus rejected rows. Same rules as stock history: a timestamp, positive
-    finite prices, high/low consistent with open/close, no negative volume or open interest."""
+def parse_option_rows(rows: list[dict], intraday: bool = False) -> tuple[list[tuple], list[tuple[str, dict]]]:
+    """Raw Breeze option history rows -> storable tuples (start_utc iso, o, h, l, c, volume, oi),
+    oldest first, plus rejected rows. Same rules as stock history: a timestamp, positive finite
+    prices, high/low consistent with open/close, no negative volume or open interest. Daily rows are
+    keyed by their session; 5-minute rows (`intraday`) by their own start, and pre-open and
+    post-close bars are left out."""
     good: dict[datetime, tuple] = {}
     bad: list[tuple[str, dict]] = []
     for raw in rows or []:
@@ -91,7 +100,12 @@ def parse_option_rows(rows: list[dict]) -> tuple[list[tuple], list[tuple[str, di
         if (vol is not None and vol < 0) or (oi is not None and oi < 0):
             bad.append(("negative volume or open interest", raw))
             continue
-        start = daily_start(dt.astimezone(IST).date())
+        if intraday:
+            start = dt.astimezone(timezone.utc)
+            if not in_session(start):
+                continue
+        else:
+            start = daily_start(dt.astimezone(IST).date())
         good[start] = (start.isoformat(), o, h, l, c, vol, oi)
     return [good[k] for k in sorted(good)], bad
 
@@ -101,26 +115,26 @@ class BreezeOptionFetcher:
 
     def __init__(self, feed, codes: dict[str, str], pause_seconds: float = 0.7, timeout_seconds: float = 60.0,
                  empty_retries: int = 1, retry_pause_seconds: float = 3.0, max_requests: int = 1500,
-                 sleep: Callable[[float], None] = _time.sleep):
+                 sleep: Callable[[float], None] = _time.sleep, on_request: Callable[[], None] | None = None):
         self._feed = feed
         self._codes = codes
         self._pause, self._timeout = pause_seconds, timeout_seconds
         self._retries, self._retry_pause = empty_retries, retry_pause_seconds
         self.max_requests = max_requests
         self._sleep = sleep
+        self._on_request = on_request       # called once per request sent (the daily request budget counts them)
         self.requests = 0
 
     @property
     def budget_left(self) -> int:
         return max(0, self.max_requests - self.requests)
 
-    def fetch(self, underlying: str, expiry: date, strike: float, right: str, expect_data: bool = True) -> list[dict]:
+    def _request(self, underlying: str, expiry: date, strike: float, right: str, interval: str,
+                 a: str, b: str, tries: int) -> list[dict]:
+        """One paced, counted request (repeated up to `tries` times while the reply is empty)."""
         code = self._codes.get(underlying)
         if code is None:
             raise OptionHistoryError(f"{underlying} has no Breeze code in the watchlist")
-        a = (expiry - timedelta(days=LOOKBACK_DAYS)).isoformat() + "T00:00:00.000Z"
-        b = (expiry + timedelta(days=1)).isoformat() + "T00:00:00.000Z"
-        tries = 1 + (self._retries if expect_data else 0)
         rows: list[dict] = []
         for attempt in range(tries):
             if self.requests >= self.max_requests:
@@ -130,9 +144,11 @@ class BreezeOptionFetcher:
             elif self.requests and self._pause:
                 self._sleep(self._pause)
             self.requests += 1
+            if self._on_request is not None:
+                self._on_request()
             try:
                 resp = call_with_timeout(lambda: self._feed.option_historical_raw(
-                    code, expiry.isoformat() + "T06:00:00.000Z", strike, BREEZE_RIGHT[right], DAILY, a, b),
+                    code, expiry.isoformat() + "T06:00:00.000Z", strike, BREEZE_RIGHT[right], interval, a, b),
                     self._timeout)
             except Exception as e:      # noqa: BLE001 - network, SDK or timeout
                 raise OptionHistoryError(f"{type(e).__name__}: {e}") from e
@@ -143,6 +159,59 @@ class BreezeOptionFetcher:
             if rows:
                 return rows
         return rows
+
+    def fetch(self, underlying: str, expiry: date, strike: float, right: str, expect_data: bool = True) -> list[dict]:
+        a = (expiry - timedelta(days=LOOKBACK_DAYS)).isoformat() + "T00:00:00.000Z"
+        b = (expiry + timedelta(days=1)).isoformat() + "T00:00:00.000Z"
+        return self._request(underlying, expiry, strike, right, DAILY, a, b,
+                             1 + (self._retries if expect_data else 0))
+
+    def fetch_intraday(self, underlying: str, expiry: date, strike: float, right: str,
+                       first: date, last: date) -> list[dict]:
+        """5-minute rows of one contract from `first` to `last` (inclusive). One request for the whole
+        window; a reply at the row limit is continued from where it stopped (it may be cut at either
+        end), so a thinly traded contract costs one request and a busy one a few."""
+        fmt = "%Y-%m-%dT%H:%M:%S.000Z"
+        lo = datetime.combine(first, time(0, 0), IST)
+        hi = datetime.combine(last + timedelta(days=1), time(0, 0), IST)
+        out: dict[str, dict] = {}
+        for page in range(MAX_PAGES):
+            rows = self._request(underlying, expiry, strike, right, INTRADAY,
+                                 lo.astimezone(timezone.utc).strftime(fmt), hi.astimezone(timezone.utc).strftime(fmt),
+                                 1 + (self._retries if page == 0 else 0))
+            stamps = []
+            for r in rows:
+                dt = _parse_dt(r.get("datetime"))
+                if dt is not None:
+                    out[dt.isoformat()] = r
+                    stamps.append(dt)
+            if len(rows) < PAGE_ROWS or not stamps:
+                break
+            first_dt, last_dt = min(stamps), max(stamps)
+            if first_dt - lo <= hi - last_dt:                 # cut at the end: continue after the last row
+                lo = last_dt + timedelta(minutes=5)
+            else:                                             # cut at the start: continue before the first row
+                hi = first_dt
+            if lo >= hi:
+                break
+        else:
+            raise OptionHistoryError(f"{underlying} {expiry} {strike:g} {right}: 5-minute history did not end "
+                                     f"after {MAX_PAGES} requests")
+        return [out[k] for k in sorted(out)]
+
+
+def budgeted_fetcher(settings, store: Store, feed, run_limit: int | None = None,
+                     now: datetime | None = None, sleep: Callable[[float], None] = _time.sleep) -> BreezeOptionFetcher:
+    """A fetcher that may send at most what is left of today's option-history request budget
+    (options.backtest.daily_request_budget, counted in the store per IST day across runs), and at most
+    `run_limit` in this run. Every request sent is added to the day's count as it is sent."""
+    day = (now or utcnow()).astimezone(IST).date()
+    left = max(0, settings.options.backtest.daily_request_budget - store.requests_used(day))
+    limit = left if run_limit is None else min(left, run_limit)
+    h = settings.history
+    return BreezeOptionFetcher(feed, {i.symbol: i.breeze_code for i in settings.watchlist}, h.request_pause_seconds,
+                               h.request_timeout_seconds, 1, h.retry_pause_seconds, limit, sleep=sleep,
+                               on_request=lambda: store.add_requests(day))
 
 
 class OptionHistory:
@@ -222,6 +291,92 @@ class OptionHistory:
                 "contracts_empty": self.stats["contracts_empty"],
                 "bars_downloaded": self.stats["bars_downloaded"], "bars_rejected": self.stats["bars_rejected"],
                 "contracts_wanted_but_not_stored": len(self.not_stored), "error": self.error}
+
+
+@dataclass(frozen=True)
+class IntradayBar:
+    start: datetime               # UTC start of the 5-minute bar
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+class OptionIntraday:
+    """Stored 5-minute bars of single option contracts, read through to Breeze with the daily
+    history's fetcher (same budget, and the same stop after the first error). Only the window
+    INTRADAY_WINDOW_DAYS before each expiry is stored."""
+
+    def __init__(self, hist: OptionHistory):
+        self.hist = hist
+        self.store, self.source = hist.store, hist.source
+        self._asked: dict[str, dict[tuple, int]] = {}
+        self._bars: dict[tuple, dict[date, list[IntradayBar]]] = {}
+        self.stats: Counter = Counter()
+        self.not_stored: set[tuple] = set()
+
+    @staticmethod
+    def window(expiry: date) -> tuple[date, date]:
+        return expiry - timedelta(days=INTRADAY_WINDOW_DAYS[0]), expiry - timedelta(days=INTRADAY_WINDOW_DAYS[1])
+
+    @staticmethod
+    def _by_day(rows) -> dict[date, list[IntradayBar]]:
+        out: dict[date, list[IntradayBar]] = {}
+        for start, o, h, l, c, *_ in rows:
+            out.setdefault(start.astimezone(IST).date(), []).append(IntradayBar(start, o, h, l, c))
+        return out
+
+    def contract(self, underlying: str, expiry: date, strike: float, right: str) -> dict[date, list[IntradayBar]] | None:
+        """5-minute bars by session. {} = asked for, nothing traded in the window. None = unknown."""
+        key = (underlying, expiry, float(strike), right)
+        if key in self._bars:
+            return self._bars[key]
+        if underlying not in self._asked:
+            self._asked[underlying] = self.store.option_fetch_log(self.source, underlying, INTRADAY)
+        if key[1:] in self._asked[underlying]:
+            self._bars[key] = self._by_day(self.store.option_contract_bars(self.source, underlying, expiry, strike,
+                                                                           right, INTRADAY))
+            return self._bars[key]
+        f = self.hist.fetcher
+        if f is None or self.hist.error is not None or not f.budget_left:
+            self.not_stored.add(key)
+            return None
+        first, last = self.window(expiry)
+        try:
+            rows = f.fetch_intraday(underlying, expiry, strike, right, first, last)
+        except RequestBudgetUsed:
+            self.not_stored.add(key)
+            return None
+        except OptionHistoryError as e:
+            self.hist.error = str(e)
+            log.error("option history download stopped: %s", e)
+            self.not_stored.add(key)
+            return None
+        bars, bad = parse_option_rows(rows, intraday=True)
+        now = self.hist.now or utcnow()
+        for reason, row in bad:
+            self.store.save_quality_event(now, underlying, "BAD_BAR", _num(row.get("close")), None, None,
+                                          f"{self.source}:option5m:{expiry}:{strike:g}{right}:{reason}")
+        self.store.save_option_bars(self.source, underlying, expiry, strike, right, INTRADAY, bars, now)
+        self.stats["contracts_downloaded" if bars else "contracts_empty"] += 1
+        self.stats["bars_downloaded"] += len(bars)
+        self._asked[underlying][key[1:]] = len(bars)
+        self._bars[key] = self._by_day([(datetime.fromisoformat(b[0]), *b[1:]) for b in bars])
+        return self._bars[key]
+
+    def session(self, underlying: str, expiry: date, strike: float, right: str, d: date) -> list[IntradayBar] | None:
+        """The contract's 5-minute bars of session d, oldest first. [] = it did not trade that day.
+        None = unknown (outside the stored window, or the contract is not stored)."""
+        first, last = self.window(expiry)
+        if not (first <= d <= last):
+            return None
+        c = self.contract(underlying, expiry, strike, right)
+        return None if c is None else c.get(d, [])
+
+    def download_stats(self) -> dict:
+        return {"contracts_downloaded": self.stats["contracts_downloaded"],
+                "contracts_empty": self.stats["contracts_empty"], "bars_downloaded": self.stats["bars_downloaded"],
+                "contracts_wanted_but_not_stored": len(self.not_stored)}
 
 
 # ---------------- expiry discovery ----------------
@@ -528,10 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.iv_history:
         from ..feeds.breeze_feed import BreezeFeed
         load_dotenv(ROOT / ".env")
-        h = settings.history
-        fetcher = BreezeOptionFetcher(BreezeFeed(settings.watchlist), {i.symbol: i.breeze_code for i in settings.watchlist},
-                                      h.request_pause_seconds, h.request_timeout_seconds, 1, h.retry_pause_seconds,
-                                      settings.options.backtest.max_requests_per_run)
+        fetcher = budgeted_fetcher(settings, store, BreezeFeed(settings.watchlist),
+                                   settings.options.backtest.max_requests_per_run)
         hist = OptionHistory(store, "breeze", fetcher)
         idx = settings.regime.index_symbol
         monthly = [e for e, k in hist.expiries(idx) if k == "monthly"][-14:]

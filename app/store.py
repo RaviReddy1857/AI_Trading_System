@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS margins (
     underlying TEXT NOT NULL, structure TEXT NOT NULL, width REAL NOT NULL,
     margin_per_lot_inr REAL NOT NULL, as_of TEXT NOT NULL, PRIMARY KEY (underlying, structure, width)
 );
+CREATE TABLE IF NOT EXISTS request_budget (
+    day TEXT NOT NULL, kind TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY (day, kind)
+);
+CREATE TABLE IF NOT EXISTS shortlist (
+    session_date TEXT NOT NULL, stock TEXT NOT NULL, expiry TEXT NOT NULL, side TEXT NOT NULL,
+    rank INTEGER, status TEXT NOT NULL, score REAL, scores_json TEXT NOT NULL, reasons_json TEXT NOT NULL,
+    created_utc TEXT NOT NULL, PRIMARY KEY (session_date, stock, expiry, side)
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -296,6 +304,14 @@ class Store:
             self._db.executemany("INSERT INTO events (date,type,symbol,note) VALUES (?,?,?,?)", rows)
             self._db.commit()
 
+    def events_between(self, a: date, b: date) -> list[dict]:
+        """Events dated a..b (inclusive), oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT date,type,symbol,note FROM events WHERE date>=? AND date<=? ORDER BY date,type,symbol,note",
+                (a.isoformat(), b.isoformat())).fetchall()
+        return [{"date": date.fromisoformat(r[0]), "type": r[1], "symbol": r[2], "note": r[3]} for r in rows]
+
     def events_on(self, d: date) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
@@ -439,6 +455,60 @@ class Store:
         for r in rows:
             out.setdefault((date.fromisoformat(r[0]), r[1], r[2]), []).append((_ts(r[3]), *r[4:]))
         return out
+
+    def option_contract_bars(self, source: str, underlying: str, expiry: date, strike: float, right: str,
+                             interval: str) -> list[tuple]:
+        """Stored bars of ONE contract, oldest first: (start_utc, o, h, l, c, volume, oi)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT start_utc,open,high,low,close,volume,oi FROM option_bars WHERE underlying=? AND expiry=?"
+                " AND strike=? AND right=? AND interval=? AND source=? ORDER BY start_utc",
+                (underlying, expiry.isoformat(), float(strike), right, interval, source)).fetchall()
+        return [(_ts(r[0]), *r[1:]) for r in rows]
+
+    # ---------------- request budget (option history) ----------------
+    def requests_used(self, day: date, kind: str = "option_history") -> int:
+        with self._lock:
+            r = self._db.execute("SELECT requests FROM request_budget WHERE day=? AND kind=?",
+                                 (day.isoformat(), kind)).fetchone()
+        return r[0] if r else 0
+
+    def add_requests(self, day: date, n: int = 1, kind: str = "option_history") -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO request_budget VALUES (?,?,?) ON CONFLICT(day, kind)"
+                             " DO UPDATE SET requests = requests + excluded.requests", (day.isoformat(), kind, n))
+            self._db.commit()
+
+    # ---------------- phase 9: daily shortlist ----------------
+    def save_shortlist(self, session_date: date, rows: list[dict], created: datetime) -> int:
+        """Replace the shortlist of one session. rows: stock, expiry (iso), side, rank, status, score,
+        scores (dict), reasons (list)."""
+        with self._lock:
+            self._db.execute("DELETE FROM shortlist WHERE session_date=?", (session_date.isoformat(),))
+            self._db.executemany(
+                "INSERT OR REPLACE INTO shortlist VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(session_date.isoformat(), r["stock"], r.get("expiry") or "", r.get("side") or "", r.get("rank"),
+                  r["status"], r.get("score"), json.dumps(r.get("scores") or {}, sort_keys=True),
+                  json.dumps(r.get("reasons") or []), created.isoformat()) for r in rows])
+            self._db.commit()
+        return len(rows)
+
+    def shortlist(self, session_date: date | None = None) -> dict:
+        """The shortlist of a session (default: the latest stored one), ranked rows first."""
+        with self._lock:
+            if session_date is None:
+                r = self._db.execute("SELECT MAX(session_date) FROM shortlist").fetchone()
+                if not r or r[0] is None:
+                    return {"session_date": None, "created_utc": None, "rows": []}
+                day = r[0]
+            else:
+                day = session_date.isoformat()
+            rows = self._db.execute(
+                "SELECT stock,expiry,side,rank,status,score,scores_json,reasons_json,created_utc FROM shortlist"
+                " WHERE session_date=? ORDER BY rank IS NULL, rank, stock, side", (day,)).fetchall()
+        return {"session_date": day, "created_utc": rows[0][8] if rows else None,
+                "rows": [{"stock": r[0], "expiry": r[1] or None, "side": r[2] or None, "rank": r[3], "status": r[4],
+                          "score": r[5], "scores": json.loads(r[6]), "reasons": json.loads(r[7])} for r in rows]}
 
     def option_fetch_log(self, source: str, underlying: str, interval: str = "1day") -> dict[tuple, int]:
         """(expiry, strike, right) -> rows received, for every contract already asked for."""

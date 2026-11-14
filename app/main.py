@@ -24,7 +24,7 @@ from .options.analytics import OptionDesk
 from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
-from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML
+from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
 from .regime import RegimeService
 from .store import Store
@@ -287,6 +287,22 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     @app.get("/backtests", response_class=HTMLResponse)
     def backtest_page():
         return BACKTEST_HTML
+
+    # ---- phase 9: stock option selling shortlist (read-only; built by python -m app.options.shortlist) ----
+    @app.get("/api/stock-option-selling/shortlist")
+    def stock_option_selling_shortlist():
+        out = store.shortlist()
+        sos = settings.stock_option_selling
+        status = settings.strategies.status_of("stock_option_selling")
+        out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.weights.model_dump(),
+                    "label": status.label, "alerts": status.alerts,
+                    "note": "Research only. A shortlist row is a candidate, not a signal: signal cards, alerts and "
+                            "manual positions arrive after phase 6."})
+        return out
+
+    @app.get("/stock-option-selling", response_class=HTMLResponse)
+    def stock_option_selling_page():
+        return SHORTLIST_HTML
 
     return app
 

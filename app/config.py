@@ -73,7 +73,8 @@ class Storage(StrictModel):
         return self
 
 
-EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT")
+# BOARD_MEETING and CORPORATE_ACTION (with a symbol) keep a stock off the phase 9 shortlist until they pass.
+EVENT_TYPES = ("EXPIRY", "RBI_POLICY", "BUDGET", "RESULTS", "MARKET_EVENT", "BOARD_MEETING", "CORPORATE_ACTION")
 
 
 class Regime(StrictModel):
@@ -388,7 +389,7 @@ class Strategies(StrictModel):
         bad = [x for x in self.inactive if x not in known]
         if bad:
             raise ValueError(f"strategies.inactive has unknown ids {bad}")
-        bad = [x for x in self.status if x not in known]
+        bad = [x for x in self.status if x not in known | {"stock_option_selling"}]   # phase 9 has its own section
         if bad:
             raise ValueError(f"strategies.status has unknown ids {bad}")
         return self
@@ -449,6 +450,9 @@ class OptionBacktest(StrictModel):
     start: dict[str, _date] = {}                           # strategy id -> first session tested (default backtest.test_start)
     trigger: str = "swing_pullback_v2"                     # long_option: the daily-bar trigger that is backtested
     max_requests_per_run: int = Field(1500, ge=0, le=5000)  # --download: stop asking Breeze after this many requests
+    # Option-history requests to Breeze per calendar day (IST), counted in the store across runs. Every
+    # option-history download stops when the day's count reaches it and resumes on a later day.
+    daily_request_budget: int = Field(3500, ge=0, le=20000)
     strike_search_steps: int = Field(8, ge=1, le=30)       # how far the short-strike search may walk
 
 
@@ -471,6 +475,85 @@ class Options(StrictModel):
         return self
 
 
+# ---------------- phase 9: stock option selling ----------------
+class ShortlistWeights(StrictModel):
+    """Ranking weights of the daily shortlist (each score is 0..1; the weights need not sum to 1)."""
+    iv_rank: float = Field(0.35, ge=0, le=1)
+    trend_clarity: float = Field(0.25, ge=0, le=1)
+    distance: float = Field(0.20, ge=0, le=1)          # room between the price and its support / resistance
+    liquidity: float = Field(0.20, ge=0, le=1)
+
+
+class StockSellingBacktest(StrictModel):
+    """Backtest and option-history download of stock option selling."""
+    priority_stocks: int = Field(30, ge=1, le=250)      # the N most liquid F&O stocks are downloaded and tested
+    liquidity_lookback_days: int = Field(60, ge=5, le=500)   # liquidity = median daily traded value over these sessions
+    # How target and stop are checked while a spread is open: on the legs' 5-minute bars ("intraday") or on
+    # the daily closes with a fill at the next session's open ("daily"). The first one is the main result;
+    # every report shows the strategy and its baseline under each.
+    exit_checks: list[Literal["intraday", "daily"]] = ["intraday", "daily"]
+    # 5-minute check: a leg's last traded price may be this old at most (stock options do not trade every bar).
+    intraday_leg_max_age_minutes: int = Field(30, ge=5, le=375)
+    exit_on_strike_breach: bool = True                  # close (next open) when the stock closes beyond the sold strike
+
+    @model_validator(mode="after")
+    def distinct(self) -> "StockSellingBacktest":
+        if not self.exit_checks or len(set(self.exit_checks)) != len(self.exit_checks):
+            raise ValueError("stock_option_selling.backtest.exit_checks must list each mode once")
+        return self
+
+
+class StockOptionSelling(StrictModel):
+    """Phase 9: monthly hedged credit spreads on F&O stocks (bull put in an up trend, bear call in a down
+    trend). Every sold option is paired with a bought option of the same expiry. Stock options settle
+    physically, so no position is open in expiry week."""
+    enabled: bool = True
+    min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when the stock's IV rank is at least this
+    min_open_interest: int = Field(100, ge=0)                 # each traded strike: open interest in LOTS at least this
+    max_bid_ask_spread_pct: float = Field(10.0, gt=0, le=100)  # each traded strike: bid-ask width, % of mid, at most this
+    max_short_delta: float = Field(0.20, gt=0, lt=0.5)
+    hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
+    max_loss_per_stock_spread_pct: float = Field(10.0, gt=0, le=100)   # one lot's max loss, % of capital, at most this
+    entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
+    entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
+    profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)
+    stop_multiple_of_credit: float = Field(2.0, gt=1, le=10)
+    exit_days_before_expiry: int = Field(7, ge=7, le=30)      # out this many days before expiry: never in expiry week
+    trend_fast_sma: int = Field(20, ge=2, le=200)             # the swing trend rule: close and fast average vs slow average
+    trend_slow_sma: int = Field(50, ge=3, le=400)
+    atr_days: int = Field(14, ge=2, le=100)
+    support_resistance_lookback_days: int = Field(20, ge=5, le=250)   # support = lowest low, resistance = highest high
+    shortlist_size: int = Field(10, ge=1, le=100)
+    weights: ShortlistWeights = ShortlistWeights()
+    backtest: StockSellingBacktest = StockSellingBacktest()
+
+    @model_validator(mode="after")
+    def consistent(self) -> "StockOptionSelling":
+        if self.entry_min_days_to_expiry > self.entry_max_days_to_expiry:
+            raise ValueError("stock_option_selling.entry_min_days_to_expiry cannot exceed entry_max_days_to_expiry")
+        if self.exit_days_before_expiry >= self.entry_min_days_to_expiry:
+            raise ValueError("stock_option_selling.exit_days_before_expiry must be below entry_min_days_to_expiry")
+        h = self.hedge_strikes_out
+        if len(h) != 2 or not (1 <= h[0] <= h[1] <= 10):
+            raise ValueError("stock_option_selling.hedge_strikes_out must be [min, max] with 1 <= min <= max <= 10")
+        if self.trend_fast_sma >= self.trend_slow_sma:
+            raise ValueError("stock_option_selling.trend_fast_sma must be below trend_slow_sma")
+        return self
+
+    # the names the option backtest engine reads on every spread strategy
+    @property
+    def entry_min_dte(self) -> int:
+        return self.entry_min_days_to_expiry
+
+    @property
+    def entry_max_dte(self) -> int:
+        return self.entry_max_days_to_expiry
+
+    @property
+    def min_credit_pct_of_width(self) -> float:
+        return 0.0
+
+
 class Settings(StrictModel):
     account: Account
     risk: Risk
@@ -486,6 +569,7 @@ class Settings(StrictModel):
     strategies: Strategies = Strategies()
     backtest: Backtest = Backtest()
     options: Options = Options()             # phase 4
+    stock_option_selling: StockOptionSelling = StockOptionSelling()   # phase 9
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":
