@@ -45,6 +45,7 @@ from ..store import Store
 from . import build_option_strategies
 from .backtest import (OptionEngine, baseline_variants, prepare_history, print_report, run_option_backtest)
 from .campaign import campaigns_from_trades
+from .portfolio import PortfolioGate, universe_groups
 from .option_history import OptionHistory, OptionIntraday, budgeted_fetcher
 from .reversal import build_reversal_strategies, reversal_outcomes
 from .stock_selling import StockOptionSelling, build_stock_selling, phase9_settings
@@ -113,7 +114,9 @@ def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict
     blocked = {k.split(":", 1)[1]: v for k, v in skipped.items()
                if k.startswith("NO_SIGNAL:") and k.split(":", 1)[1] in ("DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT",
                                                                          "INSUFFICIENT_HISTORY", "CREDIT_TOO_SMALL", "MARKET_WEAK",
-                                                                         "MARKET_UNKNOWN")}
+                                                                         "MARKET_UNKNOWN", "CORRELATED_LIMIT",
+                                                                         "CORRELATION_UNKNOWN", "NO_CONFIRMED_LEVEL",
+                                                                         "ZERO_SIZE")}
     return {"label": label, "trades": s["trades"], "win_rate_pct": s["win_rate_pct"], "net_pnl_inr": s["net_pnl_inr"],
             "per_trade_inr": round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None,
             "profit_factor": s["profit_factor"], "max_drawdown_inr": s["max_drawdown_inr"], "low_sample": s["low_sample"],
@@ -136,11 +139,18 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
     mode = next(iter(by_mode))
     trades, base_trades, skipped, base_skipped, _ = by_mode[mode]
 
-    def run(st: StockOptionSelling, baseline: bool) -> tuple[list, Counter]:
+    gated = settings.stock_option_selling.portfolio.enabled
+
+    def run(st: StockOptionSelling, baseline: bool, portfolio: bool | None = None) -> tuple[list, Counter]:
+        """The strategy rows run under the portfolio limits (as the main result); baseline rows do not,
+        unless `portfolio` asks for it."""
+        use = (not baseline) if portfolio is None else portfolio
         out, sk = [], Counter()
-        for sym in syms:
-            for v in (baseline_variants(st) if baseline else ["strategy"]):
-                out += eng.run_stream(st, sym, dev, v, sk, exit_check=mode)
+        streams = [(sym, v) for sym in syms for v in (baseline_variants(st) if baseline else ["strategy"])]
+        if use and gated:
+            return eng.run_portfolio(st, streams, dev, sk, PortfolioGate(settings, eng), mode), sk
+        for sym, v in streams:
+            out += eng.run_stream(st, sym, dev, v, sk, exit_check=mode)
         return out, sk
 
     no_min = variant(settings)
@@ -150,11 +160,13 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
             _row("strategy without the trend block", *run(variant(settings, off=("trend_block",)), False), settings),
             _row("strategy without the campaign limit", *run(variant(settings, off=("campaign_limit",)), False), settings),
             _row("strategy without the market block", *run(variant(settings, off=("market_block",)), False), settings),
+            _row("strategy without the portfolio limits", *run(variant(settings), False, portfolio=False), settings),
             _row("baseline: no rules", base_trades, base_skipped, settings),
             _row("baseline + trend block", *run(variant(settings, baseline_rules=("trend_block",)), True), settings),
             _row("baseline + campaign limit", *run(variant(settings, baseline_rules=("campaign_limit",)), True), settings),
             _row("baseline + minimum net credit", *run(variant(settings, baseline_rules=("min_credit",)), True), settings),
-            _row("baseline + market block", *run(variant(settings, baseline_rules=("market_block",)), True), settings)]
+            _row("baseline + market block", *run(variant(settings, baseline_rules=("market_block",)), True), settings),
+            _row("baseline + portfolio limits", *run(variant(settings), True, portfolio=True), settings)]
     for name, kinds in ALERT_SETS.items():
         rows.append(_row(f"baseline + exit on alert: {name}", *run(variant(settings, alert_exits=kinds), True), settings))
     every = set().union(*ALERT_SETS.values())
@@ -189,34 +201,56 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
             "baseline_by_entry_condition": by_cond}
 
 
-def policy_runs(settings: Settings, eng: OptionEngine, sym: str, sessions: list[date], exit_check: str = "daily",
+def policy_runs(settings: Settings, eng: OptionEngine, syms, sessions: list[date], exit_check: str = "daily",
                 skipped: dict | None = None) -> dict:
-    """{"strategy" | "baseline": {policy: trades}} for one stock under one execution mode. The "stop"
-    policy is run first and its entry signals are recorded; every other policy enters exactly those
-    signals. `skipped`: {group: {policy: Counter}} collects what each run skipped or left out."""
+    """{"strategy" | "baseline": {policy: trades}} for one stock or a list of stocks under one execution
+    mode. The "stop" policy is run first and its entry signals are recorded; every other policy enters
+    exactly those signals. The strategy's stocks run side by side under the portfolio limits (rolls are
+    checked against them too); the baseline runs without them. `skipped`: {group: {policy: Counter}}."""
+    syms = [syms] if isinstance(syms, str) else list(syms)
     policies = settings.stock_option_selling.backtest.exit_policies
+    gated = settings.stock_option_selling.portfolio.enabled
     ref = variant(settings)
     out = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
 
     def counter(group: str, policy: str) -> Counter:
         return Counter() if skipped is None else skipped.setdefault(group, {}).setdefault(policy, Counter())
 
-    recorded = {}
-    for name in ["strategy"] + baseline_variants(ref):
-        rec: list = []
-        group = "strategy" if name == "strategy" else "baseline"
-        out[group]["stop"] += eng.run_stream(ref, sym, sessions, name, counter(group, "stop"), exit_check=exit_check, record=rec)
-        recorded[name] = rec
+    def strategy_run(st, policy, record=None, replay=None):
+        streams = [(s, "strategy") for s in syms]
+        if gated:
+            return eng.run_portfolio(st, streams, sessions, counter("strategy", policy), PortfolioGate(settings, eng),
+                                     exit_check, record=record, replay=replay)
+        trades = []
+        for key in streams:
+            rec = None if record is None else record.setdefault(key, [])
+            trades += eng.run_stream(st, key[0], sessions, key[1], counter("strategy", policy), exit_check=exit_check,
+                                     record=rec, replay=None if replay is None else replay.get(key, {}))
+        return trades
+
+    recorded: dict = {}
+    out["strategy"]["stop"] = strategy_run(ref, "stop", record=recorded)
+    for sym in syms:
+        for name in baseline_variants(ref):
+            rec: list = []
+            out["baseline"]["stop"] += eng.run_stream(ref, sym, sessions, name, counter("baseline", "stop"),
+                                                      exit_check=exit_check, record=rec)
+            recorded[(sym, name)] = rec
+
+    def replay_of(key) -> dict:
+        r: dict = {}
+        for d, sig in recorded.get(key, []):
+            r.setdefault(d, []).append(sig)
+        return r
+
     for policy in policies[1:]:
         st = variant(settings)
         st.exit_policy = policy
-        for name, rec in recorded.items():
-            replay: dict = {}
-            for d, sig in rec:
-                replay.setdefault(d, []).append(sig)
-            group = "strategy" if name == "strategy" else "baseline"
-            out[group][policy] += eng.run_stream(st, sym, sessions, name, counter(group, policy), exit_check=exit_check,
-                                                 replay=replay)
+        out["strategy"][policy] = strategy_run(st, policy, replay={k: replay_of(k) for k in recorded if k[1] == "strategy"})
+        for sym in syms:
+            for name in baseline_variants(st):
+                out["baseline"][policy] += eng.run_stream(st, sym, sessions, name, counter("baseline", policy),
+                                                          exit_check=exit_check, replay=replay_of((sym, name)))
     return out
 
 
@@ -268,11 +302,10 @@ def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], de
     for mode in modes:
         total = {"strategy": {p: [] for p in policies}, "baseline": {p: [] for p in policies}}
         sk: dict = {}
-        for sym in syms:
-            got = policy_runs(settings, eng, sym, dev, mode, sk)
-            for group in total:
-                for p in policies:
-                    total[group][p] += got[group][p]
+        got = policy_runs(settings, eng, syms, dev, mode, sk)
+        for group in total:
+            for p in policies:
+                total[group][p] += got[group][p]
         out[mode] = {"exit_check": mode,
                      "note": "Every policy enters exactly the same signals (recorded from the stop policy). "
                              + POLICY_NOTE[mode] + " One lot each. Results are per campaign: an original trade and all "
@@ -383,7 +416,25 @@ def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[
             "observations": rules}
 
 
+def groups_at_end(settings: Settings, eng: OptionEngine, syms: list[str], dev: list[date]) -> dict:
+    """The correlated groups of the tested stocks at the last tested session (same sector, or daily-return
+    correlation >= the threshold over the window before it)."""
+    if not dev:
+        return {}
+    gate = PortfolioGate(settings, eng)
+    d = dev[-1]
+    return {"correlation_groups_at_end": {"date": d.isoformat(),
+                                          **universe_groups(syms, gate.sectors, lambda a, b: gate.corr.at(d, a, b),
+                                                            gate.cfg.correlation_threshold)}}
+
+
 def print_effects(rep: dict) -> None:
+    for mode, x in (rep.get("portfolio_limits") or {}).items():
+        print(f"  portfolio limits ({mode}): {x['checks']} entries checked, refused {x['refused']}, "
+              f"group size of the proposed positions {x['group_size_of_proposed_positions']}")
+    cg = rep.get("correlation_groups_at_end")
+    if cg:
+        print(f"  correlated groups on {cg['date']}: sizes {cg['sizes']}; problems {cg['problem_count']}")
     di = rep.get("data_incomplete_summary")
     if di:
         for g in ("strategy", "baseline"):
@@ -467,6 +518,14 @@ def write_status(settings: Settings, status: dict) -> Path:
     return p
 
 
+def _no_portfolio(settings: Settings) -> Settings:
+    """For the download only: one stock at a time, without the portfolio limits (a superset of the
+    contracts the gated runs can want)."""
+    sos = settings.stock_option_selling
+    return settings.model_copy(update={"stock_option_selling": sos.model_copy(
+        update={"portfolio": sos.portfolio.model_copy(update={"enabled": False})})})
+
+
 def waiting_for_priority_years(priority_years: list[int], stocks: list[str], done: dict) -> list[str]:
     """Newest first: the stocks (with price history) not yet complete for every priority year. An
     earlier year is downloaded only when this is empty."""
@@ -528,7 +587,7 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
                 for name in names:
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
             for mode in settings.stock_option_selling.backtest.exit_checks:
-                policy_runs(settings, engine, sym, block, mode)      # the spreads the roll policies open
+                policy_runs(_no_portfolio(settings), engine, sym, block, mode)   # the spreads the roll policies open
             for st in build_reversal_strategies(settings):   # the two reversal candidates and their baselines
                 for name in ["strategy"] + baseline_variants(st):
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="daily")
@@ -714,9 +773,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     res = run_option_backtest(settings, store, "breeze", strategy, hist, use_stocks, engine=eng,
                               exit_checks=tuple(bt.exit_checks), first_session=first, coverage_note=note,
+                              gate_factory=(lambda e: PortfolioGate(settings, e)) if settings.stock_option_selling.portfolio.enabled else None,
                               extra=lambda e, syms, d, by_mode: {**rule_effects(settings, e, syms, d, by_mode),
                                                                  **policy_comparison(settings, e, syms, d),
-                                                                 **incomplete_sensitivity(settings, e, syms, d, by_mode)})
+                                                                 **incomplete_sensitivity(settings, e, syms, d, by_mode),
+                                                                 **groups_at_end(settings, e, syms, d)})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
     rev = run_reversal_reports(settings, store, eng, use_stocks, [r["stock"] for r in ranked], dev, first, note)

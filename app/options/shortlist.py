@@ -38,6 +38,8 @@ from .greeks import days_to_expiry, years_to_expiry
 from .instruments import InstrumentBook
 from .margin import MarginBook
 from .reversal import ReversalScanner, build_reversal_strategies
+from .actionable import RESEARCH_LABEL, actionable_check
+from .portfolio import Correlations, universe_groups
 from .stock_profile import HISTORY_LABEL, breadth_pct, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
 from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling, phase9_settings
 
@@ -68,11 +70,13 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
     asof = datetime.combine(session, time(15, 30), IST).astimezone(timezone.utc)
     rate, div = o.risk_free_rate_pct / 100.0, (cfg.dividend_yield_pct if cfg else 0.0) / 100.0
     chains, expiries, atm_now = {}, [], None
+    chain_as_of = {}
     for spec in wanted_specs(book, settings, sym, session, now):
         quotes, as_of = stored_quotes(store, source, sym, spec.expiry)
         if not quotes or as_of is None or as_of.astimezone(IST).date() != session:
             continue                                   # no chain from this session: unknown, never guessed
         chains[spec.expiry] = quotes
+        chain_as_of[spec.expiry] = as_of
         expiries.append(ExpiryInfo(spec.expiry, spec.kind, spec.lot_size))
         if atm_now is None and days_to_expiry(asof, spec.expiry) >= 5:
             atm_now = atm_iv_pct(quotes, spot, years_to_expiry(asof, spec.expiry), rate, div)
@@ -93,7 +97,8 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct)),
         index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
         market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session),
-                "breadth_pct": breadth_on(settings, store, source, session)}), None
+                "breadth_pct": breadth_on(settings, store, source, session), "chain_as_of": chain_as_of,
+                "daily_bar_date": bar_date(bars[-1])}), None
 
 
 # What to fill in when a scenario has no input data. Nothing is ever invented for a missing file.
@@ -175,6 +180,37 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
     out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
                                                                 bar_date(bars[-1])), sos.profile, floor)
     return out
+
+
+def store_correlations(settings: Settings, store: Store, source: str) -> Correlations:
+    """Daily-return correlations from the stored daily bars (completed sessions only)."""
+    cfg = settings.stock_option_selling.portfolio
+    sessions = [bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source)]
+    cache: dict = {}
+
+    def daily(sym):
+        if sym not in cache:
+            cache[sym] = store.history_bars("bars_1d", sym, source)
+        return cache[sym]
+
+    def breaks(sym):
+        bars = daily(sym)
+        return gap_breaks([b.open for b in bars], [b.close for b in bars], settings.history.max_overnight_gap_pct)
+
+    return Correlations(daily, sessions, breaks, cfg.correlation_window, cfg.correlation_min_overlap)
+
+
+def correlation_groups(settings: Settings, store: Store, source: str) -> dict:
+    """The correlated groups of the watchlist stocks at the newest stored session (same sector, or
+    daily-return correlation >= correlation_threshold over correlation_window sessions), for the page."""
+    session = session_date(settings, store, source)
+    if session is None:
+        return {"date": None, "groups": [], "sizes": [], "problems": [], "problem_count": 0}
+    corr = store_correlations(settings, store, source)
+    stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
+    sectors = {i.symbol: (i.sector or None) for i in settings.watchlist}
+    return {"date": session.isoformat(), **universe_groups(stocks, sectors, lambda a, b: corr.at(session, a, b),
+                                                           settings.stock_option_selling.portfolio.correlation_threshold)}
 
 
 _BREADTH: dict = {}
@@ -287,10 +323,25 @@ def run_shortlist(settings: Settings, store: Store, source: str, now: datetime |
         ctx, why = stock_context(settings, store, source, book, desk, costs, margins, sym, session, now)
         if ctx is None:
             left_out.append({"stock": sym, "expiry": None, "side": None, "rank": None, "status": "EXCLUDED",
-                             "score": None, "scores": {}, "reasons": [why]})
+                             "score": None, "scores": {}, "reasons": [why], "label": RESEARCH_LABEL,
+                             "actionable": False, "not_actionable_because": [why], "snapshot": {"session_date": session.isoformat()}})
         else:
             contexts.append(ctx)
-    rows = build_shortlist(strategy, contexts) + left_out
+    stored_corr = store_correlations(settings, store, source)
+    sectors = {i.symbol: (i.sector or None) for i in settings.watchlist}
+
+    def annotate(ctx, a) -> dict:
+        """Every shortlist row is a research candidate from the session snapshot; whether it would be
+        actionable is checked against the live rules (positions are not recorded yet: never, for now)."""
+        as_of = ctx.market.get("chain_as_of") or {}
+        ok, why = actionable_check(settings, a.signal, ctx, now, as_of, None, sectors,
+                                   lambda x, y: stored_corr.at(session, x, y))
+        return {"label": RESEARCH_LABEL, "actionable": ok, "not_actionable_because": why,
+                "snapshot": {"session_date": session.isoformat(),
+                             "daily_bar_date": ctx.market["daily_bar_date"].isoformat(),
+                             "chain_as_of_utc": {e.isoformat(): x.isoformat() for e, x in sorted(as_of.items())}}}
+
+    rows = build_shortlist(strategy, contexts, annotate) + left_out
     if not stocks:
         rows = [{"stock": "-", "expiry": None, "side": None, "rank": None, "status": "EXCLUDED", "score": None,
                  "scores": {}, "reasons": ["LOT_SIZE_UNKNOWN: the instrument list is missing or older than 5 days"]}]

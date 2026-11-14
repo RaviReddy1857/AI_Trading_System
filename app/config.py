@@ -536,6 +536,24 @@ class MarketBlock(StrictModel):
     min_coverage_pct: float = Field(80.0, gt=0, le=100)            # share of stocks with usable data, else breadth is unknown
 
 
+class PortfolioLimits(StrictModel):
+    """CORRELATED_LIMIT / CORRELATION_UNKNOWN / PORTFOLIO_UNKNOWN (app/options/portfolio.py)."""
+    enabled: bool = True
+    max_open_spreads: int = Field(6, ge=1, le=100)
+    max_total_risk_pct: float = Field(10.0, gt=0, le=100)          # of capital, every open position counted
+    correlation_window: int = Field(60, ge=10, le=500)             # sessions of daily returns
+    correlation_threshold: float = Field(0.7, gt=0, le=1)
+    correlation_min_overlap: int = Field(50, ge=5, le=500)         # common observations needed
+    group_max_positions: int = Field(2, ge=1, le=100)
+    group_max_risk_pct: float = Field(5.0, gt=0, le=100)
+
+    @model_validator(mode="after")
+    def overlap(self) -> "PortfolioLimits":
+        if self.correlation_min_overlap > self.correlation_window:
+            raise ValueError("portfolio.correlation_min_overlap cannot exceed correlation_window")
+        return self
+
+
 class CampaignLimit(StrictModel):
     """Per-stock campaign limit (STOCK_LOSS_LIMIT): after repeated stops or a large loss in one stock,
     no new signal in that stock for a cooling-off period. Closed manual positions count too."""
@@ -653,6 +671,7 @@ class StockOptionSelling(StrictModel):
     trend_block: TrendBlock = TrendBlock()
     campaign_limit: CampaignLimit = CampaignLimit()
     market_block: MarketBlock = MarketBlock()
+    portfolio: PortfolioLimits = PortfolioLimits()
     roll: RollRules = RollRules()
     reversal: Reversal = Reversal()
     profile: StockProfile = StockProfile()

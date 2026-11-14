@@ -45,6 +45,10 @@ FIXTURE_SOS = {
     "roll": {"max_rolls": 1, "min_net_credit_pct_of_width": 10.0, "stuck_time_value_pct": 10.0},
     # the fixture worlds hold one or two of the five fixture-watchlist stocks: breadth is computed from those
     "market_block": {"enabled": True, "breadth_sma_days": 50, "min_breadth_pct": 40.0, "min_coverage_pct": 20.0},
+    # scaled with the fixture's 10% position budget (the shipped values are 10% total and 5% a group for 2.5%)
+    "portfolio": {"enabled": True, "max_open_spreads": 6, "max_total_risk_pct": 40.0, "correlation_window": 60,
+                  "correlation_threshold": 0.7, "correlation_min_overlap": 50, "group_max_positions": 2,
+                  "group_max_risk_pct": 20.0},
 }
 
 
@@ -443,6 +447,9 @@ def test_shipped_defaults_are_the_section_2_values():
     assert (rv.drawdown_pct, rv.min_sessions_below_long, rv.base_no_new_low_sessions) == (25.0, 63, 15)
     assert (rv.range_sessions, rv.range_compare_sessions, rv.range_shrink_ratio) == (10, 20, 0.8)
     assert rv.alerts_approved is False and _settings().options.backtest.daily_request_budget == 3500
+    pf = p.portfolio
+    assert (pf.max_open_spreads, pf.max_total_risk_pct, pf.correlation_window, pf.correlation_threshold,
+            pf.correlation_min_overlap, pf.group_max_positions, pf.group_max_risk_pct) == (6, 10.0, 60, 0.7, 50, 2, 5.0)
     mb = p.market_block
     assert (mb.enabled, mb.breadth_sma_days, mb.min_breadth_pct) == (True, 50, 40.0)       # market_breadth_min_pct
 
@@ -890,8 +897,9 @@ def run_bt(w, exit_checks=("intraday", "daily"), with_intraday=True, hist=None):
     hist = hist or OptionHistory(store, "sim")
     eng = engine_for(cfg, store, base, hist, with_intraday)
     eng.set_expiry_floor(BT_FIRST)                                  # option history is stored from here on
+    from app.options.portfolio import PortfolioGate
     return run_option_backtest(cfg, store, "sim", build_stock_selling(cfg), hist, ["RELIANCE"], engine=eng, save=False,
-                               now=NOW, exit_checks=exit_checks)
+                               now=NOW, exit_checks=exit_checks, gate_factory=lambda e: PortfolioGate(cfg, e))
 
 
 def ist_date(text):

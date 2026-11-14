@@ -597,6 +597,10 @@ class OptionEngine:
         if m["roll_net_credit_pct_of_width"] is None or not m["roll_net_credit_pct_of_width"] > limit:
             pos.roll_refused = "ROLL_NET_CREDIT_TOO_SMALL"
             return
+        refused = self._roll_gate(sym, d, new, pos)
+        if refused:
+            pos.roll_refused = refused
+            return
         pos.pending_roll = new
 
     def _manage_sync(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
@@ -678,6 +682,10 @@ class OptionEngine:
             held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
             choice = roll_choices(strategy, ctx_now(), held, cost, pos.roll_no, pos.realised, unlimited=never_stop)
             pos.pending_roll, pos.roll_refused = choice["roll_signal"], choice["refused_by"] or ""
+            if pos.pending_roll is not None:
+                refused = self._roll_gate(sym, d, pos.pending_roll, pos)
+                if refused:
+                    pos.pending_roll, pos.roll_refused = None, refused
         return ("hold",)
 
     def _manage(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
@@ -723,6 +731,10 @@ class OptionEngine:
                 held = SpreadPosition(sym, short.right, short.strike, long_.strike, expiry, credit, short.lot_size, short.lots)
                 choice = roll_choices(strategy, roll_ctx(), held, value, pos.roll_no, pos.realised, unlimited=never_stop)
                 pos.pending_roll, pos.roll_refused = choice["roll_signal"], choice["refused_by"] or ""
+                if pos.pending_roll is not None:
+                    refused = self._roll_gate(sym, d, pos.pending_roll, pos)
+                    if refused:
+                        pos.pending_roll, pos.roll_refused = None, refused
             return ("hold",)
         if len(pos.legs) > 1:
             # A debit spread (bull call spread): judged on the closing value of its legs (bought minus
@@ -779,12 +791,76 @@ class OptionEngine:
         return dict(out)
 
     # ---- one stream: one strategy (or one of its baselines) on one underlying ----
+    # ---- portfolio gate (phase 9): set by run_portfolio while streams run side by side ----
+    _gate = None                         # gate(sym, day, signal, replacing position or None) -> refusing code or None
+    _book = None                         # stream key -> the signals open or pending in that stream
+
+    def _roll_gate(self, sym: str, d: date, new: Signal, pos: _Position) -> str | None:
+        return self._gate(sym, d, new, pos) if self._gate is not None else None
+
     def run_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
                    skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily",
                    record: list | None = None, replay: dict | None = None) -> list[OptionTrade]:
         """`record`: every entry signal is appended to it as (signal day, signal). `replay`:
         {signal day: [signals]} - these signals are entered instead of evaluating the strategy, so
         different exit policies can be compared on exactly the same entries."""
+        g = self.iter_stream(strategy, sym, sessions, variant, skipped, schedule_log, exit_check, record, replay)
+        while True:
+            try:
+                next(g)
+            except StopIteration as stop:
+                return stop.value
+
+    def run_portfolio(self, strategy: OptionStrategy, streams: list[tuple[str, str]], sessions: list[date],
+                      skipped: Counter, gate, exit_check: str = "daily", record: dict | None = None,
+                      replay: dict | None = None) -> list[OptionTrade]:
+        """Several streams ((symbol, variant) pairs) run side by side, day by day, so that the portfolio
+        gate sees every stream's open and pending positions at each decision. On one day the streams
+        decide in the order given. `gate(sym, day, signal, replacing)` returns the refusing code or None
+        (a new entry is refused before it is taken; a roll's replacement likewise). `record` / `replay`:
+        per stream key, as in run_stream."""
+        import heapq
+        self._gate, self._book = gate, {}
+        gens, out = {}, []
+        try:
+            heap = []
+            for n, key in enumerate(streams):
+                g = self.iter_stream(strategy, key[0], sessions, key[1], skipped, None, exit_check,
+                                     None if record is None else record.setdefault(key, []),
+                                     None if replay is None else replay.get(key, {}), key)
+                gens[key] = g
+                try:
+                    heapq.heappush(heap, (next(g), n, key))
+                except StopIteration as stop:
+                    out += stop.value
+            while heap:
+                _, n, key = heapq.heappop(heap)
+                try:
+                    heapq.heappush(heap, (next(gens[key]), n, key))
+                except StopIteration as stop:
+                    out += stop.value
+        finally:
+            self._gate, self._book = None, None
+        out.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
+        return out
+
+    def book_holdings(self, exclude_key=None, exclude_sig: Signal | None = None) -> list:
+        """The positions open or pending in every stream (portfolio.Holding), each on its own."""
+        from .portfolio import Holding
+        out = []
+        for key, sigs in (self._book or {}).items():
+            for s in sigs:
+                if exclude_sig is not None and s is exclude_sig:
+                    continue
+                out.append(Holding(s.symbol, float(s.details.get("max_loss_inr") or 0.0)))
+        return out
+
+    def iter_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
+                    skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily",
+                    record: list | None = None, replay: dict | None = None, key=None):
+        """run_stream as a generator: it yields the date of each session BEFORE processing it, and
+        returns the trades. Run alone or side by side (run_portfolio)."""
+        key = key or (sym, variant)
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
         allowed = set(sessions)
@@ -826,10 +902,17 @@ class OptionEngine:
             log_rows.append(row)
             return row
 
+        def publish() -> None:
+            if self._book is not None:
+                self._book[key] = [p.sig for p in positions] + [p.pending_roll for p in positions if p.pending_roll] \
+                    + [s for s, _ in pending]
+
         for i, bar in enumerate(bars):
             d = bar_date(bar)
             if last_allowed is None or d > last_allowed:
                 break
+            publish()
+            yield d
             gap = i > 0 and self.base.sessions_between(bar_date(bars[i - 1]), d) > 0
             if i in brk:
                 start = i
@@ -932,7 +1015,14 @@ class OptionEngine:
                             skipped["NO_SIGNAL:" + reason] += 1
                         row.update(result="skipped", reason=reasons[0])
                         continue
+                    if self._gate is not None:
+                        refused = self._gate(sym, d, out[0], None)
+                        if refused:
+                            skipped["NO_SIGNAL:" + refused] += 1
+                            row.update(result="skipped", reason=refused)
+                            continue
                     pending.append((out[0], row))
+                    publish()
                     if record is not None:
                         record.append((d, out[0]))
                 continue
@@ -968,7 +1058,13 @@ class OptionEngine:
                 for reason in strategy.last_no_trade:
                     skipped["NO_SIGNAL:" + reason.split(":")[0]] += 1
                 continue
+            if self._gate is not None:
+                refused = self._gate(sym, d, out[0], None)
+                if refused:
+                    skipped["NO_SIGNAL:" + refused] += 1
+                    continue
             pending.append((out[0], None))
+            publish()
             if record is not None:
                 record.append((d, out[0]))
             if not is_long:
@@ -985,6 +1081,8 @@ class OptionEngine:
         if incomplete:                                        # data-incomplete campaigns are left out entirely
             skipped["DATA_INCOMPLETE_CAMPAIGNS"] += len(incomplete)
             trades = [t for t in trades if (t.campaign_id or t.signal_id) not in incomplete]
+        if self._book is not None:
+            self._book[key] = []
         return trades
 
 
@@ -1032,7 +1130,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
                         underlyings: list[str] | None = None, engine: OptionEngine | None = None,
                         save: bool = True, now: datetime | None = None,
                         exit_checks: tuple[str, ...] = ("daily",), first_session: date | None = None,
-                        coverage_note: str = "", extra=None) -> dict:
+                        coverage_note: str = "", extra=None, gate_factory=None) -> dict:
     """`exit_checks`: how target and stop are checked while a spread is open. The first mode is the
     main result; the report also shows the strategy and its baseline under every other mode listed."""
     eng = engine or OptionEngine(settings, store, source, prices)
@@ -1053,15 +1151,21 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
     strategy.rejections.clear()
     notes_lot = {sym: eng.lot_size(sym) for sym in syms}
     by_mode: dict[str, tuple] = {}
+    portfolio_stats: dict[str, dict] = {}
     for mode in exit_checks:
         m_trades: list[OptionTrade] = []
         m_base: list[OptionTrade] = []
         m_skipped, m_base_skipped = Counter(), Counter()
         m_log: list[dict] = []
         for sym in syms:
-            m_trades += eng.run_stream(strategy, sym, dev, "strategy", m_skipped, exit_check=mode)
+            if gate_factory is None:
+                m_trades += eng.run_stream(strategy, sym, dev, "strategy", m_skipped, exit_check=mode)
             for v in baseline_variants(strategy):
                 m_base += eng.run_stream(strategy, sym, dev, v, m_base_skipped, m_log, exit_check=mode)
+        if gate_factory is not None:                     # the strategy's stocks side by side, under the portfolio limits
+            gate = gate_factory(eng)
+            m_trades = eng.run_portfolio(strategy, [(s, "strategy") for s in syms], dev, m_skipped, gate, mode)
+            portfolio_stats[mode] = gate.summary()
         for ts in (m_trades, m_base):
             ts.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
         by_mode[mode] = (m_trades, m_base, m_skipped, m_base_skipped, m_log)
@@ -1100,6 +1204,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "payoff_simulation": label == "model",
         "eligibility_label": ELIGIBILITY_LABEL, "eligibility_note": ELIGIBILITY_NOTE,
         "bypassed_checks": BYPASSED_CHECKS,
+        "portfolio_limits": portfolio_stats or None,
         "exit_check": exit_checks[0], "exit_check_label": EXIT_CHECK_LABEL[exit_checks[0]],
         "exit_check_comparison": both_ways,
         "symbols": len(syms), "underlyings": syms, "lot_sizes": notes_lot,

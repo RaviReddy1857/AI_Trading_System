@@ -24,7 +24,7 @@ from .options.analytics import OptionDesk
 from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
-from .options.shortlist import reversal_watch, stock_view
+from .options.shortlist import correlation_groups, reversal_watch, stock_view
 from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
 from .regime import RegimeService
@@ -298,8 +298,10 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.weights.model_dump(),
                     "stocks": [i.symbol for i in settings.watchlist if i.kind == "stock"],
                     "label": status.label, "alerts": status.alerts,
-                    "note": "Research only. A shortlist row is a candidate, not a signal: signal cards, alerts and "
-                            "manual positions arrive after phase 6."})
+                    "note": "Research only. Every row is a research candidate from the last session's snapshot, not a "
+                            "signal. An actionable signal also needs a live price, a fresh chain with bid and ask, a current "
+                            "margin and the open positions known (PORTFOLIO_UNKNOWN until positions are recorded after phase 6).",
+                    "correlation_groups": correlation_groups(settings, store, feed.name)})
         return out
 
     @app.get("/api/stock-option-selling/reversals")

@@ -471,7 +471,7 @@ def weighted_score(scores: dict, weights) -> float:
                      for k in ("iv_rank", "trend_clarity", "distance", "liquidity")), 4)
 
 
-def build_shortlist(strategy: StockOptionSelling, contexts: list[OptionContext]) -> list[dict]:
+def build_shortlist(strategy: StockOptionSelling, contexts: list[OptionContext], annotate=None) -> list[dict]:
     """Assess every stock and rank the valid setups by weighted score. Returns rows for the `shortlist`
     table: the top `shortlist_size` candidates ranked 1..n, then every other stock with the reason it
     is not on the list (illiquid, event before expiry, no trend, ...)."""
@@ -481,7 +481,8 @@ def build_shortlist(strategy: StockOptionSelling, contexts: list[OptionContext])
         a = strategy.assess(ctx)
         rows.append({"stock": a.stock, "expiry": a.expiry.isoformat() if a.expiry else None, "side": a.side,
                      "status": a.status, "score": weighted_score(a.scores, p.weights) if a.status == "CANDIDATE" else None,
-                     "scores": a.scores, "reasons": a.reasons, "rank": None})
+                     "scores": a.scores, "reasons": a.reasons, "rank": None,
+                     **(annotate(ctx, a) if annotate is not None else {})})
     good = sorted((r for r in rows if r["status"] == "CANDIDATE"), key=lambda r: (-r["score"], r["stock"]))
     for n, r in enumerate(good, start=1):
         if n <= p.shortlist_size:
