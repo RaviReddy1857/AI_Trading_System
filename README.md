@@ -1,4 +1,4 @@
-# Trading Research System - Phases 1-4: data feed, quality gate, market regime, strategies, backtests and options
+# Trading Research System - Phases 1-4 and the core of phase 9: data feed, quality gate, market regime, strategies, backtests, options and stock option selling
 
 Research and suggestions only. **This app cannot place, change or close orders**,
 and a test fails the build if such code is ever added. You trade manually in ICICI Direct.
@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 437 passed
+python -m pytest -q          # should say 526 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -265,9 +265,8 @@ How these backtests work:
   first market session on which the expiry is inside the entry window, for option buying the first market session of the
   month. If it cannot enter that day (no valid strike, no price, no fill at the next open) the attempt is recorded as
   skipped with its reason and is never retried. Baseline positions of different expiries may overlap.
-- **After the 2026-11-13 review fixes the baselines want 31 contracts that are not stored yet.** Run
-  `python -m app.options.backtest --download` once (a few dozen requests, needs the Breeze login) and then
-  `python -m app.options.backtest`; the baseline rows will move slightly. Until then the reports say INCOMPLETE.
+- The 31 index contracts the fixed schedule wanted were downloaded on 2026-11-14 and the index backtests rerun
+  (docs/STATUS.md, issue 54). A report says INCOMPLETE whenever contracts it wanted are not stored.
 - A signal comes from a day's close; every leg is entered at the **next session's open**, with 0.5% slippage per leg.
 - Spreads are judged on closing prices (cost to buy back): target at 50% of the credit kept, stop at 2x the credit, and out
   before expiry. The exit is filled at the next session's open, so a stop can fill well past 2x. Nothing is held to settlement.
@@ -289,6 +288,44 @@ How these backtests work:
 
 **Swing backtests (issue 42).** A daily-bar trade is now dropped if the stock has no daily bar for a session the index
 traded while the trade was open (its stop or target may have been hit that day). On your data this removed no trade.
+
+## Phase 9 core: stock option selling (monthly hedged spreads on stocks)
+
+Research only, no alerts yet. Signal cards, Telegram alerts and the manual position form come after phase 6.
+
+**See it:** `python -m app.main`, then http://127.0.0.1:8000/stock-option-selling : the daily shortlist, the reversal
+watch list ("watch only, never a signal"), campaigns, and a per-stock profile with scenario history ("history, not a
+forecast"). Backtest results are on http://127.0.0.1:8000/backtests.
+
+**Commands**
+```
+python -m app.options.stock_backtest --status      # liquidity ranking, today's request budget, what is completely downloaded
+python -m app.options.stock_backtest --download    # fetch stock option history within the daily budget, then report
+python -m app.options.stock_backtest               # report from stored prices only (no login needed)
+python -m app.options.stock_backtest --recheck --no-report   # after an interrupted download: mark what is completely stored
+python -m app.options.shortlist                    # after the close: load stock option chains, build the day's shortlist
+python -m app.history                              # daily bars must be up to date for the shortlist, profile and watch list
+```
+- The download needs a fresh Breeze session in `.env`. It uses at most `options.backtest.daily_request_budget` (3,500)
+  requests a day, the 30 most liquid stocks first, newest year first, and skips everything already stored. Run it once a
+  day until `--status` shows every year complete; a Breeze error stops it cleanly and the next run carries on.
+- A report covers only the stocks and years that are completely downloaded (`--all-data` shows everything, marked INCOMPLETE).
+
+**What the report shows:** the strategy beside its no-filter baseline (same spread on a fixed schedule) with target and
+stop checked on 5-minute option bars and on daily closes; three exit policies on the same entries (stop, roll by the
+rules, roll every month); what each rule and each alert does to the result; baseline trades split by what was known at
+entry; and every confirmed reversal with its 10, 20 and 40-session outcome and both candidate trades.
+
+**Files you fill for the scenario history** (until then those scenarios say "no data"; nothing is invented):
+- `data/fii_dii.csv`: `date,fii_net_cr,dii_net_cr`, one row per session from 2019-01-22 (Rs crore, selling negative).
+  Source: NSE "FII/DII trading activity" (recent days); for older days NSE's archive or NSDL's FPI daily reports
+  (fpi.nsdl.co.in). Use one source throughout.
+- `data/events.csv`: `date,type,note,symbol`. Add `RBI_POLICY` rows (symbol blank) for past rate-decision days, from the
+  RBI website, and `RESULTS` rows with the stock's symbol for past and coming results days, from NSE corporate filings.
+  `BOARD_MEETING` and `CORPORATE_ACTION` rows with a symbol also keep that stock off the shortlist until they pass.
+
+**Thresholds** are all in `config.yaml` under `stock_option_selling`; the ones marked ASSUMPTION are mine and need your decision.
+Reversal candidates stay silent until you set `stock_option_selling.reversal.alerts_approved: true`.
 
 ## Status values
 | Status | Meaning |
@@ -319,6 +356,9 @@ traded while the trade was open (its stop or target may have been hit that day).
   `long_option.py`, `credit_spread.py`, `iron_condor.py`, `option_history.py` (stored Breeze option prices, expiry
   discovery), `backtest.py` (option backtests with the baseline), `analytics.py` (put-call ratio, highest-OI strikes, the Options page data)
 - `scripts/check_option_history.py` - the check of what option history Breeze provides
+- `app/options/stock_selling.py`, `stock_profile.py`, `campaign.py`, `reversal.py`, `shortlist.py`, `stock_backtest.py` -
+  phase 9 core: stock option selling rules, rolls and alerts; profile, scenario history and blocks; campaign tracking;
+  reversal detector and its two candidates; the shortlist and views; the download and the report
 - `app/main.py` - web server and API: `/health`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`,
   `/api/config`, `/api/regime`, and `POST /data/import/{fii_dii|events|holidays}` (writes only your data files;
   JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`, `/api/options`, `/api/options/{underlying}` and
@@ -327,6 +367,8 @@ traded while the trade was open (its stop or target may have been hit that day).
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Stock option selling.** Only Jan-Jun 2026 of 9 stocks is downloaded, so every result is low sample. The shortlist
+  command and the views have not been run against live Breeze chains. See docs/STATUS.md, "Phase 9 core".
 - **Options, live.** The option chain loader, the 5-minute background refresh and live option signals have not been seen
   running in market hours (the code was written after the close on 2026-11-13); one manual chain request returned 60
   strikes per side with bid, ask and OI. Spread signals also need your margin entries.

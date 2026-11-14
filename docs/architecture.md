@@ -231,7 +231,9 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `positions` | 6 | open positions the user took or entered manually: origin (SIGNAL/MANUAL), trade type, legs (instrument or option legs), quantity/lots, entry, current stop/target, hedged flag (UNHEDGED shown in red), status, last exit call |
 | `alert_switches` | 6 | trade type (intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling), on/off (default off), changed_at; with a change log |
 | `exit_calls` | 6 | position_id, at_utc, kind (TARGET, STOP, BREAKEVEN, TRAIL, PARTIAL, TIME, ENTRY_INVALIDATED, REGIME_FLIP, KILL_SWITCH, STRIKE_BREACHED, TREND_FLIP, FORCED_EXPIRY_EXIT), action text, reason values, repeat count |
-| `shortlist` | 9 | session_date, stock, expiry, side, scores (IV rank, trend clarity, distance to S/R, liquidity), reasons, rank |
+| `shortlist` | 9 | session_date, stock, expiry, side, rank, status (SHORTLISTED/CANDIDATE/EXCLUDED), score, scores (IV rank, trend clarity, distance to S/R, liquidity), reasons |
+| `campaigns` | 9 | campaign_id (the original signal's id), stock, summary: positions and rolls, realised P&L, hedge cost, charges, best possible outcome, message |
+| `request_budget` | 9 | day (IST), kind, requests: option-history requests sent to Breeze that day, across runs |
 | `capital_log` | 7 | date, type (DEPOSIT/WITHDRAWAL), amount |
 | `strategy_state` | 7 | strategy_id, regime, enabled, size_factor, changed_at, changed_by |
 | `llm_calls` | 8 | at_utc, task, tokens/cost if known, ok, latency |
@@ -255,7 +257,9 @@ is set to no alerts, paper only, "negative in backtests").
 Phase 4 adds `strategies.long_option` / `credit_spread` / `iron_condor` (with `strategies.status` entries) and `options`
 (risk-free rate and dividend assumptions for IV/delta, IV-rank lookback, per-underlying expiries and backtest strike step,
 chain refresh/staleness/liquidity limits, margin file and maximum age, option backtest underlyings/start/request limit).
-Later phases add: `position_cap_pct` (default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9: universe filters
+Phase 9 core (2026-11-14) adds `stock_option_selling` (entry rules, `trend_block`, `campaign_limit`, `roll`, `reversal`,
+`profile`, `weights`, `backtest` with exit checks and exit policies) and `options.backtest.daily_request_budget`.
+Later phases add: `position_cap_pct` (default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9 remainder: universe filters
 min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
 max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,
 exit_days_before_expiry, recommended_capital_inr), `cutback`, `ladder`, `llm`, `go_live_gate`.
@@ -278,8 +282,10 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 | Bank Nifty options | Monthly | Credit spread | Weekly contracts do not exist |
 | Stock options | Monthly | Hedged credit spread (phase 9): bull put / bear call, 20-35 days to expiry | Physically settled: no position in expiry week |
 
-- A short option without a bought option of the same underlying, right and expiry (further out of the money, at least as
-  many shares) is rejected (`UNHEDGED_SHORT`) at three boundaries: the `Signal` model itself, the option backtest entry and
+- A short option without a bought option of the same underlying, right and expiry at a different strike with at least as
+  many shares is rejected (`UNHEDGED_SHORT`). The bought strike may be further out of the money (credit spread) or, since
+  2026-11-14, nearer the money (debit spread such as the reversal bull call spread: the loss is limited to the debit).
+  The check runs at three boundaries: the `Signal` model itself, the option backtest entry and
   `Store.save_backtest()`. The system never suggests an
   unhedged position (entry or roll). A position the user already holds and enters manually may be unhedged: it is stored,
   flagged UNHEDGED on every view and alert, and still gets exit calls.
@@ -287,7 +293,15 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   and |delta| at or below `max_short_delta`; otherwise no signal. Hedge: same expiry, `hedge_strikes_out` strikes further out,
   liquid, keeping max loss within `max_loss_per_stock_spread_pct`.
 - Universe for stock option selling: every NSE F&O stock in the broker's instrument list that passes the liquidity filters
-  on the strikes to be traded (not limited to the watchlist).
+  on the strikes to be traded (not limited to the watchlist). **As built (2026-11-14): the watchlist stocks (Nifty 50)
+  only**, because the other F&O stocks have no price history or live prices in this system yet.
+- Phase 9 rules as built (`app/options/stock_selling.py`, `stock_profile.py`, `campaign.py`, `reversal.py`): entry needs a
+  clear trend, IV rank at or above `min_iv_rank`, no event before expiry, the falling-stock block (`DOWNTREND_BLOCK`, mirror
+  `UPTREND_BLOCK`), the per-stock campaign limit (`STOCK_LOSS_LIMIT`) and net credit after hedge and charges of at least
+  `min_net_credit_pct_of_max_loss` (`CREDIT_TOO_SMALL`). Support = lowest low, resistance = highest high of
+  `support_resistance_lookback_days`. A roll needs the roll rules (new credit after costs, strike moved with the market,
+  falling-stock block passed, fewer than `max_rolls`), is one lot, and never raises size. Reversal candidates are watch
+  only: `REVERSAL_CONFIRMED` lifts the falling-stock block only for a put spread sold below the base low.
 - Option backtests use stored Breeze option prices if they exist, else they are labelled "payoff simulation"; each is
   compared with a no-filter baseline (the same structure every month or week, no entry rules). Phase 4 finding: Breeze
   has them (expired contracts too, back to at least 2017, with volume and OI; trades only, no bid/ask), so breeze-source
@@ -308,7 +322,8 @@ Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, 
 `/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options`,
 `/api/options/{underlying}` and the page `/options` (4);
 `/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
-`/api/stock-option-selling/shortlist` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
+`/api/stock-option-selling/shortlist`, `/api/stock-option-selling/profile/{stock}`,
+`/api/stock-option-selling/reversals`, `/api/stock-option-selling/campaigns` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
 `POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
@@ -377,6 +392,12 @@ of every leg with slippage per leg, spread exits decided on closes and filled at
 one lot per trade at today's lot size (sizing is phase 5). The no-filter baseline makes one attempt per expiry (or month)
 on a date fixed by the calendar; a skipped attempt is recorded and never retried. Reports are labelled "excludes margin
 and bid/ask eligibility checks" (both stay mandatory for live signals).
+
+Stock option selling backtests (`app/options/stock_backtest.py`) add: target and stop checked on the legs' 5-minute bars
+(filled at the next 5-minute bar's open; a leg that did not trade in a bar is priced at its last trade if at most
+`intraday_leg_max_age_minutes` old) beside the daily check; three exit policies on identical recorded entries (stop, roll
+by the rules, roll every month), reported per campaign; the effect of each rule and alert against the baseline; and the
+reversal study. Only complete (stock, year) pairs of downloaded option history are reported unless `--all-data` is given.
 
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).

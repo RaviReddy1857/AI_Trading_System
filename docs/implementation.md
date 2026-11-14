@@ -296,9 +296,16 @@ Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5
 4. Champion and challenger: allow two versions of a strategy to run, one live and one paper-only, and compare them in the scorecard.
 5. Capital ladder: show whether the step-up conditions are met (3 months live, net positive, drawdown under 10%, at least 50 closed trades) and never change capital automatically.
 6. Track deposits and withdrawals separately so reported return is on money deposited.
+7. **Scorecard by stock and by entry conditions (added 2026-11-14).** Beside the per-strategy and per-regime tables, show
+   the same figures per stock and per entry condition recorded on the signal: the stock's trend state (TRENDING_UP,
+   TRENDING_DOWN, RANGING), IV rank band and FII bias at the signal. Each table compares the signals I took with the ones I
+   skipped (paper result of both, my real result for the ones taken), so it shows whether my choosing adds or loses money.
+   The entry conditions are already stored on every stock option selling signal (`details.entry_conditions`, phase 9).
 
 ### Acceptance checks
 
+- The by-stock and by-entry-condition tables add up to the per-strategy totals, and taken and skipped signals are shown
+  side by side with their counts (low sample marked)
 - Tests for each cut-back rule
 - A test that no automatic rule can increase size
 - Scorecard marks any figure based on fewer than 30 trades as 'low sample'
@@ -313,6 +320,7 @@ Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5
 | P7.4 | Champion vs challenger: new rule versions run on paper beside live | Both versions tracked |
 | P7.5 | Capital ladder check: conditions for step-up shown | Step-up eligible / not eligible |
 | P7.6 | Deposits tracked separately from profits | Return on deposited money shown |
+| P7.7 | Scorecard by stock and by entry conditions (trend state, IV rank, FII bias), signals taken vs skipped | Tables add up to the strategy totals; low sample marked |
 
 ---
 
@@ -356,6 +364,12 @@ The LLM layer and the go-live gate.
 
 **Outcome:** A daily shortlist of stocks for monthly hedged option selling, entry alerts with both strikes, credit, max loss, breakeven and margin, and exit and roll alerts until each position is closed
 
+**Core built early (2026-11-14, by the user's instruction, before phases 5 and 6):** universe and liquidity filter, daily
+shortlist, strike rules, entry window, exit and adjustment rules, the backtest with its no-filter baseline, and the
+additions in "Core additions" below. **Still to build after phase 6:** signal cards with the capital-fit label
+(P9.1, P9.9), Telegram alerts and repeating exit calls (the alert part of P9.7), the manual position form (P9.8), the risk
+engine hooks (step 8) and automatic paper tracking (P9.11).
+
 **Built after phase 6** (build order 4, 5, 6, 9, 7, 8). Uses phase 4 (option chains, lot sizes, IV and delta, payoff, analytics, option history check), phase 5 (risk engine) and phase 6 (alerts, trade-type selector, exit calls, manual positions, paper trading). Does not depend on phases 7 or 8.
 
 ### Scope
@@ -384,6 +398,57 @@ enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_l
 8. **Risk engine:** counts margin blocked against the capital pool and reports the capital-fit label; it warns (does not block) on max_open_stock_spreads and the sector limit; it still blocks on missing or stale data, unknown margin, a missing hedge leg, illiquid strikes, or results before expiry, because those make the numbers on the card unreliable. Capital stays advisory: capital-fit label only.
 9. **Evidence:** backtests use stored option history if phase 4 found it, otherwise they are labelled "payoff simulation"; each includes the phase 4 no-filter baseline (the same spread sold every month at a fixed days-to-expiry with no entry rules); no session before 2019-01-22. Every signal is paper-traded automatically from day one; until the strategy has 8 weeks of paper results the card and the trade-type switch show **UNPROVEN: no track record yet**. Alerts for this type follow the phase 6 switch "stock option selling" and `strategies.status`.
 
+### Core additions (2026-11-14; every threshold is in `stock_option_selling` in config.yaml)
+
+10. **Backtest exit check.** Target and stop are checked on the legs' 5-minute option bars (filled at the next 5-minute
+    bar's open) and, for comparison, on daily closes filled at the next session's open. Every report shows the strategy and
+    its baseline both ways. A day without stored 5-minute bars is checked on the daily close and counted.
+11. **Option-history download.** Within a daily request budget (`options.backtest.daily_request_budget`, default 3,500,
+    counted in the store per day across runs), the 30 most liquid watchlist F&O stocks first, newest year first, resumable,
+    skipping everything already stored or asked for. A Breeze error reply stops it at once and records the progress.
+12. **Falling-stock block** (`trend_block`): no put-selling signal when the stock is below its 200-day average, or made a
+    52-week low in the last 20 sessions, or its 3-month return trails NIFTY by more than a set margin
+    (`DOWNTREND_BLOCK`). Mirror rule for call selling in a strong uptrend (`UPTREND_BLOCK`).
+13. **Per-stock campaign limit** (`campaign_limit`): after 2 stopped trades or a set cumulative loss in one stock within 90
+    days, no new signal in that stock for a cooling-off period (`STOCK_LOSS_LIMIT`). Closed manual positions count too.
+14. **Range and speed profile** per stock (2 and 5 years, data from 2019-01-22 only): typical monthly high-low range,
+    average sessions from swing low to swing high, ranging or trending now, and how often a strike at the proposed distance
+    was passed within the holding period, shown beside the move implied by current option prices.
+15. **Scenario history** per stock: the distribution of 30-day moves after past FII selling streaks, India VIX spikes, RBI
+    rate decisions and its own results, using only data available at the time. The number of cases is shown; under 10 is
+    LOW SAMPLE; a scenario whose inputs are not in the data files says "no data". Labelled "history, not a forecast".
+16. **Open-position alerts** (sent through Telegram from phase 6): the stock closes below support or a 52-week low, breaks
+    its 200-day average, an FII selling streak begins, India VIX spikes, the regime turns VOLATILE or EVENT, or news tags
+    the stock EVENT_RISK (mirrored for bear call spreads). Each alert says what changed and shows exit and roll with numbers.
+17. **Campaign tracking.** Every roll is linked to its original trade. Stored and shown: cumulative realised P&L, total
+    hedge cost paid, total charges, and the best possible remaining outcome (the open position's max profit plus the P&L so
+    far). If the best case is still a loss: "recovery not possible from this position".
+18. **Roll rules** (`roll`). A roll is suggested only if (a) the new credit after hedge cost and charges is positive and at
+    least a minimum share of the new spread's width, (b) the sold strike moves the way the market has gone (lower for puts,
+    higher for calls), never the same or a worse strike, (c) the stock passes the falling-stock block, and (d) the campaign
+    has had fewer than `max_rolls` rolls (default 1). Otherwise the alert is "exit". A roll is one lot.
+19. **Net credit after hedge and charges** on every signal; skipped when it is below a minimum share of the maximum loss
+    (`CREDIT_TOO_SMALL`).
+20. **Stuck-position alert**: the sold option is in the money with time value below a set share of its price, or the
+    position is inside the pre-expiry window: "exit; rolling earns little".
+21. **No recovery sizing.** A new signal after a closed campaign uses the normal rules and the normal size only.
+22. **Exit-policy comparison in the backtest**, on exactly the same entries: stop at 2x credit, roll by the roll rules, and
+    roll every month without limit. All three are reported per campaign.
+23. **Reversal detector** (`reversal`; watch list and candidates only, nothing alerts until the user approves it):
+    - Washed-out list: more than a set % below the 52-week high for at least a set number of months, and below the 200-day
+      average. Shown on the stock option page as "watch", never as a signal.
+    - Base forming: no new low for a set number of sessions, and shrinking daily ranges.
+    - Reversal confirmed (`REVERSAL_CONFIRMED`): close above the 20-day average and above the last swing high, volume above
+      its 20-day average, and the 10-day return ahead of NIFTY. This lifts the falling-stock block only for put spreads
+      placed below the base low.
+    - On confirmation two candidate trades: a bull call spread, and a put credit spread with the sold strike below the base
+      low. Prior breakdown levels are shown as stall zones.
+    - The same reversal alert goes to every open or manually entered position in that stock (once approved).
+    - Backtest on data from 2019-01-22: for every confirmed reversal the 10, 20 and 40-session outcome, the share that made
+      a new low afterwards, and both candidate trades against the no-filter baseline, with LOW SAMPLE where it applies.
+24. **Effect of every rule and alert in the backtest**: the strategy with one rule removed, the baseline with one rule or
+    one alert-exit added, and the baseline's trades split by what was known at entry.
+
 ### Acceptance checks
 
 - Tests that a valid setup produces a signal at Rs 2,00,000 capital labelled NEEDS MORE CAPITAL with the correct shortfall, and FITS at Rs 10,00,000
@@ -410,3 +475,18 @@ enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_l
 | P9.9 | Capital stays advisory: capital-fit label only | Signal never hidden for capital (test) |
 | P9.10 | Backtest with option history if available (else "payoff simulation") and the no-filter monthly baseline, from 2019-01-22 | Report shows strategy and baseline side by side |
 | P9.11 | Automatic paper tracking from day one; UNPROVEN banner until 8 weeks of results | Banner shows and clears correctly |
+| P9.12 | Backtest exits checked on 5-minute option bars and on daily closes | Report shows strategy and baseline both ways (built) |
+| P9.13 | Option-history download within a daily request budget, most liquid stocks first, resumable | Stops at the budget or on a Breeze error and carries on the next day (built) |
+| P9.14 | Falling-stock block and its mirror (DOWNTREND_BLOCK / UPTREND_BLOCK) | No put signal in a falling stock (test); effect shown against the baseline (built) |
+| P9.15 | Per-stock campaign limit (STOCK_LOSS_LIMIT), manual positions included | No signal during the cooling-off period (test) (built) |
+| P9.16 | Range and speed profile per stock, 2 and 5 years, with the option-implied move | Shown on the stock option page (built) |
+| P9.17 | Scenario history: FII streaks, VIX spikes, RBI decisions, own results; "history, not a forecast" | Cases counted, under 10 LOW SAMPLE, missing inputs "no data" (built; needs the user's data files) |
+| P9.18 | Open-position alerts with exit and roll numbers | Each alert fires once in a test (built); Telegram and repeats in phase 6 |
+| P9.19 | Campaign tracking: rolls linked to the original trade, hedge cost, charges, best possible outcome | "recovery not possible from this position" shown when the best case is a loss (built) |
+| P9.20 | Roll rules (a)-(d), max_rolls 1; otherwise "exit" | Each rule refuses a roll in a test (built) |
+| P9.21 | Net credit after hedge and charges on every signal; CREDIT_TOO_SMALL | Small credit skipped (test) (built) |
+| P9.22 | Stuck-position alert: "exit; rolling earns little" | Fires for an in-the-money option with little time value and inside the pre-expiry window (built) |
+| P9.23 | No recovery sizing | A signal after a losing campaign is identical to a fresh one (test) (built) |
+| P9.24 | Backtest: stop vs roll by rules vs roll every month, on the same entries | All three reported per campaign (built) |
+| P9.25 | Reversal detector: washed-out watch list, base forming, REVERSAL_CONFIRMED, two candidate trades, stall zones | Shown as "watch"; nothing alerts until approved (built) |
+| P9.26 | Reversal backtest: 10/20/40-session outcomes, new-low share, both candidates vs baseline | Reported with LOW SAMPLE where it applies (built) |

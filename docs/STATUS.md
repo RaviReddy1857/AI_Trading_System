@@ -20,7 +20,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
-| 9 | Stock option selling (built after 6, before 7) | Not started; plan extended 2026-11-13 | | |
+| 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
 
 ## Phase 1
 
@@ -775,6 +775,110 @@ trades are fewer than entries.)
 stored**, so some of the "no strike / no hedge" skips above are missing data, not real skips. They need one
 `python -m app.options.backtest --download` run (a few dozen requests) and the baseline rows above will move slightly.
 
+## Phase 9 core: stock option selling (2026-11-14, built before phases 5 and 6)
+
+Built on the user's instruction to do the core of phase 9 now. Phase 5 was NOT started. No holdout was opened
+(development period only, to 2026-06-05). Nothing here produces alerts.
+
+### Built
+- `app/options/stock_selling.py`: the strategy `stock_option_selling` (id, version from its thresholds, status "UNPROVEN").
+  Entry: stock in a clear trend (swing trend rule) -> bull put spread (up) or bear call spread (down); IV rank at or above
+  50; no results / board meeting / corporate action before expiry; monthly expiry 20-35 days away; sold strike the first
+  strike beyond support (20-session low) or resistance with |delta| <= 0.20 and, live, beyond the highest-OI strike; bought
+  strike 2 strikes further out (3 if 2 does not qualify), liquid, max loss within `max_loss_per_stock_spread_pct`; net
+  credit after hedge and charges at least 10% of max loss (`CREDIT_TOO_SMALL`); falling-stock block (`DOWNTREND_BLOCK`,
+  mirror `UPTREND_BLOCK`); per-stock campaign limit (`STOCK_LOSS_LIMIT`); margin known for a live signal. Also: daily
+  shortlist scoring, exit calls (target, stop, strike breached, trend flip, forced exit), roll rules, stuck-position check,
+  open-position alerts with exit and roll numbers.
+- `app/options/stock_profile.py`: falling-stock block, campaign limit, range and speed profile, scenario history, alert
+  detection. `app/options/campaign.py`: campaign tracking. `app/options/reversal.py`: reversal detector, outcome study, and
+  the two candidates (`reversal_put_spread`, `reversal_bull_call_spread`; both "WATCH ONLY: awaiting your approval").
+- `app/options/stock_backtest.py`: liquidity ranking, the budgeted resumable download, the report (5-minute and daily exit
+  checks, three exit policies on the same entries, the effect of each rule and alert, splits by entry condition, reversal
+  study). `app/options/shortlist.py`: the daily shortlist, the per-stock profile view and the reversal watch list.
+- Engine (`app/options/backtest.py`): 5-minute exit check, strike-breach exit, alert exits, rolls with campaign links,
+  recorded and replayed entries, debit spreads, entry conditions on every trade. `option_history.py`: 5-minute option bars
+  (paged), the daily request budget, retries for a request with no reply.
+- Store: tables `shortlist`, `campaigns`, `request_budget`. Routes (all read-only): `/api/stock-option-selling/shortlist`,
+  `/profile/{stock}`, `/reversals`, `/campaigns`, and the page `/stock-option-selling`. `/backtests` shows the new tables.
+- Config: `stock_option_selling` (validated) and `options.backtest.daily_request_budget`; two event types added
+  (`BOARD_MEETING`, `CORPORATE_ACTION`).
+
+### Downloads done today (2026-11-14) and what the data shows
+- **Issue 54 closed:** the 31 index contracts needed 12 requests; none is missing now. Index backtests rerun from stored
+  prices: long_option and credit_spread unchanged from the review-fix table; iron_condor baseline now 107 trades,
+  -18,111, PF 0.75, -169 per trade (was 105, -14,598). No verdict changed.
+- **Stock option history:** 1,588 of today's 3,500 requests were used. Completely stored: **Jan-Jun 2026 for 9 stocks**
+  (HDFCBANK, RELIANCE, ICICIBANK, SBIN, BHARTIARTL, INFY, BSE, LT, M&M); ETERNAL partly. A stock-year costs roughly
+  80-250 requests, so 30 stocks x 7.4 years needs many more days at 3,500 a day. The last run was stopped by the system
+  (machine low on memory), not by Breeze; an earlier run stopped cleanly on a 60-second timeout. Nothing fetched was lost.
+- **Report on those 9 stocks, 2026-01-01 to 2026-06-05, one lot each, Prime 4999 costs** (`data/diagnostics/stock_report_2026-11-14.txt`).
+  This is five months of one year: **every figure is LOW SAMPLE or close to it and proves nothing yet.**
+
+| | Exit check | Trades | Win % | Net after costs (Rs) | Per trade (Rs) | PF |
+|---|---|---|---|---|---|---|
+| strategy | 5-minute | 8 | 75.0 | +1,253 | +157 | 1.23 |
+| baseline (both sides) | 5-minute | 41 | 68.3 | -2,118 | -52 | 0.89 |
+| baseline bull put / bear call | 5-minute | 20 / 21 | 45.0 / 90.5 | -11,469 / +9,351 | | 0.39 / 9.17 |
+| strategy | daily close | 8 | 62.5 | -6,108 | -764 | 0.52 |
+| baseline (both sides) | daily close | 41 | 61.0 | -8,553 | -209 | 0.70 |
+
+  - Checking on 5-minute bars instead of daily closes moved the baseline from -209 to -52 per trade (the daily check fills a
+    stop at the next day's open, usually much worse).
+  - Exit policies on the same 41 baseline entries (daily check): stop -8,553; roll by the rules -8,553 (no roll passed the
+    rules in this period); roll every month -39,206 with a worst campaign of -15,793. On the 8 strategy entries rolling
+    every month happened to show +7,219 against -6,108: 8 trades, no evidence.
+  - Rule effects on the baseline (5-minute check): adding the trend block left 15 of 41 trades, +5,854 (PF 3.96); adding
+    the minimum net credit left 27, -3,783; the campaign limit blocked 1 attempt and changed nothing.
+  - Baseline attempts: 90 scheduled, 41 entered; skipped 25 illiquid, 13 no priced hedge strike, 7 no strike, 3 gapped,
+    1 max loss above the limit.
+  - Reversal detector, all 49 watchlist stocks with enough history, 2020-2026 development period: **37 confirmations in 22
+    stocks**; 10 / 20 / 40 sessions later the median move was -0.3% / +1.1% / +0.3% (mean +1.8% / +6.0% / +6.9%), up in
+    49% / 54% / 51% of cases; none made a new low within 40 sessions. Neither candidate trade had a confirmation inside the
+    downloaded months, so there is no option result for them yet. The bull call baseline entered nothing: its scheduled
+    day (65 days before expiry) had no traded strike in 35 of 36 attempts.
+
+### Tested (offline; 83 test functions in `tests/test_phase9_core.py`, `test_phase9_rules.py`, `test_phase9_rolls.py`, `test_phase9_reversal.py`; whole suite 526 passing)
+- ACCEPTANCE: sold strike beyond support/resistance, beyond the highest-OI strike and within the delta limit; no signal
+  when no strike meets all three. Hedge 2-3 strikes out, same expiry, liquid, max loss within the limit; otherwise no signal.
+- ACCEPTANCE: no signal outside 20-35 days to expiry or in expiry week; no entry with results or a corporate action before
+  expiry. A sold leg without a hedge is never suggested, entry or roll (also a property test over many inputs).
+- ACCEPTANCE: target, stop, threat and forced-exit calls fire; threat shows exit and roll with numbers.
+- ACCEPTANCE: the shortlist excludes illiquid stocks and stocks with events and gives a reason per candidate.
+- ACCEPTANCE: backtest shows strategy and baseline side by side under both exit checks; every trade is hedged, entered at
+  the next session and flat before expiry week; deterministic. A stop touched only inside the day is caught by the 5-minute
+  check and not by the daily one; a stale leg price is not used.
+- Download: fills an empty store and the result then matches a full store; stops on an error reply and resumes without
+  asking again; stops at the budget; the daily budget is counted across runs; timeouts are retried, error replies are not.
+- Each of the six rule additions, the roll rules (a)-(d), campaign arithmetic by hand, stuck positions, no recovery
+  sizing, the three exit policies on identical entries, and the reversal detector (states by day, no use of later bars,
+  both candidates, alert only after approval, outcome study by hand). Safety tests pass (no write route added).
+- The new pages and routes were exercised through the test client in sim settings only; the app was not started by hand after these changes.
+
+### Not tested / known gaps
+- Live: the shortlist command (`python -m app.options.shortlist`) loading stock chains from Breeze after the close, the
+  profile and reversal views with a live chain. Tested only with fixture chains.
+- The option history is far from complete (see above), so no result can be relied on yet.
+- Backtests: strike spacing of expired stock contracts is a guess (a round step of about 1% of the price); a strike that
+  does not exist costs a request and is skipped, and "2 strikes out" counts strikes that have a price. The highest-OI rule,
+  margin and bid/ask cannot be checked on history. Past results dates are not known, so the event rule is not applied in
+  backtests. Lot sizes are today's. The three exit policies are compared on the daily exit check only.
+- Scenario history: only the India VIX scenario has data. FII, RBI and results scenarios say "no data" until the files below are filled.
+- Stocks whose daily history has an unadjusted price break in the last year (issue 25) give INSUFFICIENT_HISTORY for the
+  trend block, and their profile windows are shorter than asked (for example RELIANCE starts 2024-10-28).
+- Deferred to after phase 6: signal cards with the capital-fit label, Telegram alerts and repeats, the manual position
+  form, risk engine hooks, automatic paper tracking and the UNPROVEN banner clearing; the universe beyond the watchlist.
+
+### Data files to fill for the scenario history (nothing was invented)
+| File | Columns | What to enter | Where to get it |
+|---|---|---|---|
+| `data/fii_dii.csv` | `date,fii_net_cr,dii_net_cr` | One row per session from 2019-01-22: FII/FPI and DII net cash-market figures in Rs crore, selling negative | NSE website, "FII/DII trading activity" report (it shows recent days; older days need NSE's archive or NSDL's FPI daily reports at fpi.nsdl.co.in, which are a slightly different series: use one source throughout) |
+| `data/events.csv` | `date,type,note,symbol` | `RBI_POLICY` rows, symbol blank: the day each monetary policy decision was announced | RBI website (rbi.org.in), monetary policy press releases |
+| `data/events.csv` | `date,type,note,symbol` | `RESULTS` rows with the stock's symbol: the day each quarterly result was announced (also future dates, for the entry rule) | NSE corporate filings (financial results / board meetings) or the company's announcements on BSE |
+
+Both files can also be pasted through `POST /data/import/fii_dii` and `/data/import/events`. Restart the app (or rerun the
+command) afterwards.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -822,7 +926,15 @@ stored**, so some of the "no strike / no hedge" skips above are missing data, no
 | 51 | review | Phase 4 review: stock IV history used contracts chosen from later closes | Fixed 2026-11-13: point-in-time contract selection, shared by backtest and Options page |
 | 52 | review | Phase 4 review: unequal-width condor reported a breakeven that is not real | Fixed 2026-11-13 |
 | 53 | review | Phase 4 review: baseline retried failed days and waited for the previous position | Fixed 2026-11-13: one fixed scheduled attempt per expiry; baselines rerun (no verdict change) |
-| 54 | review | After the schedule fix the phase 4 baselines want 31 contracts that are not stored | Open: needs a Breeze run (`python -m app.options.backtest --download`) |
+| 54 | review | After the schedule fix the phase 4 baselines want 31 contracts that are not stored | Fixed 2026-11-14: downloaded (12 requests), index backtests rerun, no verdict changed |
+| 55 | 9 | Stock option history is only partly downloaded (9 stocks, Jan-Jun 2026); every stock result is LOW SAMPLE | Open: run `python -m app.options.stock_backtest --download` each day with a fresh Breeze login (3,500 requests a day) |
+| 56 | 9 | Today's last download run was stopped by the system because the machine was low on memory; about 1,900 of the day's requests were not used | Waiting for user: rerun the download command (close other programs first) |
+| 57 | 9 | Scenario history has no FII/DII, RBI or results dates | Waiting for user: fill `data/fii_dii.csv` and `data/events.csv` (table above) |
+| 58 | 9 | The roll-by-rules policy made no roll in the downloaded period; not yet checked which rule refused each of the 13 stopped baseline trades | Open: look at it when more history is stored |
+| 59 | 9 | Hedge rule widened: a bought option nearer the money now also covers a sold option (needed for the bull call spread) | Waiting for user: confirm (decisions log) |
+| 60 | 9 | Bull call spread baseline almost never enters: 65 days before expiry stock options have no traded strike | Open: the entry window of that candidate needs a decision |
+| 61 | 9 | Stock daily bars stop at 2026-11-12 while the index has 2026-11-13, so the reversal watch list and profile views show no stock as of the latest session | Waiting for user: run `python -m app.history` |
+| 62 | 9 | Assumed thresholds (marked ASSUMPTION in config.yaml): max loss per spread 10% of capital, minimum net credit 10% of max loss, campaign loss 5% of capital and 45-day cooling-off, roll minimum credit 10% of width, stuck time value 10%, pre-expiry window 10 days, roll up to 65 days out, reversal thresholds | Waiting for user |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
@@ -888,3 +1000,18 @@ stored**, so some of the "no strike / no hedge" skips above are missing data, no
 | 2026-11-13 | Review fix: a stock's implied-volatility history uses a contract only from the day its strike was chosen |
 | 2026-11-13 | Review fix: no-filter baselines make one attempt per expiry (or month) on a date fixed by the calendar; skipped attempts are recorded and never retried; baseline positions of different expiries may overlap |
 | 2026-11-13 | Review fix: option backtest reports are labelled "excludes margin and bid/ask eligibility checks"; both stay mandatory for live signals (a live context cannot switch the margin rule off) |
+| 2026-11-14 | Phase 9 core built before phases 5 and 6 (user's instruction); cards, Telegram alerts and the manual position form wait for phase 6 |
+| 2026-11-14 | Universe for now: the watchlist stocks (Nifty 50) with option contracts, because other F&O stocks have no price history here. Download and backtest priority: the 30 with the highest median daily traded value (close x volume) over the last 60 development sessions. This picks stocks by today's liquidity (a selection bias to keep in mind) |
+| 2026-11-14 | Support = lowest low and resistance = highest high of the last 20 sessions. Shortlist "distance" score: more room between the price and that level scores higher |
+| 2026-11-14 | Forced exit for stock spreads: at the open of the first session within 7 days of expiry, so always before expiry week |
+| 2026-11-14 | 5-minute exit check: a leg that did not trade in a bar is priced at its last trade if at most 30 minutes old, otherwise the cost is unknown and nothing is decided; the fill is the next 5-minute bar's open. Entries are the same in both exit checks |
+| 2026-11-14 | Backtest closes a spread at the next open when the stock closes beyond the sold strike (`exit_on_strike_breach`); a trend flip is an alert only |
+| 2026-11-14 | Download order: newest year first, most liquid stock first; a report covers only stocks and years that are completely stored |
+| 2026-11-14 | A request with no reply (timeout) is repeated twice; an error reply from Breeze (session, login, rate limit) stops the download at once |
+| 2026-11-14 | Mirror of the falling-stock block for calls uses the reason code UPTREND_BLOCK (DOWNTREND_BLOCK for puts) |
+| 2026-11-14 | Campaign limit: a stopped trade is one closed at the stop; the cumulative loss limit is a % of capital (5%) |
+| 2026-11-14 | Roll rule (a) is the NEW spread's credit after its hedge and charges; the cost of closing the old spread is shown beside it and in the campaign's best possible outcome. Rule (b) "toward the market" is read as: lower strike for puts, higher for calls. A roll does not need the entry trend and IV-rank rules; it may use the next monthly expiry up to 65 days away; it is always one lot |
+| 2026-11-14 | Exit-policy comparison uses the daily exit check for all three policies (rolls need both spreads priced at the same open). "Roll every month": no stop, and a losing spread is rolled into the next month at the forced exit; a spread in profit there is closed |
+| 2026-11-14 | Hedge rule widened for debit spreads: a sold option is covered by a bought option of the same right and expiry at any different strike with at least as many shares. Two review tests were changed from "not further out" to "same strike". User to confirm |
+| 2026-11-14 | Reversal: "washed out" needs every session of the last 3 months more than 30% below the 52-week high and the close below the 200-day average; "shrinking ranges" compares the last 10 sessions with the 30 before; the scanner uses bars from 2019-01-22 only. Candidates are shown for 20 sessions after confirmation while the base low holds. Nothing alerts until `reversal.alerts_approved` is set |
+| 2026-11-14 | Scenario history: a move runs from the close of the trigger day to the close 30 calendar days later; only cases whose 30 days had passed are counted |
