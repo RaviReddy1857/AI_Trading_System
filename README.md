@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 535 passed
+python -m pytest -q          # should say 557 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -313,10 +313,24 @@ python -m app.history                              # daily bars must be up to da
 - A report covers only the stocks and years that are completely downloaded (`--all-data` shows everything, marked INCOMPLETE).
 - Phase 9 backtests run at `stock_option_selling.backtest.capital_inr` (Rs 10,00,000); `account.capital_inr` is not changed.
 
+**What a candidate needs (M1).** Whole lots within 2.5% of capital per position (rounded down; 0 lots = ZERO_SIZE);
+support and resistance from confirmed 5-bar pivots; the falling-stock, market, per-stock loss and portfolio limits (6
+spreads, 10% total risk, at most 2 positions and 5% risk per group of linked stocks: same sector or return correlation 0.7
+or more). Every row on the page is a **research candidate** from the last session's close; an **actionable** signal also
+needs market hours, a live price, a fresh chain with bid and ask, a current margin and your open positions known - so
+nothing is actionable until positions are recorded (after phase 6).
+
+**The score (M2).** Each candidate gets 0-100 points from six equal-weight factors - IV rank, IV falling from its 20-session
+peak, relative strength against NIFTY and its sector, strike distance against the expected move and the 90th-percentile
+21-session fall, the past breach rate at that distance, and liquidity - with each factor's contribution shown. It ranks
+candidates; it is not a probability. The point rules are written in `app/options/score.py`.
+
 **What the report shows:** the strategy beside its no-filter baseline (same spread on a fixed schedule), executed on
 synchronized 5-minute bars of every leg (a campaign with a session lacking such a bar is left out as data-incomplete and
 counted) and, for comparison, on daily closes; three exit policies on the same entries under both executions (stop, roll
-by the rules, roll every month, the last one research only); what each rule and each alert does to the result; baseline trades split by what was known at
+by the rules, roll every month, the last one research only); positions still open at the end reported as open; monthly
+candidates and trades; score bands (top, middle and bottom third of each day's candidates) and each score factor against
+the baseline; what each rule and each alert does to the result; baseline trades split by what was known at
 entry; and every confirmed reversal with its 10, 20 and 40-session outcome and both candidate trades.
 
 **Files you fill for the scenario history** (until then those scenarios say "no data"; nothing is invented):
@@ -332,7 +346,7 @@ entry; and every confirmed reversal with its 10, 20 and 40-session outcome and b
   on 13 November and they are known through 31 December". The row must be at most 7 days old and cover the option's
   expiry; otherwise the candidate shows `EVENT_COVERAGE_UNKNOWN` and gives no signal.
 
-**Thresholds** are all in `config.yaml` under `stock_option_selling`; the ones marked ASSUMPTION are mine and need your decision.
+**Thresholds** are all in `config.yaml` under `stock_option_selling`, named as in section 2 of the Phase 9 specification; docs/implementation.md has the full table (value, unit, lookback, comparison, what happens when data is missing).
 Reversal candidates stay silent until you set `stock_option_selling.reversal.alerts_approved: true`.
 
 ## Status values
@@ -364,6 +378,8 @@ Reversal candidates stay silent until you set `stock_option_selling.reversal.ale
   `long_option.py`, `credit_spread.py`, `iron_condor.py`, `option_history.py` (stored Breeze option prices, expiry
   discovery), `backtest.py` (option backtests with the baseline), `analytics.py` (put-call ratio, highest-OI strikes, the Options page data)
 - `scripts/check_option_history.py` - the check of what option history Breeze provides
+- `app/options/sizing.py`, `portfolio.py`, `actionable.py`, `score.py` - phase 9 M1/M2: whole-lot sizing, portfolio and
+  correlation limits, research versus actionable, the candidate score
 - `app/options/stock_selling.py`, `stock_profile.py`, `campaign.py`, `reversal.py`, `shortlist.py`, `stock_backtest.py` -
   phase 9 core: stock option selling rules, rolls and alerts; profile, scenario history and blocks; campaign tracking;
   reversal detector and its two candidates; the shortlist and views; the download and the report

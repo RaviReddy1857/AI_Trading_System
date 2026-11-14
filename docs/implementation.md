@@ -491,7 +491,18 @@ when the input is not known: it is never treated as a pass and never as zero.
 | `reversal.bull_call.entry_min_dte`, `entry_max_dte` | 20, 35 | calendar days (user, 2026-11-14) | no expiry: no candidate |
 | `event_coverage_max_age_days` | 7 | days since the COVERAGE row's retrieved_at; covered_through must be on or after expiry | EVENT_COVERAGE_UNKNOWN: no actionable signal |
 | `backtest.capital_inr` | 10,00,000 | rupees: the capital of every Phase 9 backtest and research page | - |
-| hist_fall_percentile, iv_falling, score weights | - | M2 (score factors), not built yet | - |
+| `score.weights` | 1 each | equal weights of the six factors: iv_rank, iv_falling, rel_strength, strike_distance, range_profile, liquidity | a factor unknown: score incomplete, ranked after the scored candidates |
+| `score.iv_peak_sessions`, `iv_falling_ratio` (iv_falling) | 20, 0.9 | IV at or below 90% of its 20-session peak: full points; at the peak: none; linear between | no IV history: factor unknown |
+| `score.hist_fall_sessions`, `hist_fall_percentile` (hist_fall_percentile) | 21, 90 | the 90th percentile of 21-session falls (rises for calls) since 2019-01-22, windows ended before the decision | under 30 windows: factor unknown |
+
+**Score point rules (M2, written before any result).** Each factor 0-100 points, combined as the weighted mean:
+IV rank as it is; IV falling as above; relative strength 50 + 5 per point of (63-session return minus NIFTY's, averaged with
+minus the sector peers' median) for put spreads, 50 - 5 for call spreads, clamped; strike distance 50 points per yardstick
+(the expected move to expiry and the 90th-percentile fall) at 1.5x or more of it, linearly from 0 (a 90th-percentile fall
+of zero or less gives that half in full); range profile 100 - 2 x the past breach rate in %; liquidity log10(open interest
+in lots / minimum) x 100. **Score bands:** each day's candidates ranked by score (ties by stock, expiry, side); top third
+= 3 x position < n, bottom third = 3 x position >= 2n, else middle; fewer than 3 candidates that day = "small
+cross-section"; trades used are the strategy's without the portfolio limits.
 
 ### Acceptance checks
 
@@ -534,3 +545,5 @@ when the input is not known: it is never treated as a pass and never as zero.
 | P9.24 | Backtest: stop vs roll by rules vs roll every month, on the same entries | All three reported per campaign (built) |
 | P9.25 | Reversal detector: washed-out watch list, base forming, REVERSAL_CONFIRMED, two candidate trades, stall zones | Shown as "watch"; nothing alerts until approved (built) |
 | P9.26 | Reversal backtest: 10/20/40-session outcomes, new-low share, both candidates vs baseline | Reported with LOW SAMPLE where it applies (built) |
+| P9.27 | M1: whole-lot sizing and ZERO_SIZE; confirmed 5-bar pivots; portfolio and correlation limits; research versus actionable; open positions at the cutoff; spec names; monthly counts; section 2 vix_spike and expected_move | Built and tested (2026-11-15) |
+| P9.28 | M2: 0-100 score, six equal-weight factors with contributions; score bands by each day's candidates; each factor against the baseline | Built and tested (2026-11-15) |
