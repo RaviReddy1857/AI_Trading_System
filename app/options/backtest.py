@@ -70,6 +70,7 @@ from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
 from .stock_profile import (MARKET_UNKNOWN, MARKET_WEAK, ClosedTrade, Snapshot, alert_kinds, breadth_pct, market_weak,
+                            vix_spike_series,
                             snapshot)
 from .stock_selling import SpreadPosition, roll_choices, roll_money
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
@@ -296,6 +297,7 @@ class OptionEngine:
         self._bars_by_date: dict[str, dict[date, Bar]] = {}
         self._market: dict[date, dict] = {}
         self._breadth: dict[date, float | None] = {}
+        self._vix_spike: dict | None = None
         self._stock_closes: dict | None = None
         self._reversal: dict[str, object] = {}
         self._trigger = None
@@ -366,15 +368,20 @@ class OptionEngine:
             i = bisect.bisect_left(dates, d)
             prev = self._ref_iv.get(dates[i - 1]) if 0 < i < len(dates) and dates[i] == d else None
             now = self._ref_iv.get(d)
+            if self._vix_spike is None:
+                self._vix_spike = vix_spike_series(self.base.daily(self.o.iv_reference_symbol),
+                                                   self.s.stock_option_selling.profile)
             self._market[d] = {"fii_bias": None if bias == "UNKNOWN" else bias,
-                               "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None}
+                               "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None,
+                               "vix_spike": self._vix_spike.get(d)}
         return self._market[d]
 
     def breadth_at(self, d: date) -> float | None:
         """Market breadth known at the close of day d: share of the watchlist stocks above their
-        `breadth_sma_days` average, from each stock's bars up to and including d (cached)."""
+        sma_mid average, from each stock's bars up to and including d (cached)."""
         if d not in self._breadth:
             cfg = self.s.stock_option_selling.market_block
+            sma_mid = self.s.stock_option_selling.sma_mid
             if self._stock_closes is None:
                 self._stock_closes = {}
                 for inst in self.s.watchlist:
@@ -385,8 +392,8 @@ class OptionEngine:
             for dates, closes in self._stock_closes.values():
                 k = bisect.bisect_right(dates, d)
                 if k and dates[k - 1] == d:                      # the stock traded that day
-                    rows.append(closes[max(0, k - cfg.breadth_sma_days):k])
-            self._breadth[d] = breadth_pct(rows, cfg.breadth_sma_days, cfg.min_coverage_pct, len(self._stock_closes))
+                    rows.append(closes[max(0, k - sma_mid):k])
+            self._breadth[d] = breadth_pct(rows, sma_mid, cfg.min_coverage_pct, len(self._stock_closes))
         return self._breadth[d]
 
     def reversal_scanner(self, sym: str):
@@ -398,17 +405,18 @@ class OptionEngine:
             bars = [b for b in self.base.daily(sym) if floor is None or bar_date(b) >= floor]
             breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], self.s.history.max_overnight_gap_pct)
             self._reversal[sym] = ReversalScanner(bars, self.base.daily(self.s.regime.index_symbol), sos.reversal,
-                                                  sos.trend_block.long_sma_days, breaks, sos.swing_pivot_bars)
+                                                  sos.sma_long, breaks, sos.swing_pivot_bars)
         return self._reversal[sym]
 
     def snapshot_at(self, sym: str, bars: tuple, d: date) -> Snapshot | None:
         sos = self.s.stock_option_selling
         m = self.market_at(d)
         code, _ = market_weak(self.base.index_daily(d)[-400:], self.breadth_at(d), sos.market_block,
-                              sos.trend_block.long_sma_days)
-        return snapshot(bars, sos.pivot_lookback_sessions, sos.trend_block, m["fii_bias"], m["vix_change_pct"],
+                              sos.sma_long, sos.sma_mid)
+        return snapshot(bars, sos.pivot_lookback_sessions, sos.trend_block, m["fii_bias"], m["vix_spike"],
                         self.base.regime.at_close(d).regime,
-                        market_weak=None if code == MARKET_UNKNOWN else code == MARKET_WEAK, pivot_bars=sos.swing_pivot_bars)
+                        market_weak=None if code == MARKET_UNKNOWN else code == MARKET_WEAK, pivot_bars=sos.swing_pivot_bars,
+                        sma_long=sos.sma_long)
 
     def trigger_strategy(self):
         if self._trigger is None:
@@ -632,7 +640,7 @@ class OptionEngine:
         fp = lambda px, side: float(self.costs.fill_price("options", px, side))
         m = roll_money(self.costs, held, fp(bars[0].close, "BUY"), fp(bars[1].close, "SELL"), new,
                        fp(now[0], "SELL"), fp(now[1], "BUY"))
-        limit = strategy.params.roll.min_net_credit_pct_of_width
+        limit = strategy.params.roll.min_roll_net_credit_pct_of_width
         if m["roll_net_credit_pct_of_width"] is None or not m["roll_net_credit_pct_of_width"] > limit:
             pos.roll_refused = "ROLL_NET_CREDIT_TOO_SMALL"
             return
@@ -931,7 +939,6 @@ class OptionEngine:
         # Synchronized 5-minute execution applies to credit spreads; other structures stay on daily bars.
         sync = exit_check == "intraday" and getattr(strategy, "structure", "") == "CREDIT_SPREAD"
         incomplete: set[str] = set()
-        spike = self.s.stock_option_selling.profile.vix_spike_pct
         prev_snap = None
 
         def recent(i: int) -> tuple:
@@ -1020,7 +1027,7 @@ class OptionEngine:
             if alert_exits:
                 snap = self.snapshot_at(sym, recent(i), d)
                 if positions:
-                    alerts = tuple(tuple(a["kind"] for a in alert_kinds(prev_snap, snap, right, spike))
+                    alerts = tuple(tuple(a["kind"] for a in alert_kinds(prev_snap, snap, right))
                                    for right in ("PE", "CE"))
                 prev_snap = snap
             ctx_now = lambda: self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed())

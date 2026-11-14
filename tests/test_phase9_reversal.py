@@ -84,7 +84,7 @@ def test_each_confirmation_condition_is_needed():
     assert not any(d.confirmed for d in ReversalScanner(broken, idx, REV, 200).days)
     # a stock that is not below its 200-day average, or not down 30% for three months, is not washed out
     assert not any(d.washed_out for d in ReversalScanner(bars[:388], idx, REV, 200).days)
-    shallow = REV.model_copy(update={"drawdown_pct": 60.0})
+    shallow = REV.model_copy(update={"washed_out_drawdown_pct": 60.0})
     assert not any(d.washed_out for d in ReversalScanner(bars, idx, shallow, 200).days)
     # too little history is unknown, never a state
     assert all(sc_day.washed_out is False for sc_day in ReversalScanner(bars[:150], idx, REV, 200).days)
@@ -126,7 +126,7 @@ def reversal_ctx(cfg, after=0, iv=0.6, confirmed_today=None, **kw):
 
 
 def test_ACCEPTANCE_reversal_lifts_the_falling_stock_block_only_for_a_put_spread_below_the_base_low():
-    cfg = settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 0, "trend_fast_sma": 3, "trend_slow_sma": 8})
+    cfg = settings(stock_option_selling={"min_credit_to_max_loss": 0, "sma_short": 3, "sma_mid": 8})
     strat = build_stock_selling(cfg)
     ctx, info = reversal_ctx(cfg, after=2)
     plain = replace(ctx, market={})
@@ -144,14 +144,14 @@ def test_ACCEPTANCE_reversal_lifts_the_falling_stock_block_only_for_a_put_spread
     assert strat.evaluate(late) == [] and any(r.startswith(DOWNTREND_BLOCK) for r in strat.last_no_trade)
     # switched off: no lift
     off = build_stock_selling(settings(stock_option_selling={
-        "min_net_credit_pct_of_max_loss": 0, "trend_fast_sma": 3, "trend_slow_sma": 8,
+        "min_credit_to_max_loss": 0, "sma_short": 3, "sma_mid": 8,
         "reversal": {**REV.model_dump(), "enabled": False}}))
     assert off.evaluate(ctx) == [] and any(r.startswith(DOWNTREND_BLOCK) for r in off.last_no_trade)
 
 
 # ---------------- 4. two candidate trades ----------------
 def test_ACCEPTANCE_confirmation_gives_a_put_credit_spread_below_the_base_low(s):
-    cfg = settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 0})
+    cfg = settings(stock_option_selling={"min_credit_to_max_loss": 0})
     put, _ = build_reversal_strategies(cfg)
     assert put.id == "reversal_put_spread" and put.alerts_enabled is False and "WATCH ONLY" in put.status_label
     ctx, info = reversal_ctx(cfg)
@@ -160,7 +160,7 @@ def test_ACCEPTANCE_confirmation_gives_a_put_credit_spread_below_the_base_low(s)
     short, long_ = legs_of(sig[0])
     assert sig[0].strategy_id == "reversal_put_spread" and short.right == "PE"
     assert short.strike < BASE_LOW and unhedged_short_legs(sig[0].legs) == []
-    assert abs(sig[0].details["legs"][0]["delta"]) <= cfg.stock_option_selling.max_short_delta
+    assert abs(sig[0].details["legs"][0]["delta"]) <= cfg.stock_option_selling.short_delta_max
     assert sig[0].details["reversal"]["base_low"] == pytest.approx(BASE_LOW) and 20 <= sig[0].details["days_to_expiry"] <= 35
     assert "the base low" in " ".join(sig[0].why_now)
     # no confirmation today: no candidate. The up-trend and IV-rank entry rules do not gate this candidate
@@ -171,7 +171,7 @@ def test_ACCEPTANCE_confirmation_gives_a_put_credit_spread_below_the_base_low(s)
     # structure rules still apply: margin, liquidity
     assert put.evaluate(replace(ctx, margin=lambda a, b: None)) == [] and any("MARGIN_UNKNOWN" in r for r in put.last_no_trade)
     # the minimum net credit applies with the default settings
-    strict, _ = build_reversal_strategies(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 95}))
+    strict, _ = build_reversal_strategies(settings(stock_option_selling={"min_credit_to_max_loss": 0.95}))
     assert strict.evaluate(ctx) == [] and any(r.startswith("CREDIT_TOO_SMALL") for r in strict.last_no_trade)
 
 
@@ -198,16 +198,16 @@ def test_ACCEPTANCE_confirmation_gives_a_bull_call_spread_with_stall_zones(s):
     assert d["max_profit_inr"] == pytest.approx((20 - debit) * LOT * n - d["costs_inr"], abs=0.02)
     assert d["breakevens"][0] == pytest.approx(bought.strike + debit + d["costs_inr"] / (LOT * n), abs=0.01)
     assert d["stall_zones"] == [784.0] and d["base_low"] == pytest.approx(BASE_LOW) and "stall zones" in x.why_now[-1]
-    assert d["max_loss_inr"] <= s.account.capital_inr * s.stock_option_selling.max_loss_per_stock_spread_pct / 100
+    assert d["max_loss_inr"] <= s.account.capital_inr * s.stock_option_selling.max_risk_per_position_pct / 100
     assert any("approve" in w for w in d["warnings"])
     # no confirmation: nothing. Baseline (no filter): the same structure without a reversal
     assert call.evaluate(replace(ctx, market={})) == [] and any(r.startswith("NO_REVERSAL") for r in call.last_no_trade)
     assert call.evaluate(replace(ctx, market={}, no_filter=True))
-    small, = [build_reversal_strategies(settings(stock_option_selling={"max_loss_per_stock_spread_pct": 0.5}))[1]]
+    small, = [build_reversal_strategies(settings(stock_option_selling={"max_risk_per_position_pct": 0.5}))[1]]
     assert small.evaluate(ctx) == [] and any(r.startswith("ZERO_SIZE") for r in small.last_no_trade)
     assert call.evaluate(replace(ctx, kind="index")) == []
     for bad in ({"reversal": {"bull_call": {"entry_min_dte": 70}}}, {"reversal": {"outcome_sessions": []}},
-                {"reversal": {"drawdown_pct": 0}}):
+                {"reversal": {"washed_out_drawdown_pct": 0}}):
         with pytest.raises(Exception):
             settings(stock_option_selling=bad)
 
@@ -241,11 +241,11 @@ def test_bull_call_spread_payoff_is_bounded_at_every_expiry_price(kl, width, fra
 # ---------------- 5. the reversal alert, only once approved ----------------
 def test_ACCEPTANCE_reversal_alert_goes_to_every_open_position_only_after_approval(s):
     prev, now = snap(), snap(date(2026, 11, 13), reversal=True)
-    kinds = lambda right, ok: [a["kind"] for a in alert_kinds(prev, now, right, 15.0, ok)]
+    kinds = lambda right, ok: [a["kind"] for a in alert_kinds(prev, now, right, ok)]
     assert kinds("PE", False) == [] and kinds("CE", False) == []                    # not approved: nothing
     assert kinds("PE", True) == ["REVERSAL_CONFIRMED"] and kinds("CE", True) == ["REVERSAL_CONFIRMED"]
-    assert "against this bear call spread" in alert_kinds(prev, now, "CE", 15.0, True)[0]["what_changed"]
-    assert [a["kind"] for a in alert_kinds(snap(reversal=True), now, "PE", 15.0, True)] == []   # only on the day it happens
+    assert "against this bear call spread" in alert_kinds(prev, now, "CE", True)[0]["what_changed"]
+    assert [a["kind"] for a in alert_kinds(snap(reversal=True), now, "PE", True)] == []   # only on the day it happens
     assert s.stock_option_selling.reversal.alerts_approved is False
     approved = settings(stock_option_selling={"reversal": {**REV.model_dump(), "alerts_approved": True}})
     ctx, _ = reversal_ctx(s)
@@ -285,7 +285,7 @@ def reversal_world():
     """The washed-out stock confirmed on 1 July 2025, with stored option history (model prices) around it."""
     cfg = settings(backtest={"test_start": {"1day": date(2023, 6, 1)}, "holdout_start": {"1day": date(2025, 10, 1)}},
                    options={"iv_rank_min_history_days": 20, "iv_rank_lookback_days": 60},
-                   stock_option_selling={"min_net_credit_pct_of_max_loss": 0})
+                   stock_option_selling={"min_credit_to_max_loss": 0})
     end = date(2025, 9, 30)
     after = len(weekdays(date(2025, 7, 2), end))
     bars, idx, m = washed_out_stock(end=end, after=after)
@@ -391,7 +391,7 @@ def test_ACCEPTANCE_washed_out_stocks_are_shown_as_watch_never_as_a_signal(s):
         rows = reversal_watch(s, st2, "sim")["rows"]
         assert [(x["stock"], x["state"], x["label"], x["candidates"]) for x in rows] == [("RELIANCE", state, "watch", [])]
     # with a chain stored that session the two candidates are worked out, still watch only
-    cfg = settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 0})
+    cfg = settings(stock_option_selling={"min_credit_to_max_loss": 0})
     full = reversal_watch(cfg, watch_store(with_chain=True), "sim", now=NOW + timedelta(minutes=30))["rows"][0]
     by = {c["candidate"]: c for c in full["candidates"]}
     assert by["bull call spread"]["status"] == "CANDIDATE" and by["bull call spread"]["trade"]["direction"] == "LONG"

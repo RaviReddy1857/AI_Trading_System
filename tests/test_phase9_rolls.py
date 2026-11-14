@@ -115,7 +115,7 @@ def test_ACCEPTANCE_roll_net_credit_is_new_credit_less_the_debit_to_close_less_a
     width = abs(sold["strike"] - bought["strike"]) * LOT_R
     assert roll["replacement_width_inr"] == width
     assert roll["roll_net_credit_pct_of_width"] == pytest.approx(net / width * 100, abs=0.01)
-    assert roll["roll_net_credit_pct_of_width"] > ROLL.min_net_credit_pct_of_width
+    assert roll["roll_net_credit_pct_of_width"] > ROLL.min_roll_net_credit_pct_of_width
     assert sold["strike"] < HELD_ROLL.short_strike and roll["expiry"] == EXP.isoformat() and roll["roll_no"] == 1
     assert unhedged_short_legs(roll["legs"]) == []
     after = roll["campaign_after_roll"]
@@ -147,7 +147,7 @@ def test_ACCEPTANCE_a_positive_new_premium_alone_does_not_qualify_and_each_rule_
     assert fresh is not None and fresh.details["net_credit_after_costs_inr"] > 0        # the premium alone was positive
     # exactly at the limit is not enough: the ratio must be ABOVE min_roll_net_credit_pct_of_width
     ok = roll_choices(strat, roll_ctx(cfg, bars), HELD_ROLL, 0.8)["roll"]["roll_net_credit_pct_of_width"]
-    at = build_stock_selling(big_settings(roll={**ROLL.model_dump(), "min_net_credit_pct_of_width": ok}))
+    at = build_stock_selling(big_settings(roll={**ROLL.model_dump(), "min_roll_net_credit_pct_of_width": ok}))
     assert roll_choices(at, roll_ctx(cfg, bars), HELD_ROLL, 0.8)["action"] == "EXIT"
     # the campaign has already been rolled max_rolls times
     again = roll_choices(strat, roll_ctx(cfg, bars), HELD_ROLL, 0.8, rolls_so_far=1)
@@ -198,11 +198,11 @@ def test_ACCEPTANCE_every_signal_shows_net_credit_after_hedge_and_charges_and_a_
     assert d["net_credit_after_costs_inr"] == d["max_profit_inr"]
     assert d["net_credit_after_costs_per_share"] == pytest.approx(d["net_credit_after_costs_inr"] / q, abs=0.01)
     assert d["net_credit_pct_of_max_loss"] == pytest.approx(d["net_credit_after_costs_inr"] / d["max_loss_inr"] * 100, abs=0.01)
-    assert d["net_credit_pct_of_max_loss"] >= s.stock_option_selling.min_net_credit_pct_of_max_loss
-    strict = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 60}))
+    assert d["net_credit_pct_of_max_loss"] >= s.stock_option_selling.min_credit_to_max_loss * 100
+    strict = build_stock_selling(settings(stock_option_selling={"min_credit_to_max_loss": 0.6}))
     assert strict.evaluate(ctx_for(s, bars)) == []
     assert any(r.startswith("CREDIT_TOO_SMALL") and "under 60%" in r for r in strict.last_no_trade)
-    off = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 0}))
+    off = build_stock_selling(settings(stock_option_selling={"min_credit_to_max_loss": 0}))
     assert off.evaluate(ctx_for(s, bars))
     # the no-filter baseline does not apply it unless the comparison asks for it
     base = dict(no_filter=True, baseline_right="PE")

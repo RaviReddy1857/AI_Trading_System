@@ -32,46 +32,46 @@ INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
 
 
 # ---------------- 1. falling-stock block ----------------
-def trend_block(daily: Sequence, index_daily: Sequence, right: str, cfg) -> tuple[str | None, list[str]]:
+def trend_block(daily: Sequence, index_daily: Sequence, right: str, cfg, sma_long: int = 200) -> tuple[str | None, list[str]]:
     """(reason code or None, the conditions that apply). Puts (right PE) are blocked when the stock
-    closed below its long average, made its 52-week low in the last `extreme_recent_sessions`, or its
-    return over `relative_return_sessions` trails the index by more than `max_underperformance_pct`
+    closed below its long average, made its 52-week low in the last `new_low_lookback`, or its
+    return over `rel_strength_lookback` trails the index by more than `rel_strength_max_lag_pct`
     points. Calls (CE): the mirror image. Without enough history for a condition the answer is
     INSUFFICIENT_HISTORY: unknown never passes."""
-    need = max(cfg.long_sma_days, cfg.extreme_lookback_sessions, cfg.relative_return_sessions + 1)
+    need = max(sma_long, cfg.low_52w_sessions, cfg.rel_strength_lookback + 1)
     if len(daily) < need:
         return INSUFFICIENT_HISTORY, [f"{len(daily)} daily bars, the trend block needs {need}"]
     closes = [b.close for b in daily]
-    avg = last(sma(closes, cfg.long_sma_days))
+    avg = last(sma(closes, sma_long))
     if not ok(avg):
-        return INSUFFICIENT_HISTORY, [f"{cfg.long_sma_days}-day average unavailable"]
+        return INSUFFICIENT_HISTORY, [f"{sma_long}-day average unavailable"]
     idx = {bar_date(b): b.close for b in index_daily}
-    d0, d1 = bar_date(daily[-1 - cfg.relative_return_sessions]), bar_date(daily[-1])
+    d0, d1 = bar_date(daily[-1 - cfg.rel_strength_lookback]), bar_date(daily[-1])
     if d0 not in idx or d1 not in idx:
         return INSUFFICIENT_HISTORY, [f"no index close for {d0} or {d1}: relative return unknown"]
-    stock_ret = (closes[-1] / closes[-1 - cfg.relative_return_sessions] - 1) * 100
+    stock_ret = (closes[-1] / closes[-1 - cfg.rel_strength_lookback] - 1) * 100
     index_ret = (idx[d1] / idx[d0] - 1) * 100
     rel = stock_ret - index_ret
-    window, recent = daily[-cfg.extreme_lookback_sessions:], daily[-cfg.extreme_recent_sessions:]
+    window, recent = daily[-cfg.low_52w_sessions:], daily[-cfg.new_low_lookback:]
     why = []
     if right == "PE":
         if closes[-1] < avg:
-            why.append(f"close {fmt(closes[-1])} is below the {cfg.long_sma_days}-day average {fmt(avg)}")
+            why.append(f"close {fmt(closes[-1])} is below the {sma_long}-day average {fmt(avg)}")
         low = min(b.close for b in window)                     # a 52-week low is the lowest CLOSE of the window
         if min(b.close for b in recent) <= low:
-            why.append(f"52-week low {fmt(low)} was made in the last {cfg.extreme_recent_sessions} sessions")
-        if rel < -cfg.max_underperformance_pct:
-            why.append(f"{cfg.relative_return_sessions}-session return {stock_ret:.1f}% trails the index "
-                       f"({index_ret:.1f}%) by {-rel:.1f} points, more than {cfg.max_underperformance_pct:g}")
+            why.append(f"52-week low {fmt(low)} was made in the last {cfg.new_low_lookback} sessions")
+        if rel < -cfg.rel_strength_max_lag_pct:
+            why.append(f"{cfg.rel_strength_lookback}-session return {stock_ret:.1f}% trails the index "
+                       f"({index_ret:.1f}%) by {-rel:.1f} points, more than {cfg.rel_strength_max_lag_pct:g}")
         return (DOWNTREND_BLOCK if why else None), why
     if closes[-1] > avg:
-        why.append(f"close {fmt(closes[-1])} is above the {cfg.long_sma_days}-day average {fmt(avg)}")
+        why.append(f"close {fmt(closes[-1])} is above the {sma_long}-day average {fmt(avg)}")
     high = max(b.close for b in window)
     if max(b.close for b in recent) >= high:
-        why.append(f"52-week high {fmt(high)} was made in the last {cfg.extreme_recent_sessions} sessions")
-    if rel > cfg.max_underperformance_pct:
-        why.append(f"{cfg.relative_return_sessions}-session return {stock_ret:.1f}% leads the index "
-                   f"({index_ret:.1f}%) by {rel:.1f} points, more than {cfg.max_underperformance_pct:g}")
+        why.append(f"52-week high {fmt(high)} was made in the last {cfg.new_low_lookback} sessions")
+    if rel > cfg.rel_strength_max_lag_pct:
+        why.append(f"{cfg.rel_strength_lookback}-session return {stock_ret:.1f}% leads the index "
+                   f"({index_ret:.1f}%) by {rel:.1f} points, more than {cfg.rel_strength_max_lag_pct:g}")
     return (UPTREND_BLOCK if why else None), why
 
 
@@ -90,9 +90,10 @@ def breadth_pct(stocks: Sequence[Sequence[float]], sma_days: int, min_coverage_p
     return round(above / len(usable) * 100, 1)
 
 
-def market_weak(index_daily: Sequence, breadth: float | None, cfg, long_sma_days: int) -> tuple[str | None, list[str]]:
+def market_weak(index_daily: Sequence, breadth: float | None, cfg, long_sma_days: int,
+                breadth_sma_days: int = 50) -> tuple[str | None, list[str]]:
     """(MARKET_WEAK | MARKET_UNKNOWN | None, why). Weak = the index closed below its long average, or
-    breadth is below `min_breadth_pct`. Without enough index history or a breadth figure the state is
+    breadth is below `market_breadth_min_pct`. Without enough index history or a breadth figure the state is
     unknown, which blocks like weak: unknown never passes."""
     if len(index_daily) < long_sma_days:
         return MARKET_UNKNOWN, [f"{len(index_daily)} index bars, the market block needs {long_sma_days}"]
@@ -103,9 +104,9 @@ def market_weak(index_daily: Sequence, breadth: float | None, cfg, long_sma_days
     why = []
     if closes[-1] < avg:
         why.append(f"the index closed at {fmt(closes[-1])}, below its {long_sma_days}-day average {fmt(avg)}")
-    if breadth < cfg.min_breadth_pct:
-        why.append(f"only {breadth:g}% of stocks are above their {cfg.breadth_sma_days}-session average "
-                   f"(minimum {cfg.min_breadth_pct:g}%)")
+    if breadth < cfg.market_breadth_min_pct:
+        why.append(f"only {breadth:g}% of stocks are above their {breadth_sma_days}-session average "
+                   f"(minimum {cfg.market_breadth_min_pct:g}%)")
     return (MARKET_WEAK if why else None), why
 
 
@@ -121,24 +122,24 @@ class ClosedTrade:
 
 def stock_loss_limit(trades: Sequence[ClosedTrade], today: date, cfg, capital_inr: float) -> tuple[date, str] | None:
     """(blocked until, why) if the stock is cooling off today, else None. A cooling-off period starts
-    on the exit date of the trade that completes `max_stopped_trades` stops, or takes the net result
-    to a loss of `max_cumulative_loss_pct` of capital, within the last `window_days`. Only trades
+    on the exit date of the trade that completes `stock_loss_max_stops` stops, or takes the net result
+    to a loss of `stock_loss_max_pct_capital` of capital, within the last `stock_loss_window_days`. Only trades
     closed on or before `today` count."""
-    limit = capital_inr * cfg.max_cumulative_loss_pct / 100.0
+    limit = capital_inr * cfg.stock_loss_max_pct_capital / 100.0
     done = sorted((t for t in trades if t.exit_date <= today), key=lambda t: t.exit_date)
     best = None
     for t in done:
-        recent = [x for x in done if t.exit_date - timedelta(days=cfg.window_days) < x.exit_date <= t.exit_date]
+        recent = [x for x in done if t.exit_date - timedelta(days=cfg.stock_loss_window_days) < x.exit_date <= t.exit_date]
         stops = sum(1 for x in recent if x.stopped)
         net = sum(x.net_pnl for x in recent)
         why = None
-        if stops >= cfg.max_stopped_trades and t.stopped:
-            why = f"{stops} stopped trades in {cfg.window_days} days (the last on {t.exit_date:%d-%b-%Y})"
+        if stops >= cfg.stock_loss_max_stops and t.stopped:
+            why = f"{stops} stopped trades in {cfg.stock_loss_window_days} days (the last on {t.exit_date:%d-%b-%Y})"
         elif net <= -limit and t.net_pnl < 0:
-            why = (f"net loss Rs {fmt(-net)} in {cfg.window_days} days to {t.exit_date:%d-%b-%Y}, at or above "
-                   f"{cfg.max_cumulative_loss_pct:g}% of capital (Rs {fmt(limit)})")
+            why = (f"net loss Rs {fmt(-net)} in {cfg.stock_loss_window_days} days to {t.exit_date:%d-%b-%Y}, at or above "
+                   f"{cfg.stock_loss_max_pct_capital:g}% of capital (Rs {fmt(limit)})")
         if why:
-            until = t.exit_date + timedelta(days=cfg.cooling_off_days)
+            until = t.exit_date + timedelta(days=cfg.stock_cooloff_days)
             if today < until and (best is None or until > best[0]):
                 best = (until, f"{why}; no new signal in this stock until {until:%d-%b-%Y}")
     return best
@@ -228,7 +229,8 @@ def _window(daily: Sequence, years: int, floor: date | None) -> list:
 
 
 def range_speed_profile(daily: Sequence, cfg, floor: date | None = None, right: str | None = None,
-                        distance_pct: float | None = None, atm_iv_pct: float | None = None, pivot_bars: int = 5) -> dict:
+                        distance_pct: float | None = None, atm_iv_pct: float | None = None, pivot_bars: int = 5,
+                        dte_days: float | None = None) -> dict:
     """The stock's profile over each window in `cfg.windows_years`, from bars on or after `floor`.
     `distance_pct` and `right`: the proposed sold strike's distance from the price, for the breach
     history. `atm_iv_pct`: current at-the-money implied volatility, for the implied move.
@@ -241,11 +243,15 @@ def range_speed_profile(daily: Sequence, cfg, floor: date | None = None, right: 
     out["state_note"] = (f"net move / distance travelled over {cfg.state_lookback_sessions} sessions = {eff}; "
                          f"trending at or above {cfg.trending_efficiency:g}") if eff is not None else "not enough bars"
     h = cfg.holding_sessions
-    implied = None if not ok(atm_iv_pct) else round(atm_iv_pct * (h / 252.0) ** 0.5, 2)
-    out["implied_move_pct"] = implied
-    out["implied_move_note"] = (f"one standard deviation over {h} sessions from the at-the-money implied "
-                                f"volatility {atm_iv_pct:.1f}%" if implied is not None
-                                else "no current at-the-money implied volatility (no fresh option chain)")
+    spot = closes_all[-1] if closes_all else None
+    em = expected_move(spot, atm_iv_pct, dte_days)
+    out["expected_move_inr"] = None if em is None else round(em, 2)
+    out["implied_move_pct"] = None if em is None else round(em / spot * 100, 2)
+    out["expected_move_dte"] = dte_days
+    out["implied_move_note"] = (f"expected move to expiry ({dte_days:g} days): spot x IV {atm_iv_pct:.1f}% x sqrt(DTE/365); "
+                                f"a one-standard-deviation model estimate, not a guaranteed range" if em is not None
+                                else "no expected move: the at-the-money implied volatility or the days to expiry are "
+                                     "not known (no fresh option chain)")
     for years in cfg.windows_years:
         bars = _window(daily, years, floor)
         closes = [b.close for b in bars]
@@ -282,6 +288,14 @@ def range_speed_profile(daily: Sequence, cfg, floor: date | None = None, right: 
     return out
 
 
+def expected_move(spot: float | None, iv_pct: float | None, dte_days: float | None) -> float | None:
+    """expected_move (section 2): spot x IV x sqrt(DTE / 365), IV as an annualized decimal. A
+    one-standard-deviation model estimate, not a guaranteed range. None when an input is unknown."""
+    if not (ok(spot) and ok(iv_pct) and dte_days is not None and dte_days > 0):
+        return None
+    return spot * iv_pct / 100.0 * (dte_days / 365.0) ** 0.5
+
+
 # ---------------- 4. scenario history ----------------
 def fii_streak_starts(rows: Sequence[tuple[date, float]], streak: int, selling: bool = True,
                       sessions: Sequence[date] | None = None) -> list[date]:
@@ -302,12 +316,39 @@ def fii_streak_starts(rows: Sequence[tuple[date, float]], streak: int, selling: 
     return out
 
 
-def vix_spike_dates(vix_daily: Sequence, pct: float, floor: date | None = None) -> list[date]:
-    """Sessions on which India VIX closed at least `pct` % above the previous session's close."""
-    out = []
-    for a, b in zip(vix_daily, vix_daily[1:]):
-        if a.close > 0 and (b.close / a.close - 1) * 100 >= pct and (floor is None or bar_date(b) >= floor):
-            out.append(bar_date(b))
+def vix_spike_at(closes: Sequence[float], i: int, cfg) -> bool | None:
+    """vix_spike on session i (section 2): India VIX up at least `vix_spike_rise_pct` over the last
+    `vix_spike_sessions` sessions, or closing above its `vix_spike_percentile` of the previous
+    `vix_percentile_lookback` closes. True if either holds; False when both are known not to hold;
+    None when the answer is unknown (too little history for a part that does not already say yes)."""
+    n = cfg.vix_spike_sessions
+    rise = None
+    if i >= n and closes[i - n] > 0:
+        rise = (closes[i] / closes[i - n] - 1) * 100 >= cfg.vix_spike_rise_pct
+    high = None
+    if i >= cfg.vix_percentile_lookback:
+        level = percentile(list(closes[i - cfg.vix_percentile_lookback:i]), cfg.vix_spike_percentile)
+        high = level is not None and closes[i] > level
+    if rise or high:
+        return True
+    if rise is None or high is None:
+        return None
+    return False
+
+
+def vix_spike_series(vix_daily: Sequence, cfg) -> dict[date, bool | None]:
+    closes = [b.close for b in vix_daily]
+    return {bar_date(b): vix_spike_at(closes, i, cfg) for i, b in enumerate(vix_daily)}
+
+
+def vix_spike_dates(vix_daily: Sequence, cfg, floor: date | None = None) -> list[date]:
+    """First sessions of India VIX spike episodes (a spike day after a known non-spike day)."""
+    flags = vix_spike_series(vix_daily, cfg)
+    out, prev = [], None
+    for d in sorted(flags):
+        if flags[d] is True and prev is False and (floor is None or d >= floor):
+            out.append(d)
+        prev = flags[d]
     return out
 
 
@@ -371,7 +412,7 @@ class Snapshot:
     high_52w: float | None = None
     sma_long: float | None = None
     fii_bias: str | None = None           # BEARISH = selling streak, BULLISH = buying streak, NEUTRAL, None
-    vix_change_pct: float | None = None   # India VIX close against the previous close
+    vix_spike: bool | None = None         # vix_spike at this close (section 2); None = unknown
     regime: str | None = None
     news_tags: tuple[str, ...] = ()       # from the phase 8 news tagging, e.g. EVENT_RISK
     reversal: bool = False                # a reversal was confirmed for this stock on this session (reversal.py)
@@ -379,27 +420,27 @@ class Snapshot:
 
 
 def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None = None,
-             vix_change_pct: float | None = None, regime: str | None = None, news_tags: Sequence[str] = (),
-             reversal: bool = False, market_weak: bool | None = None, pivot_bars: int = 5) -> Snapshot | None:
+             vix_spike: bool | None = None, regime: str | None = None, news_tags: Sequence[str] = (),
+             reversal: bool = False, market_weak: bool | None = None, pivot_bars: int = 5,
+             sma_long: int = 200) -> Snapshot | None:
     """The snapshot at the close of the last bar given."""
     if not daily:
         return None
     closes = [b.close for b in daily]
     support, resistance = support_resistance(daily, sr_lookback, pivot_bars)
-    before = daily[-1 - block_cfg.extreme_lookback_sessions:-1] if len(daily) > block_cfg.extreme_lookback_sessions else None
-    n = block_cfg.long_sma_days
+    before = daily[-1 - block_cfg.low_52w_sessions:-1] if len(daily) > block_cfg.low_52w_sessions else None
+    n = sma_long
     avg = sum(closes[-n:]) / n if len(closes) >= n else None
     return Snapshot(bar_date(daily[-1]), closes[-1], support, resistance,
                     min(b.low for b in before) if before else None, max(b.high for b in before) if before else None,
-                    avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags), reversal, market_weak)
+                    avg if ok(avg) else None, fii_bias, vix_spike, regime, tuple(news_tags), reversal, market_weak)
 
 
 ALERT_KINDS = ("BELOW_SUPPORT", "NEW_52W_LOW", "BROKE_LONG_AVERAGE", "FII_STREAK", "VIX_SPIKE", "REGIME_TURN", "MARKET_WEAK",
                "EVENT_RISK")
 
 
-def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spike_pct: float,
-                reversal_alerts: bool = False) -> list[dict]:
+def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, reversal_alerts: bool = False) -> list[dict]:
     """What changed against an open spread between two closes. For a bull put spread (PE): the stock
     closed below the support it was above, below its 52-week low, or fell through its long average;
     an FII selling streak began; India VIX spiked; the regime turned VOLATILE or EVENT; news tagged
@@ -432,8 +473,9 @@ def alert_kinds(prev: Snapshot | None, now: Snapshot | None, right: str, vix_spi
     against = "BEARISH" if put else "BULLISH"
     if now.fii_bias == against and prev.fii_bias is not None and prev.fii_bias != against:
         add("FII_STREAK", f"an FII {'selling' if put else 'buying'} streak began (bias was {prev.fii_bias}, now {against})")
-    if now.vix_change_pct is not None and now.vix_change_pct >= vix_spike_pct:
-        add("VIX_SPIKE", f"India VIX rose {now.vix_change_pct:.1f}% in the session (spike level {vix_spike_pct:g}%)")
+    if now.vix_spike is True and prev.vix_spike is False:
+        add("VIX_SPIKE", "India VIX spiked: up 20% or more over 5 sessions, or above its 80th percentile of the past year "
+                         "(section 2 vix_spike)")
     if now.regime in ("VOLATILE", "EVENT") and prev.regime is not None and prev.regime != now.regime:
         add("REGIME_TURN", f"market regime turned {now.regime} (was {prev.regime})")
     if put and now.market_weak is True and prev.market_weak is False:

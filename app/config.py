@@ -516,23 +516,22 @@ class StockSellingBacktest(StrictModel):
 
 
 class TrendBlock(StrictModel):
-    """Falling-stock block (DOWNTREND_BLOCK): no put selling in a stock that is below its long
-    average, made a 52-week low recently, or trails NIFTY badly. Mirrored for call selling in a
-    strong uptrend."""
+    """Falling-stock block (DOWNTREND_BLOCK): no put selling in a stock that closed below sma_long, made a
+    52-week low (lowest close of `low_52w_sessions`) within `new_low_lookback`, or whose
+    `rel_strength_lookback` return trails NIFTY by more than `rel_strength_max_lag_pct` points. Mirrored for
+    call selling in a strong uptrend (UPTREND_BLOCK)."""
     enabled: bool = True
-    long_sma_days: int = Field(200, ge=20, le=400)
-    extreme_lookback_sessions: int = Field(252, ge=60, le=400)     # "52-week" low / high
-    extreme_recent_sessions: int = Field(20, ge=1, le=120)         # ... made within this many sessions
-    relative_return_sessions: int = Field(63, ge=10, le=260)       # about 3 months
-    max_underperformance_pct: float = Field(5.0, gt=0, le=100)     # rel_strength_max_lag_pct: stock return minus NIFTY return, points
+    new_low_lookback: int = Field(20, ge=1, le=120)
+    low_52w_sessions: int = Field(252, ge=60, le=400)
+    rel_strength_lookback: int = Field(63, ge=10, le=260)
+    rel_strength_max_lag_pct: float = Field(5.0, gt=0, le=100)
 
 
 class MarketBlock(StrictModel):
-    """MARKET_WEAK: no put-selling signal when NIFTY is below its long average (trend_block.long_sma_days) or
-    fewer than `min_breadth_pct` of the watchlist stocks are above their `breadth_sma_days` average."""
+    """MARKET_WEAK: no put-selling signal when NIFTY closed below its sma_long or fewer than
+    `market_breadth_min_pct` of the watchlist stocks closed above their sma_mid."""
     enabled: bool = True
-    breadth_sma_days: int = Field(50, ge=5, le=200)                # sma_mid
-    min_breadth_pct: float = Field(40.0, ge=0, le=100)             # market_breadth_min_pct
+    market_breadth_min_pct: float = Field(40.0, ge=0, le=100)
     min_coverage_pct: float = Field(80.0, gt=0, le=100)            # share of stocks with usable data, else breadth is unknown
 
 
@@ -555,19 +554,21 @@ class PortfolioLimits(StrictModel):
 
 
 class CampaignLimit(StrictModel):
-    """Per-stock campaign limit (STOCK_LOSS_LIMIT): after repeated stops or a large loss in one stock,
-    no new signal in that stock for a cooling-off period. Closed manual positions count too."""
+    """Per-stock campaign limit (STOCK_LOSS_LIMIT): after `stock_loss_max_stops` stopped trades or a net loss of
+    `stock_loss_max_pct_capital` in one stock within `stock_loss_window_days`, no new signal in that stock for
+    `stock_cooloff_days`. Closed manual positions count too, once recorded."""
     enabled: bool = True
-    window_days: int = Field(90, ge=7, le=730)
-    max_stopped_trades: int = Field(2, ge=1, le=20)
-    max_cumulative_loss_pct: float = Field(1.5, gt=0, le=100)      # stock_loss_max_pct_capital: net loss in the window, % of capital
-    cooling_off_days: int = Field(30, ge=1, le=365)                # stock_cooloff_days (calendar)
+    stock_loss_window_days: int = Field(90, ge=7, le=730)
+    stock_loss_max_stops: int = Field(2, ge=1, le=20)
+    stock_loss_max_pct_capital: float = Field(1.5, gt=0, le=100)
+    stock_cooloff_days: int = Field(30, ge=1, le=365)
 
 
 class RollRules(StrictModel):
     """When a threatened spread may be rolled instead of closed. Anything else is "exit"."""
     max_rolls: int = Field(1, ge=0, le=12)                         # rolls allowed in one campaign
-    min_net_credit_pct_of_width: float = Field(10.0, ge=0, le=100)  # new credit after hedge and charges, % of the new width
+    # roll net credit (new credit - debit to close the old spread - all roll charges) / replacement width, above this %
+    min_roll_net_credit_pct_of_width: float = Field(10.0, ge=0, le=100)
     stuck_time_value_pct: float = Field(20.0, ge=0, le=100)        # sold option in the money with time value below this % of its price
 
 
@@ -593,7 +594,7 @@ class Reversal(StrictModel):
     until `alerts_approved` is set by the user."""
     enabled: bool = True
     alerts_approved: bool = False                                  # no reversal alert is produced while this is false
-    drawdown_pct: float = Field(25.0, gt=0, lt=100)                # washed_out_drawdown_pct: this far below the 52-week high ...
+    washed_out_drawdown_pct: float = Field(25.0, gt=0, lt=100)     # this far below the 52-week high ...
     min_sessions_below_long: int = Field(63, ge=1, le=400)         # ... with at least this many sessions in a row below sma_long
     high_lookback_sessions: int = Field(252, ge=60, le=400)        # ... and below the trend block's long average
     base_no_new_low_sessions: int = Field(15, ge=3, le=120)        # base: the low is at least this many sessions old ...
@@ -624,7 +625,12 @@ class StockProfile(StrictModel):
     holding_sessions: int = Field(20, ge=1, le=120)                # a spread is held about this long
     scenario_horizon_days: int = Field(30, ge=1, le=180)           # calendar days
     scenario_min_cases: int = Field(10, ge=1, le=1000)             # fewer cases: LOW SAMPLE
-    vix_spike_pct: float = Field(15.0, gt=0, le=200)               # India VIX close up this % in one session
+    # vix_spike: India VIX up at least vix_spike_rise_pct over vix_spike_sessions sessions, or closing above its
+    # vix_spike_percentile over the previous vix_percentile_lookback sessions.
+    vix_spike_rise_pct: float = Field(20.0, gt=0, le=500)
+    vix_spike_sessions: int = Field(5, ge=1, le=60)
+    vix_spike_percentile: float = Field(80.0, gt=0, lt=100)
+    vix_percentile_lookback: int = Field(252, ge=20, le=1000)
 
     @model_validator(mode="after")
     def windows(self) -> "StockProfile":
@@ -636,29 +642,30 @@ class StockProfile(StrictModel):
 class StockOptionSelling(StrictModel):
     """Phase 9: monthly hedged credit spreads on F&O stocks (bull put in an up trend, bear call in a down
     trend). Every sold option is paired with a bought option of the same expiry. Stock options settle
-    physically, so no position is open in expiry week."""
+    physically, so no position is open in expiry week. Names follow section 2 of the Phase 9
+    specification; docs/implementation.md has the parameter table."""
     enabled: bool = True
     min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when the stock's IV rank is at least this
-    min_open_interest: int = Field(200, ge=0)                 # min_open_interest_lots: each traded strike, open interest in LOTS
-    max_bid_ask_spread_pct: float = Field(5.0, gt=0, le=100)   # max_bid_ask_pct_of_mid: each traded strike (live eligibility)
-    max_short_delta: float = Field(0.20, gt=0, lt=0.5)
+    min_open_interest_lots: int = Field(200, ge=0)            # each traded strike: open interest in lots
+    max_bid_ask_pct_of_mid: float = Field(5.0, gt=0, le=100)   # each traded strike, live: bid-ask width, % of mid
+    short_delta_max: float = Field(0.20, gt=0, lt=0.5)
     hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
-    max_loss_per_stock_spread_pct: float = Field(2.5, gt=0, le=100)    # max_risk_per_position_pct: a position's max loss, % of capital
-    # Net credit after the hedge and all charges must be at least this % of the max loss (CREDIT_TOO_SMALL). 0 = off.
-    # min_credit_to_max_loss = 0.10, set by the user on 2026-11-14 from the distribution of net credit / max loss
-    # measured on stored data BEFORE any outcome was looked at (median 0.10, n 28). Not chosen from results.
-    min_net_credit_pct_of_max_loss: float = Field(10.0, ge=0, le=100)
-    entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
-    entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
+    max_risk_per_position_pct: float = Field(2.5, gt=0, le=100)     # a position's cost-inclusive max loss, % of capital
+    # Net credit after the hedge, charges and slippage / cost-inclusive max loss, at least this (CREDIT_TOO_SMALL). 0 = off.
+    # 0.10, set by the user on 2026-11-14 from the distribution measured on stored data BEFORE any outcome was looked at.
+    min_credit_to_max_loss: float = Field(0.10, ge=0, le=1)
+    entry_dte_min: int = Field(20, ge=8, le=90)               # calendar days to expiry
+    entry_dte_max: int = Field(35, ge=8, le=120)
     profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)
-    stop_multiple_of_credit: float = Field(2.0, gt=1, le=10)
-    exit_days_before_expiry: int = Field(10, ge=7, le=30)     # time_exit_dte: out this many calendar days before expiry
+    stop_spread_value_multiple: float = Field(2.0, gt=1, le=10)   # exit when the buy-back value reaches this x the entry credit
+    time_exit_dte: int = Field(10, ge=7, le=30)               # out this many calendar days before expiry
     forced_exit_trading_days_before_expiry: int = Field(5, ge=1, le=15)   # no position inside this window, whatever else
     # EVENT_COVERAGE_UNKNOWN: a live or research candidate needs a COVERAGE row in events.csv for the stock, retrieved
     # at most this many days ago and covering the option's expiry.
     event_coverage_max_age_days: int = Field(7, ge=1, le=60)
-    trend_fast_sma: int = Field(20, ge=2, le=200)             # the swing trend rule: close and fast average vs slow average
-    trend_slow_sma: int = Field(50, ge=3, le=400)
+    sma_short: int = Field(20, ge=2, le=200)                  # the swing trend rule: close and sma_short against sma_mid
+    sma_mid: int = Field(50, ge=3, le=400)                    # also the breadth average
+    sma_long: int = Field(200, ge=20, le=400)                 # falling-stock block, market block, washed-out list
     atr_days: int = Field(14, ge=2, le=100)
     # swing_pivot_bars: a pivot low (high) is a session whose low (high) is below (above) the 5 sessions before it and at
     # or below (above) the 5 after; it is usable only once those 5 later sessions have completed, never on its own day.
@@ -679,29 +686,37 @@ class StockOptionSelling(StrictModel):
 
     @model_validator(mode="after")
     def consistent(self) -> "StockOptionSelling":
-        if self.entry_min_days_to_expiry > self.entry_max_days_to_expiry:
-            raise ValueError("stock_option_selling.entry_min_days_to_expiry cannot exceed entry_max_days_to_expiry")
-        if self.exit_days_before_expiry >= self.entry_min_days_to_expiry:
-            raise ValueError("stock_option_selling.exit_days_before_expiry must be below entry_min_days_to_expiry")
+        if self.entry_dte_min > self.entry_dte_max:
+            raise ValueError("stock_option_selling.entry_dte_min cannot exceed entry_dte_max")
+        if self.time_exit_dte >= self.entry_dte_min:
+            raise ValueError("stock_option_selling.time_exit_dte must be below entry_dte_min")
         h = self.hedge_strikes_out
         if len(h) != 2 or not (1 <= h[0] <= h[1] <= 10):
             raise ValueError("stock_option_selling.hedge_strikes_out must be [min, max] with 1 <= min <= max <= 10")
-        if self.trend_fast_sma >= self.trend_slow_sma:
-            raise ValueError("stock_option_selling.trend_fast_sma must be below trend_slow_sma")
+        if not (self.sma_short < self.sma_mid < self.sma_long):
+            raise ValueError("stock_option_selling needs sma_short < sma_mid < sma_long")
         return self
 
-    # the names the option backtest engine reads on every spread strategy
+    # the names the shared spread code (CreditSpread.finish, the option backtest engine) reads
     @property
     def entry_min_dte(self) -> int:
-        return self.entry_min_days_to_expiry
+        return self.entry_dte_min
 
     @property
     def entry_max_dte(self) -> int:
-        return self.entry_max_days_to_expiry
+        return self.entry_dte_max
 
     @property
     def min_credit_pct_of_width(self) -> float:
         return 0.0
+
+    @property
+    def stop_multiple_of_credit(self) -> float:
+        return self.stop_spread_value_multiple
+
+    @property
+    def exit_days_before_expiry(self) -> int:
+        return self.time_exit_dte
 
 
 class Settings(StrictModel):

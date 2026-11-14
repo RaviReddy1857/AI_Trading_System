@@ -147,7 +147,7 @@ class OptionContext:
     # phase 9 campaign limit: this stock's closed positions, signals and manual ones alike, as
     # stock_profile.ClosedTrade (exit date, stopped or not, net P&L)
     closed_trades: tuple = field(default_factory=tuple)
-    # phase 9 entry conditions recorded on the signal: fii_bias, vix_change_pct (None = unknown)
+    # phase 9 entry conditions recorded on the signal: fii_bias, vix_spike (None = unknown)
     market: dict = field(default_factory=dict)
 
     def __post_init__(self):

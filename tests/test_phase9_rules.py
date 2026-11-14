@@ -84,7 +84,7 @@ def test_strategy_gives_no_put_signal_in_a_falling_stock_and_the_block_can_be_sw
     assert strat.evaluate(ctx_for(s, bars)) == []
     assert any(r.startswith(DOWNTREND_BLOCK) and "200-day average" in r for r in strat.last_no_trade)
     off = build_stock_selling(settings(stock_option_selling={"trend_block": {**TB.model_dump(), "enabled": False},
-                                                             "min_net_credit_pct_of_max_loss": 0}))
+                                                             "min_credit_to_max_loss": 0}))
     sig = off.evaluate(ctx_for(s, bars))
     assert sig and sig[0].details["side"] == "PE" and off.version != strat.version
     # the no-filter baseline ignores the block unless the comparison asks for it
@@ -137,7 +137,7 @@ def test_strategy_gives_no_signal_in_a_stock_that_is_cooling_off(s):
     assert strat.evaluate(ctx_for(s, bars, closed_trades=stops[:1]))
     off = build_stock_selling(settings(stock_option_selling={"campaign_limit": {**CL.model_dump(), "enabled": False}}))
     assert off.evaluate(ctx_for(s, bars, closed_trades=stops))
-    for bad in ({"campaign_limit": {"cooling_off_days": 0}}, {"trend_block": {"long_sma_days": 5}},
+    for bad in ({"campaign_limit": {"stock_cooloff_days": 0}}, {"trend_block": {"low_52w_sessions": 5}},
                 {"profile": {"windows_years": []}}, {"profile": {"trending_efficiency": 1.5}}):
         with pytest.raises(Exception):
             settings(stock_option_selling=bad)
@@ -171,19 +171,25 @@ def test_range_speed_profile_windows_floor_and_implied_move():
     bars = [Bar("RELIANCE", daily_start(d), 1000.0, 1000.0 + 50, 1000.0 - 50, 1000.0 + 20 * math.sin(i / 9), 1e6)
             for i, d in enumerate(days)]
     floor = date(2022, 1, 1)
-    p = range_speed_profile(bars, PR, floor, "PE", 4.0, 30.0)
+    p = range_speed_profile(bars, PR, floor, "PE", 4.0, 30.0, dte_days=30)
     assert p["label"] == HISTORY_LABEL == "history, not a forecast" and p["as_of"] == END.isoformat()
     w2, w5 = p["windows"]["2"], p["windows"]["5"]
     assert w2["from"] >= (END - timedelta(days=731)).isoformat() and w5["from"] >= floor.isoformat()   # nothing before the floor
     assert w5["bars"] > w2["bars"] and w2["months"] in (22, 23, 24)
     assert w2["monthly_range_median_pct"] == pytest.approx(10.0, abs=0.01)       # high-low 100 on an open of 1000, every month
-    assert p["implied_move_pct"] == pytest.approx(30.0 * math.sqrt(20 / 252), abs=0.01)
+    # expected_move (section 2): spot x IV x sqrt(DTE / 365)
+    assert p["implied_move_pct"] == pytest.approx(30.0 * math.sqrt(30 / 365), abs=0.01)
+    assert p["expected_move_inr"] == pytest.approx(bars[-1].close * 0.30 * math.sqrt(30 / 365), abs=0.01)
+    assert "not a guaranteed range" in p["implied_move_note"]
+    from app.options.stock_profile import expected_move
+    assert expected_move(1000, 25.0, 25) == pytest.approx(1000 * 0.25 * math.sqrt(25 / 365))
+    assert expected_move(None, 25.0, 25) is None and expected_move(1000, None, 25) is None and expected_move(1000, 25.0, 0) is None
     assert w2["breach"]["distance_pct"] == 4.0 and w2["breach"]["side"] == "PE" and w2["breach"]["cases"] == w2["bars"] - 20
     assert w2["breach"]["breached"] == 0 and w2["upswings"] == 0                # a 2% wave never moves 4% or swings 8%
     assert 0 < w2["typical_move_pct"] < 4
     # unknown inputs stay unknown
     q = range_speed_profile(bars, PR, floor)
-    assert q["implied_move_pct"] is None and q["windows"]["2"]["breach"] is None and "no current" in q["implied_move_note"]
+    assert q["implied_move_pct"] is None and q["windows"]["2"]["breach"] is None and "no expected move" in q["implied_move_note"]
     assert range_speed_profile([], PR)["windows"]["2"]["monthly_range_median_pct"] is None
     # a swinging stock: 20% waves give swings with their length in sessions
     wave = series([1000 * (1 + 0.2 * math.sin(i / 20)) for i in range(700)])
@@ -228,9 +234,22 @@ def test_fii_streaks_need_consecutive_sessions_and_vix_spikes_are_one_session_ri
     assert fii_streak_starts(gap, 3) == [days[4]]                    # read as given: three rows in a row
     assert fii_streak_starts(gap, 3, sessions=days) == []            # with the session calendar the gap breaks the run
     assert fii_streak_starts(rows, 3, sessions=days) == [days[3]]
-    vix = [Bar("INDIAVIX", daily_start(d), v, v, v, v, None) for d, v in zip(days, [12, 12.5, 15, 15.1, 14, 16.1, 16, 16, 20, 20])]
-    assert vix_spike_dates(vix, 15.0) == [days[2], days[5], days[8]]
-    assert vix_spike_dates(vix, 15.0, floor=days[4]) == [days[5], days[8]]
+    # vix_spike (section 2): up 20% over 5 sessions, or above the 80th percentile of the previous closes
+    cfgv = PR.model_copy(update={"vix_percentile_lookback": 20})
+    vdays = weekdays_back(date(2026, 3, 13), 40)
+    level = [12.0 if i % 2 == 0 else 12.2 for i in range(30)] + [12.5, 13.0, 15.5, 16.0, 15.9, 15.0, 14.0, 13.0, 12.6, 12.4]
+    vix = [Bar("INDIAVIX", daily_start(d), v, v, v, v, None) for d, v in zip(vdays, level)]
+    from app.options.stock_profile import vix_spike_at, vix_spike_series
+    closes = [b.close for b in vix]
+    assert vix_spike_at(closes, 4, cfgv) is None                    # not enough history for either part
+    assert vix_spike_at(closes, 19, cfgv) is None                   # the rise part is known (no), the percentile is not
+    assert vix_spike_at(closes, 25, cfgv) is False                  # both known: neither
+    assert vix_spike_at(closes, 32, cfgv) is True                   # 15.5 vs 12.25 five sessions before: +26%
+    assert vix_spike_at(closes, 30, cfgv) is True                   # 12.5: above the 80th percentile (12.2) of the last 20
+    assert vix_spike_at(closes, 29, cfgv) is False
+    assert vix_spike_dates(vix, cfgv) == [vdays[30]]                # one episode: its first day only
+    assert vix_spike_dates(vix, cfgv, floor=vdays[35]) == []
+    assert set(vix_spike_series(vix, cfgv)) == set(vdays)
 
 
 def profile_store(with_inputs: bool):
@@ -241,7 +260,7 @@ def profile_store(with_inputs: bool):
         px = 1000 + 0.3 * i + 10 * math.sin(i / 6)
         bars.append(Bar("RELIANCE", daily_start(d), px - 1, px + 6, px - 6, px, 1e6))
         bars.append(Bar("NIFTY", daily_start(d), 24000, 24050, 23950, 24000, None))
-        v = 14 * (1.2 if i % 50 == 25 else 1.0)
+        v = 14 * (1.2 if i % 25 == 12 else 1.0)
         bars.append(Bar("INDIAVIX", daily_start(d), v, v, v, v, None))
     store.save_history_bars("bars_1d", bars, "sim")
     if with_inputs:
@@ -264,7 +283,7 @@ def test_ACCEPTANCE_scenarios_without_input_data_say_no_data_and_name_the_file_t
     assert "data/fii_dii.csv" in fii["note"] and "date,fii_net_cr,dii_net_cr" in fii["note"]
     assert "data/events.csv" in rbi["note"] and "RBI_POLICY" in rbi["note"]
     assert "data/events.csv" in res["note"] and "RESULTS" in res["note"]
-    vix = by["after an India VIX spike (15% in a session)"]          # this one needs only stored prices
+    vix = by["after an India VIX spike (up 20% over 5 sessions or above its 80th percentile)"]   # only stored prices
     assert vix["cases"] >= 10 and vix["status"] == "ok"
     assert v["profile"]["implied_move_pct"] is None and v["setup"] is None      # no option chain stored
     assert any("no option-price figures" in n for n in v["notes"])
@@ -306,13 +325,13 @@ def test_profile_route_is_read_only_and_unknown_stock_is_404():
 # ---------------- 5. open-position alerts ----------------
 def snap(day=date(2026, 11, 12), **kw):
     base = dict(close=1100.0, support=1080.0, resistance=1130.0, low_52w=900.0, high_52w=1200.0, sma_long=1050.0,
-                fii_bias="NEUTRAL", vix_change_pct=1.0, regime="RANGE")
+                fii_bias="NEUTRAL", vix_spike=False, regime="RANGE")
     base.update(kw)
     return Snapshot(day, **base)
 
 
 def kinds(prev, now, right="PE"):
-    return [a["kind"] for a in alert_kinds(prev, now, right, 15.0)]
+    return [a["kind"] for a in alert_kinds(prev, now, right)]
 
 
 def test_ACCEPTANCE_each_open_position_alert_fires_once_when_its_condition_begins():
@@ -325,7 +344,9 @@ def test_ACCEPTANCE_each_open_position_alert_fires_once_when_its_condition_begin
     assert kinds(prev, snap(today, close=1049.0, support=1040.0)) == ["BELOW_SUPPORT", "BROKE_LONG_AVERAGE"]
     assert kinds(snap(support=1000.0), snap(today, close=1049.0, support=1000.0)) == ["BROKE_LONG_AVERAGE"]
     assert kinds(prev, snap(today, fii_bias="BEARISH")) == ["FII_STREAK"]
-    assert kinds(prev, snap(today, vix_change_pct=15.0)) == ["VIX_SPIKE"]
+    assert kinds(prev, snap(today, vix_spike=True)) == ["VIX_SPIKE"]
+    assert kinds(snap(vix_spike=True), snap(today, vix_spike=True)) == []          # a spike that goes on is not new
+    assert kinds(snap(vix_spike=None), snap(today, vix_spike=True)) == []          # unknown before: not a known change
     assert kinds(prev, snap(today, regime="VOLATILE")) == ["REGIME_TURN"]
     assert kinds(prev, snap(today, regime="EVENT")) == ["REGIME_TURN"]
     assert kinds(prev, snap(today, regime="TRENDING_DOWN")) == []
@@ -367,7 +388,7 @@ def test_ACCEPTANCE_an_alert_says_what_changed_and_shows_exit_and_roll_with_numb
     cfg = big_settings()
     strat = build_stock_selling(cfg)
     c = roll_ctx(cfg, stock_bars())
-    prev, now = snap(), snap(date(2026, 11, 13), close=1079.0, vix_change_pct=18.0)
+    prev, now = snap(), snap(date(2026, 11, 13), close=1079.0, vix_spike=True)
     alerts = position_alerts(strat, c, HELD_ROLL, 0.8, prev, now)
     assert [a["kind"] for a in alerts] == ["BELOW_SUPPORT", "VIX_SPIKE"]
     for a in alerts:
@@ -414,8 +435,8 @@ def test_backtest_trend_block_on_the_baseline_blocks_calls_in_the_rising_fixture
 def test_backtest_campaign_limit_stops_new_entries_after_a_stopped_trade(world):
     cfg = world[0]
     one = settings(backtest=cfg.backtest.model_dump(), options=cfg.options.model_dump(),
-                   stock_option_selling={"campaign_limit": {**CL.model_dump(), "max_stopped_trades": 1,
-                                                                "cooling_off_days": 60}})
+                   stock_option_selling={"campaign_limit": {**CL.model_dump(), "stock_loss_max_stops": 1,
+                                                                "stock_cooloff_days": 60}})
     plain, _ = stream(world, variant(one), "baseline:CE")
     limited, sk = stream(world, variant(one, baseline_rules=("campaign_limit",)), "baseline:CE")
     stops = [t for t in plain if t.exit_reason == "STOP"]
@@ -424,7 +445,7 @@ def test_backtest_campaign_limit_stops_new_entries_after_a_stopped_trade(world):
     for a in limited:
         if a.exit_reason != "STOP":
             continue
-        until = ist_date(a.exit_time) + timedelta(days=CL.cooling_off_days)
+        until = ist_date(a.exit_time) + timedelta(days=CL.stock_cooloff_days)
         assert not [b for b in limited if ist_date(a.exit_time) <= ist_date(b.signal_time) < until]
 
 
@@ -491,7 +512,8 @@ def test_ACCEPTANCE_report_shows_the_effect_of_each_rule_and_alert_against_the_b
     t0 = next(t for t in res["trades"] if t["variant"] == "baseline:PE")
     ec = t0["entry_conditions"]
     assert ec["state"] in ("TRENDING_UP", "TRENDING_DOWN", "RANGING") and ec["short_strike_distance_pct"] > 0
-    assert ec["breach_history_pct"] is not None and ec["fii_bias"] is None and ec["vix_change_pct"] is not None
+    assert ec["breach_history_pct"] is not None and ec["fii_bias"] is None and ec["vix_spike"] in (True, False, None)
+    assert "expected_move_inr" in ec and "short_strike_beyond_expected_move" in ec
 
 
 # ---------------- MARKET_WEAK ----------------
@@ -520,11 +542,11 @@ def test_ACCEPTANCE_market_weak_blocks_put_selling_and_unknown_market_data_block
     off = build_stock_selling(settings(stock_option_selling={"market_block": {**MB.model_dump(), "enabled": False}}))
     assert off.evaluate(ctx_for(s, bars, market={"breadth_pct": 30.0}))
     down = stock_bars(start=1200, drift=-1.0)
-    calls = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 5}))
+    calls = build_stock_selling(settings(stock_option_selling={"min_credit_to_max_loss": 0.05}))
     sig = calls.evaluate(ctx_for(s, down, chain(down[-1].close), market={"breadth_pct": 10.0}))
     assert sig and sig[0].details["side"] == "CE"
     # open-position guidance: MARKET_WEAK is reported for a put spread on the session it begins
-    k = lambda prev, now, right="PE": [a["kind"] for a in alert_kinds(prev, now, right, 15.0)]
+    k = lambda prev, now, right="PE": [a["kind"] for a in alert_kinds(prev, now, right)]
     assert k(snap(market_weak=False), snap(date(2026, 11, 13), market_weak=True)) == ["MARKET_WEAK"]
     assert k(snap(market_weak=True), snap(date(2026, 11, 13), market_weak=True)) == []
     assert k(snap(market_weak=None), snap(date(2026, 11, 13), market_weak=True)) == []       # unknown before: not a known change
@@ -538,7 +560,7 @@ def test_backtest_market_block_uses_breadth_known_at_each_close(world):
     assert eng.breadth_at(d) == 100.0                                # the one fixture stock is above its 50-session average
     assert eng.breadth_at(date(2025, 7, 13)) is None                 # a Sunday: no stock traded, breadth unknown
     thin = settings(backtest=cfg.backtest.model_dump(), options=cfg.options.model_dump(),
-                    stock_option_selling={"market_block": {"enabled": True, "breadth_sma_days": 50, "min_breadth_pct": 40.0,
+                    stock_option_selling={"market_block": {"enabled": True, "market_breadth_min_pct": 40.0,
                                                            "min_coverage_pct": 80.0}})
     eng2 = engine_for(thin, store, base, OptionHistory(store, "sim"))
     assert eng2.breadth_at(d) is None                                # 1 of 5 watchlist stocks has data: under 80% coverage

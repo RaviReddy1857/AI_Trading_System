@@ -3,7 +3,7 @@ nothing here alerts until the user approves it (stock_option_selling.reversal.al
 strategies.status).
 
 Three states, each computed for a day from that day's bars and earlier ones only (ReversalScanner):
-1. WASHED_OUT: the close is `drawdown_pct` or more below the 52-week high and has been below the
+1. WASHED_OUT: the close is `washed_out_drawdown_pct` or more below the 52-week high and has been below the
    200-day average for at least `min_sessions_below_long` sessions in a row.
 2. BASE_FORMING: washed out, no new low for `base_no_new_low_sessions`, and the `range_sessions` ATR
    is below `range_shrink_ratio` x the `range_compare_sessions` ATR.
@@ -104,7 +104,7 @@ class ReversalScanner:
             dd = (1 - x / high) * 100 if high > 0 else None
             avg_long = sum(closes[i - n_long + 1:i + 1]) / n_long
             below_run = below_run + 1 if x < avg_long else 0
-            washed = dd is not None and dd >= c.drawdown_pct and below_run >= c.min_sessions_below_long
+            washed = dd is not None and dd >= c.washed_out_drawdown_pct and below_run >= c.min_sessions_below_long
             # ---- base forming ----
             base, base_low = False, None
             if washed:
@@ -302,7 +302,7 @@ class BullCallSpread(OptionStrategy):
                 covered, text = event_coverage(ctx.events, ctx.underlying, today, exp.expiry, sos.event_coverage_max_age_days)
                 if not covered:
                     return self.no(EVENT_COVERAGE_UNKNOWN, text)
-        lctx = replace(ctx, max_spread_pct=sos.max_bid_ask_spread_pct, min_oi_lots=sos.min_open_interest)
+        lctx = replace(ctx, max_spread_pct=sos.max_bid_ask_pct_of_mid, min_oi_lots=sos.min_open_interest_lots)
         bought = None
         for k in ctx.quotes.atm_candidates(exp.expiry):
             m = metrics(ctx, exp.expiry, k, "CE")
@@ -333,7 +333,7 @@ class BullCallSpread(OptionStrategy):
             return self.no("NO_DEBIT", f"{kl:g}/{ks:g} CE: net debit {debit:.2f} on width {width:g}")
         one = [OptionLeg("BUY", "CE", kl, exp.expiry, 1, buy, exp.lot_size),
                OptionLeg("SELL", "CE", ks, exp.expiry, 1, sell, exp.lot_size)]
-        budget = ctx.capital_inr * sos.max_loss_per_stock_spread_pct / 100.0
+        budget = ctx.capital_inr * sos.max_risk_per_position_pct / 100.0
         try:
             lots, legs, pay = size_spread("debit", one, exp.lot_size, ctx.costs, budget, ctx.max_lots)
         except InvalidStructure as e:
@@ -342,7 +342,7 @@ class BullCallSpread(OptionStrategy):
             return self.no("NO_PROFIT_AFTER_COSTS", f"{kl:g}/{ks:g} CE: the costs take the whole possible profit")
         if lots == 0:
             return self.no(ZERO_SIZE, f"one lot's max loss Rs {fmt(float(pay.max_loss_inr))} is above the position risk "
-                                      f"budget of {sos.max_loss_per_stock_spread_pct:g}% of capital (Rs {fmt(budget)}): 0 whole lots")
+                                      f"budget of {sos.max_risk_per_position_pct:g}% of capital (Rs {fmt(budget)}): 0 whole lots")
         target = debit + (width - debit) * p.target_pct_of_max_profit / 100.0
         stop = debit * (1 - p.stop_pct_of_debit / 100.0)
         if round(stop, 2) <= 0 or round(stop, 2) >= round(debit, 2) or round(target, 2) <= round(debit, 2):

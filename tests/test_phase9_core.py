@@ -36,15 +36,15 @@ from tests.test_phase3 import settings as _settings
 # The tests pin the thresholds their fixtures were built for, so they do not move when a default in
 # config.yaml changes. test_shipped_defaults_are_the_section_2_values checks the shipped defaults.
 FIXTURE_SOS = {
-    "min_open_interest": 100, "max_bid_ask_spread_pct": 10.0, "max_loss_per_stock_spread_pct": 10.0,
-    "min_net_credit_pct_of_max_loss": 10.0,
-    "trend_block": {"enabled": True, "long_sma_days": 200, "extreme_lookback_sessions": 252, "extreme_recent_sessions": 20,
-                    "relative_return_sessions": 63, "max_underperformance_pct": 10.0},
-    "campaign_limit": {"enabled": True, "window_days": 90, "max_stopped_trades": 2, "max_cumulative_loss_pct": 5.0,
-                       "cooling_off_days": 45},
-    "roll": {"max_rolls": 1, "min_net_credit_pct_of_width": 10.0, "stuck_time_value_pct": 10.0},
+    "min_open_interest_lots": 100, "max_bid_ask_pct_of_mid": 10.0, "max_risk_per_position_pct": 10.0,
+    "min_credit_to_max_loss": 0.1,
+    "trend_block": {"enabled": True, "low_52w_sessions": 252, "new_low_lookback": 20,
+                    "rel_strength_lookback": 63, "rel_strength_max_lag_pct": 10.0},
+    "campaign_limit": {"enabled": True, "stock_loss_window_days": 90, "stock_loss_max_stops": 2, "stock_loss_max_pct_capital": 5.0,
+                       "stock_cooloff_days": 45},
+    "roll": {"max_rolls": 1, "min_roll_net_credit_pct_of_width": 10.0, "stuck_time_value_pct": 10.0},
     # the fixture worlds hold one or two of the five fixture-watchlist stocks: breadth is computed from those
-    "market_block": {"enabled": True, "breadth_sma_days": 50, "min_breadth_pct": 40.0, "min_coverage_pct": 20.0},
+    "market_block": {"enabled": True, "market_breadth_min_pct": 40.0, "min_coverage_pct": 20.0},
     # scaled with the fixture's 10% position budget (the shipped values are 10% total and 5% a group for 2.5%)
     "portfolio": {"enabled": True, "max_open_spreads": 6, "max_total_risk_pct": 40.0, "correlation_window": 60,
                   "correlation_threshold": 0.7, "correlation_min_overlap": 50, "group_max_positions": 2,
@@ -119,7 +119,7 @@ def ctx_for(s: Settings, bars, quotes=None, iv_rank=80.0, margin=40000.0, events
         expiries=expiries or tuple(ExpiryInfo(e, "monthly", LOT) for e in sorted(chains)),
         quotes=ChainQuotes(spot, chains), costs=CostModel(s.costs), capital_inr=s.account.capital_inr, rate=RATE,
         iv_reference_pct=iv * 100, iv_rank=iv_rank, margin=lambda structure, width: margin, require_margin=True,
-        historical=False, max_spread_pct=sos.max_bid_ask_spread_pct, min_oi_lots=sos.min_open_interest,
+        historical=False, max_spread_pct=sos.max_bid_ask_pct_of_mid, min_oi_lots=sos.min_open_interest_lots,
         events=tuple(events), daily=tuple(bars), index_daily=index_bars(bars), market={"breadth_pct": 60.0})
     base.update(over)
     return OptionContext(**base)
@@ -200,9 +200,9 @@ def test_ACCEPTANCE_short_strike_is_beyond_support_beyond_the_highest_oi_strike_
         return iv_and_delta(by[(k, "PE")].mid, spot, k, t, RATE, 0.0, "PE")[1]
 
     assert short.right == "PE" and short.strike < support and short.strike < wall
-    assert abs(delta(short.strike)) <= s.stock_option_selling.max_short_delta
+    assert abs(delta(short.strike)) <= s.stock_option_selling.short_delta_max
     nearer = short.strike + 10                                     # the next strike toward the money breaks a rule
-    assert not (nearer < support and nearer < wall and abs(delta(nearer)) <= s.stock_option_selling.max_short_delta)
+    assert not (nearer < support and nearer < wall and abs(delta(nearer)) <= s.stock_option_selling.short_delta_max)
     assert sig[0].asset_class == "STOCK_OPTION" and sig[0].details["side"] == "PE"
     assert long_.strike < short.strike and long_.expiry == short.expiry == EXP
 
@@ -211,12 +211,12 @@ def test_ACCEPTANCE_bear_call_short_strike_is_above_resistance(s, strat):
     bars = stock_bars(start=1200, drift=-1.0)
     spot = bars[-1].close
     _, resistance = support_resistance(bars, 252, 5)
-    strat = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 5}))
+    strat = build_stock_selling(settings(stock_option_selling={"min_credit_to_max_loss": 0.05}))
     sig = strat.evaluate(ctx_for(s, bars, chain(spot)))
     assert sig, strat.last_no_trade
     short, long_ = legs_of(sig[0])
     assert short.right == "CE" and short.strike > resistance and long_.strike > short.strike
-    assert abs(sig[0].details["legs"][0]["delta"]) <= s.stock_option_selling.max_short_delta
+    assert abs(sig[0].details["legs"][0]["delta"]) <= s.stock_option_selling.short_delta_max
 
 
 def test_ACCEPTANCE_no_signal_when_no_strike_meets_all_three_conditions(s, strat):
@@ -231,7 +231,7 @@ def test_ACCEPTANCE_no_signal_when_no_strike_meets_all_three_conditions(s, strat
     assert strat.evaluate(ctx_for(s, bars, chain(spot, lo=lo))) == []
     assert any(r.startswith("NO_STRIKE") for r in strat.last_no_trade)
     # delta: with a very high implied volatility no strike within reach is at or below the limit
-    tight = build_stock_selling(settings(stock_option_selling={"max_short_delta": 0.01}))
+    tight = build_stock_selling(settings(stock_option_selling={"short_delta_max": 0.01}))
     assert tight.evaluate(ctx_for(s, bars, chain(spot, iv=0.9), iv=0.9)) == []
     assert any(r.startswith("NO_STRIKE") for r in tight.last_no_trade)
 
@@ -243,7 +243,7 @@ def test_ACCEPTANCE_hedge_is_two_strikes_out_same_expiry_and_within_the_max_loss
     short, long_ = legs_of(sig)
     assert short.strike - long_.strike == 20 and sig.details["hedge_strikes_out"] == 2      # 10-point strikes
     assert long_.expiry == short.expiry and long_.right == short.right
-    limit = s.account.capital_inr * s.stock_option_selling.max_loss_per_stock_spread_pct / 100
+    limit = s.account.capital_inr * s.stock_option_selling.max_risk_per_position_pct / 100
     assert 0 < sig.details["max_loss_inr"] <= limit
     # max loss = (width - credit) x lot x lots + costs, by hand
     d = sig.details
@@ -266,7 +266,7 @@ def test_ACCEPTANCE_hedge_moves_to_three_strikes_out_when_two_is_illiquid_and_no
     assert strat.evaluate(ctx_for(s, bars, chain(spot, oi={(two, "PE"): 5, (three, "PE"): 5}))) == []
     assert any(r.startswith("ILLIQUID") for r in strat.last_no_trade)
     # one lot's max loss above the risk budget at both widths: zero whole lots, no signal
-    small = build_stock_selling(settings(stock_option_selling={"max_loss_per_stock_spread_pct": 1.0}))
+    small = build_stock_selling(settings(stock_option_selling={"max_risk_per_position_pct": 1.0}))
     assert small.evaluate(ctx_for(s, bars)) == []
     assert any(r.startswith("ZERO_SIZE") and "0 whole lots" in r for r in small.last_no_trade)
 
@@ -298,7 +298,7 @@ def test_every_signal_is_hedged_inside_the_window_and_inside_the_loss_limit(iv, 
         assert unhedged_short_legs(sig.legs) == [] and short.expiry == long_.expiry and short.right == long_.right
         assert (long_.strike < short.strike) if short.right == "PE" else (long_.strike > short.strike)
         assert short.right == ("PE" if drift > 0 else "CE")
-        assert sig.details["max_loss_inr"] <= cfg.account.capital_inr * cfg.stock_option_selling.max_loss_per_stock_spread_pct / 100
+        assert sig.details["max_loss_inr"] <= cfg.account.capital_inr * cfg.stock_option_selling.max_risk_per_position_pct / 100
         assert sig.details["max_profit_inr"] > 0 and 20 <= sig.details["days_to_expiry"] <= 35
         assert sig.target < sig.entry < sig.stop
 
@@ -389,7 +389,7 @@ def test_phase9_backtests_run_at_the_stock_option_capital_and_list_the_bypassed_
     p9 = phase9_settings(real)
     assert p9.account.capital_inr == 1000000.0 == real.stock_option_selling.backtest.capital_inr
     assert real.account.capital_inr != 1000000.0 or True               # the account capital itself is not changed
-    assert p9.stock_option_selling.max_loss_per_stock_spread_pct == 2.5   # the risk % is untouched: Rs 25,000 a position
+    assert p9.stock_option_selling.max_risk_per_position_pct == 2.5   # the risk % is untouched: Rs 25,000 a position
     rep = run_bt(world)["report"]
     assert len(rep["bypassed_checks"]) >= 5 and any("margin" in x for x in rep["bypassed_checks"])
     assert any("bid/ask" in x for x in rep["bypassed_checks"]) and any("event" in x for x in rep["bypassed_checks"])
@@ -413,7 +413,7 @@ def test_no_signal_without_a_clear_trend_a_known_high_iv_rank_a_margin_or_a_live
 def test_strategy_identity_status_and_determinism(s, strat):
     assert strat.id == "stock_option_selling" and strat.version.startswith("1/")
     assert (strat.alerts_enabled, strat.mode) == (False, "paper_only") and "UNPROVEN" in strat.status_label
-    other = build_stock_selling(settings(stock_option_selling={"max_short_delta": 0.15}))
+    other = build_stock_selling(settings(stock_option_selling={"short_delta_max": 0.15}))
     assert other.version != strat.version                           # a threshold change is a new version
     bars = stock_bars()
     a, b = strat.evaluate(ctx_for(s, bars))[0], strat.evaluate(ctx_for(s, bars))[0]
@@ -428,42 +428,51 @@ def test_shipped_defaults_are_the_section_2_values():
     """config.yaml as shipped (not the fixture values above): the starting defaults of the Phase 9
     specification, section 2. Changing one needs the user's approval."""
     p = _settings().stock_option_selling
-    assert p.max_loss_per_stock_spread_pct == 2.5
-    assert p.min_net_credit_pct_of_max_loss == 10.0         # 0.10, set by the user from the pre-outcome distribution
+    assert p.max_risk_per_position_pct == 2.5
+    assert p.min_credit_to_max_loss == 0.10         # 0.10, set by the user from the pre-outcome distribution
     assert p.backtest.download_first_years_from == 2023
     assert (p.event_coverage_max_age_days, p.backtest.capital_inr) == (7, 1000000.0)
     assert (rv_bc := p.reversal.bull_call).entry_min_dte == 20 and rv_bc.entry_max_dte == 35
-    assert (p.max_short_delta, p.hedge_strikes_out) == (0.20, [2, 3])
-    assert (p.entry_min_days_to_expiry, p.entry_max_days_to_expiry) == (20, 35)
-    assert (p.profit_target_pct_of_credit, p.stop_multiple_of_credit) == (50.0, 2.0)
-    assert (p.exit_days_before_expiry, p.forced_exit_trading_days_before_expiry) == (10, 5)
-    assert (p.min_open_interest, p.max_bid_ask_spread_pct) == (200, 5.0)
-    assert (p.trend_fast_sma, p.trend_slow_sma, p.trend_block.long_sma_days) == (20, 50, 200)
+    assert (p.short_delta_max, p.hedge_strikes_out) == (0.20, [2, 3])
+    assert (p.entry_dte_min, p.entry_dte_max) == (20, 35)
+    assert (p.profit_target_pct_of_credit, p.stop_spread_value_multiple) == (50.0, 2.0)
+    assert (p.time_exit_dte, p.forced_exit_trading_days_before_expiry) == (10, 5)
+    assert (p.min_open_interest_lots, p.max_bid_ask_pct_of_mid) == (200, 5.0)
+    assert (p.sma_short, p.sma_mid, p.sma_long) == (20, 50, 200)
     tb, cl, r, rv = p.trend_block, p.campaign_limit, p.roll, p.reversal
-    assert (tb.extreme_recent_sessions, tb.extreme_lookback_sessions, tb.relative_return_sessions,
-            tb.max_underperformance_pct) == (20, 252, 63, 5.0)
-    assert (cl.window_days, cl.max_stopped_trades, cl.max_cumulative_loss_pct, cl.cooling_off_days) == (90, 2, 1.5, 30)
-    assert (r.max_rolls, r.min_net_credit_pct_of_width, r.stuck_time_value_pct) == (1, 10.0, 20.0)
-    assert (rv.drawdown_pct, rv.min_sessions_below_long, rv.base_no_new_low_sessions) == (25.0, 63, 15)
+    assert (tb.new_low_lookback, tb.low_52w_sessions, tb.rel_strength_lookback,
+            tb.rel_strength_max_lag_pct) == (20, 252, 63, 5.0)
+    assert (cl.stock_loss_window_days, cl.stock_loss_max_stops, cl.stock_loss_max_pct_capital, cl.stock_cooloff_days) == (90, 2, 1.5, 30)
+    assert (r.max_rolls, r.min_roll_net_credit_pct_of_width, r.stuck_time_value_pct) == (1, 10.0, 20.0)
+    assert (rv.washed_out_drawdown_pct, rv.min_sessions_below_long, rv.base_no_new_low_sessions) == (25.0, 63, 15)
     assert (rv.range_sessions, rv.range_compare_sessions, rv.range_shrink_ratio) == (10, 20, 0.8)
     assert rv.alerts_approved is False and _settings().options.backtest.daily_request_budget == 3500
     pf = p.portfolio
     assert (pf.max_open_spreads, pf.max_total_risk_pct, pf.correlation_window, pf.correlation_threshold,
             pf.correlation_min_overlap, pf.group_max_positions, pf.group_max_risk_pct) == (6, 10.0, 60, 0.7, 50, 2, 5.0)
     mb = p.market_block
-    assert (mb.enabled, mb.breadth_sma_days, mb.min_breadth_pct) == (True, 50, 40.0)       # market_breadth_min_pct
+    assert (mb.enabled, p.sma_mid, mb.market_breadth_min_pct) == (True, 50, 40.0)       # breadth: stocks above sma_mid
+    pr = p.profile
+    assert (pr.vix_spike_rise_pct, pr.vix_spike_sessions, pr.vix_spike_percentile, pr.vix_percentile_lookback) == (20.0, 5, 80.0, 252)
+    assert (p.min_credit_to_max_loss, p.stop_spread_value_multiple, p.time_exit_dte) == (0.10, 2.0, 10)
+    assert (p.short_delta_max, p.min_open_interest_lots, p.max_bid_ask_pct_of_mid, p.max_risk_per_position_pct) == (0.20, 200, 5.0, 2.5)
+    assert (p.entry_dte_min, p.entry_dte_max) == (20, 35)
+    tbk, cl = p.trend_block, p.campaign_limit
+    assert (tbk.new_low_lookback, tbk.rel_strength_lookback, tbk.rel_strength_max_lag_pct) == (20, 63, 5.0)
+    assert (cl.stock_loss_window_days, cl.stock_loss_max_stops, cl.stock_loss_max_pct_capital, cl.stock_cooloff_days) == (90, 2, 1.5, 30)
+    assert p.roll.min_roll_net_credit_pct_of_width == 10.0 and p.swing_pivot_bars == 5
 
 
 def test_config_is_validated():
-    for bad in ({"entry_min_days_to_expiry": 40}, {"exit_days_before_expiry": 5}, {"hedge_strikes_out": [3, 2]},
-                {"hedge_strikes_out": [2]}, {"trend_fast_sma": 60}, {"max_short_delta": 0.6},
+    for bad in ({"entry_dte_min": 40}, {"time_exit_dte": 5}, {"hedge_strikes_out": [3, 2]},
+                {"hedge_strikes_out": [2]}, {"sma_short": 60}, {"short_delta_max": 0.6},
                 {"backtest": {"exit_checks": []}}, {"backtest": {"exit_checks": ["hourly"]}}):
         with pytest.raises(Exception):
             settings(stock_option_selling=bad)
     with pytest.raises(Exception):
         settings(options={"backtest": {"daily_request_budget": -1}})
     p = SosParams()
-    assert (p.entry_min_dte, p.entry_max_dte, p.exit_days_before_expiry) == (20, 35, 10)
+    assert (p.entry_min_dte, p.entry_max_dte, p.time_exit_dte) == (20, 35, 10)
     assert settings().options.backtest.daily_request_budget == 3500
 
 
@@ -939,13 +948,13 @@ def test_every_backtest_trade_is_hedged_enters_at_the_next_session_and_is_flat_b
         assert sell["right"] == buy["right"] and sell["expiry"] == buy["expiry"]
         assert t["symbol"] == "RELIANCE" and t["lot_size"] == 500 and t["lots"] >= 1
         assert all(x["lots"] == t["lots"] for x in t["legs"])
-        assert t["max_loss_inr"] <= cfg.account.capital_inr * cfg.stock_option_selling.max_loss_per_stock_spread_pct / 100
+        assert t["max_loss_inr"] <= cfg.account.capital_inr * cfg.stock_option_selling.max_risk_per_position_pct / 100
         signal_d, entry_d, exit_d = ist_date(t["signal_time"]), ist_date(t["entry_time"]), ist_date(t["exit_time"])
         assert entry_d == sessions[sessions.index(signal_d) + 1]            # never the signal day
         exp = date.fromisoformat(t["expiry"])
         assert 20 <= (exp - signal_d).days <= 35
         assert exit_d < exp - timedelta(days=exp.weekday())                # before the Monday of expiry week
-        assert (exp - exit_d).days >= cfg.stock_option_selling.exit_days_before_expiry - 3
+        assert (exp - exit_d).days >= cfg.stock_option_selling.time_exit_dte - 3
         assert t["exit_reason"] in ("TARGET", "STOP", "TIME", "STRIKE_BREACHED", "OPEN_AT_CUTOFF")
         if t["variant"] == "strategy":
             assert sell["right"] == "PE"                                    # the fixture stock is in an up trend
@@ -1312,11 +1321,11 @@ def test_ACCEPTANCE_sizing_is_whole_lots_within_the_risk_budget_rounded_down():
     assert n == 2 and float(pay.max_loss_inr) <= 6000 and pay.structure == "DEBIT_SPREAD"
     assert ZERO_SIZE == "ZERO_SIZE"
     # the strategy: lots by the budget at the capital in use; the margin is for the whole position
-    s1 = settings(stock_option_selling={"max_loss_per_stock_spread_pct": 2.5})
+    s1 = settings(stock_option_selling={"max_risk_per_position_pct": 2.5})
     bars = stock_bars()
     st = build_stock_selling(s1)
     small = st.evaluate(ctx_for(s1, bars))                       # Rs 2,00,000 x 2.5% = Rs 5,000: one lot
-    big_cfg = settings(account={"capital_inr": 1000000.0}, stock_option_selling={"max_loss_per_stock_spread_pct": 2.5})
+    big_cfg = settings(account={"capital_inr": 1000000.0}, stock_option_selling={"max_risk_per_position_pct": 2.5})
     big = build_stock_selling(big_cfg).evaluate(ctx_for(big_cfg, bars))         # Rs 25,000: six lots
     assert small and big
     a, b = small[0].details, big[0].details
@@ -1325,7 +1334,7 @@ def test_ACCEPTANCE_sizing_is_whole_lots_within_the_risk_budget_rounded_down():
     assert b["margin_inr"] == b["margin_per_lot_inr"] * b["lots"] == 40000.0 * b["lots"]
     assert b["sizing"]["lots"] == b["lots"] and b["sizing"]["risk_budget_inr"] == 25000.0
     assert f"{b['lots']} lot(s)" in " ".join(big[0].why_now)
-    tiny = settings(stock_option_selling={"max_loss_per_stock_spread_pct": 0.5})                  # Rs 1,000
+    tiny = settings(stock_option_selling={"max_risk_per_position_pct": 0.5})                  # Rs 1,000
     assert build_stock_selling(tiny).evaluate(ctx_for(tiny, bars)) == []
 
 

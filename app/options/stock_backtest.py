@@ -155,7 +155,7 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
         return out, sk
 
     no_min = variant(settings)
-    no_min.params = no_min.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+    no_min.params = no_min.params.model_copy(update={"min_credit_to_max_loss": 0.0})
     rows = [_row("strategy: all rules", trades, skipped, settings),
             _row("strategy without the minimum net credit", *run(no_min, False), settings),
             _row("strategy without the trend block", *run(variant(settings, off=("trend_block",)), False), settings),
@@ -185,8 +185,7 @@ def rule_effects(settings: Settings, eng: OptionEngine, syms: list[str], dev: li
         "IV rank at entry": lambda c: "unknown" if c.get("iv_rank") is None
         else (f"at or above {sos.min_iv_rank:g}" if c["iv_rank"] >= sos.min_iv_rank else f"below {sos.min_iv_rank:g}"),
         "FII bias at entry": lambda c: c.get("fii_bias") or "no data",
-        "India VIX on the entry signal day": lambda c: "unknown" if c.get("vix_change_pct") is None
-        else ("spike" if c["vix_change_pct"] >= sos.profile.vix_spike_pct else "no spike"),
+        "India VIX on the entry signal day": lambda c: {True: "spike", False: "no spike"}.get(c.get("vix_spike"), "unknown"),
     }
     by_cond = {}
     for title, key in splits.items():
@@ -369,7 +368,7 @@ def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[
     expiry and side). The minimum-credit rule itself is off, and so is the campaign limit, which
     depends on earlier results. Also given for the no-filter structure (baseline attempts), for reference."""
     scan = variant(settings, off=("campaign_limit",))
-    scan.params = scan.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+    scan.params = scan.params.model_copy(update={"min_credit_to_max_loss": 0.0})
     allowed = set(dev)
 
     def collect(st, variants) -> list[dict]:
@@ -586,7 +585,7 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
                 break
             before, used = missing(), (hist.fetcher.requests if hist.fetcher else 0)
             no_min = variant(settings)
-            no_min.params = no_min.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+            no_min.params = no_min.params.model_copy(update={"min_credit_to_max_loss": 0.0})
             runs = [(strategy, ["strategy"] + baseline_variants(strategy)), (no_min, ["strategy"]),
                     (variant(settings, off=("trend_block",)), ["strategy"]),      # each rule-effect row enters its own trades
                     (variant(settings, off=("campaign_limit",)), ["strategy"]),

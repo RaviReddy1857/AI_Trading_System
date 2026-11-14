@@ -92,8 +92,8 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         quotes=ChainQuotes(spot, chains), costs=costs, capital_inr=settings.account.capital_inr, rate=rate,
         dividend=div, status="LIVE", iv_reference_pct=iv["value_pct"], iv_rank=iv["rank"],
         allowed_kinds=("monthly",), margin=lambda structure, width: margins.lookup(sym, structure, width, session),
-        require_margin=True, historical=False, max_spread_pct=sos.max_bid_ask_spread_pct,
-        min_oi_lots=sos.min_open_interest, search_steps=o.backtest.strike_search_steps, events=events,
+        require_margin=True, historical=False, max_spread_pct=sos.max_bid_ask_pct_of_mid,
+        min_oi_lots=sos.min_open_interest_lots, search_steps=o.backtest.strike_search_steps, events=events,
         daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct)),
         index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
         market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session),
@@ -124,13 +124,14 @@ def scenario_triggers(settings: Settings, store: Store, source: str, sym: str, f
     events = store.events_between(floor, session)
     rbi = [e["date"] for e in events if e["type"] == "RBI_POLICY"]
     results = [e["date"] for e in events if e["type"] == "RESULTS" and e["symbol"] == sym]
-    vix = [b for b in store.history_bars("bars_1d", settings.options.iv_reference_symbol, source) if bar_date(b) >= floor]
+    vix = store.history_bars("bars_1d", settings.options.iv_reference_symbol, source)   # the percentile looks back a year
     return {
         "after an FII selling streak": {
             "dates": fii_streak_starts(fii, settings.bias.streak_days, True, sessions) if fii else None,
             "missing": DATA_NEEDED["after an FII selling streak"]},
-        f"after an India VIX spike ({p.vix_spike_pct:g}% in a session)": {
-            "dates": vix_spike_dates(vix, p.vix_spike_pct, floor) if len(vix) > 1 else None,
+        f"after an India VIX spike (up {p.vix_spike_rise_pct:g}% over {p.vix_spike_sessions} sessions or above its "
+        f"{p.vix_spike_percentile:g}th percentile)": {
+            "dates": vix_spike_dates(vix, p, floor) if len(vix) > 1 else None,
             "missing": "no data: no India VIX daily history stored (run python -m app.history)"},
         "after an RBI rate decision": {"dates": rbi or None, "missing": DATA_NEEDED["after an RBI rate decision"]},
         "after its own results": {"dates": results or None, "missing": DATA_NEEDED["after its own results"]},
@@ -176,7 +177,12 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
         right, distance, iv = a.side, a.distance_pct, ctx.iv_reference_pct
         out["setup"] = {"status": a.status, "side": a.side, "expiry": a.expiry.isoformat() if a.expiry else None,
                         "short_strike": a.short_strike, "distance_pct": a.distance_pct, "reasons": a.reasons}
-    out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv, sos.swing_pivot_bars)
+    dte = None
+    if ctx is not None:
+        exp_d = date.fromisoformat(out["setup"]["expiry"]) if out["setup"] and out["setup"]["expiry"] else \
+            next((e.expiry for e in ctx.expiries if (e.expiry - session).days >= sos.entry_dte_min), None)
+        dte = (exp_d - session).days if exp_d else None
+    out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv, sos.swing_pivot_bars, dte)
     out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
                                                                 bar_date(bars[-1])), sos.profile, floor)
     return out
@@ -225,11 +231,11 @@ def breadth_on(settings: Settings, store: Store, source: str, session: date) -> 
         stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
         rows = []
         for sym in stocks:
-            bars = store.history_bars("bars_1d", sym, source, limit=cfg.breadth_sma_days)
+            bars = store.history_bars("bars_1d", sym, source, limit=settings.stock_option_selling.sma_mid)
             if bars and bar_date(bars[-1]) == session:
                 rows.append([b.close for b in bars])
         _BREADTH.clear()
-        _BREADTH[key] = breadth_pct(rows, cfg.breadth_sma_days, cfg.min_coverage_pct, len(stocks))
+        _BREADTH[key] = breadth_pct(rows, settings.stock_option_selling.sma_mid, cfg.min_coverage_pct, len(stocks))
     return _BREADTH[key]
 
 
@@ -240,7 +246,7 @@ def reversal_scanner(settings: Settings, store: Store, source: str, sym: str) ->
     breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], settings.history.max_overnight_gap_pct)
     sos = settings.stock_option_selling
     return ReversalScanner(bars, store.history_bars("bars_1d", settings.regime.index_symbol, source), sos.reversal,
-                           sos.trend_block.long_sma_days, breaks, sos.swing_pivot_bars)
+                           sos.sma_long, breaks, sos.swing_pivot_bars)
 
 
 WATCH_NOTE = "Watch list only, never a signal. Reversal candidates do not alert until you approve them."

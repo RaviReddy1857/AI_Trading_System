@@ -8,14 +8,14 @@ Entry rules (StockOptionSelling.assess; every number is computed here, none by a
   and the fast average above the slow one = up; the mirror image = down). No clear trend: no signal.
 - IV rank known and at or above `min_iv_rank`.
 - no results, board meeting or corporate action for the stock between today and expiry.
-- expiry: the monthly contract `entry_min_days_to_expiry`..`entry_max_days_to_expiry` calendar days away
+- expiry: the monthly contract `entry_dte_min`..`entry_dte_max` calendar days away
   (default 20-35), so never in expiry week.
 - sold strike: the first strike beyond the nearest support (puts) or resistance (calls) whose |delta|,
   from its own price, is at or below `max_short_delta`; when open interest is known across the chain
   (live) it must also lie beyond the highest-OI strike on that side. None: no signal, with the reason.
 - bought strike: same expiry and right, `hedge_strikes_out` strikes further out (2, then 3): the
   nearest one that is liquid and keeps one lot's max loss (width x lot - credit + costs) within
-  `max_loss_per_stock_spread_pct` of capital. None: no signal. A sold option is never left alone.
+  `max_risk_per_position_pct` of capital. None: no signal. A sold option is never left alone.
 - both strikes pass the liquidity filters (open interest in lots; live also the bid-ask width).
 - the credit must be worth more than the round-trip costs (max profit above zero).
 - margin for the spread must be known for a live signal (MARGIN_UNKNOWN otherwise).
@@ -63,7 +63,7 @@ from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
 from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (DOWNTREND_BLOCK, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -186,7 +186,7 @@ class StockOptionSelling(CreditSpread):
         return getattr(self.params, rule).enabled and (not ctx.no_filter or rule in self.baseline_rules)
 
     def min_credit_applies(self, ctx: OptionContext) -> bool:
-        return (self.params.min_net_credit_pct_of_max_loss > 0 and ctx.rolling != "any"
+        return (self.params.min_credit_to_max_loss > 0 and ctx.rolling != "any"
                 and (not ctx.no_filter or "min_credit" in self.baseline_rules))
 
     @property
@@ -204,7 +204,7 @@ class StockOptionSelling(CreditSpread):
         if not p.enabled:
             self.no("DISABLED", "stock_option_selling.enabled is false")
             return False
-        direction, _, text = trend_of(ctx.daily, p.trend_fast_sma, p.trend_slow_sma, p.atr_days)
+        direction, _, text = trend_of(ctx.daily, p.sma_short, p.sma_mid, p.atr_days)
         if direction is None:
             self.no("NO_TREND", text)
             return False
@@ -220,7 +220,7 @@ class StockOptionSelling(CreditSpread):
         if ctx.no_filter or ctx.rolling:
             return ctx.baseline_right if ctx.baseline_right in ("PE", "CE") else None
         p = self.params
-        return SIDE_BY_TREND.get(trend_of(ctx.daily, p.trend_fast_sma, p.trend_slow_sma, p.atr_days)[0])
+        return SIDE_BY_TREND.get(trend_of(ctx.daily, p.sma_short, p.sma_mid, p.atr_days)[0])
 
     def pick_hedge(self, ctx: OptionContext, exp: ExpiryInfo, right: str, ks: float, qs: OptionQuote):
         """The bought strike: 2 strikes further out, then 3 (config), counting strikes that have a
@@ -233,7 +233,7 @@ class StockOptionSelling(CreditSpread):
             return None
         further = sorted((k for k in ctx.quotes.strikes(exp.expiry) if (k < ks if right == "PE" else k > ks)),
                          key=lambda k: abs(k - ks))
-        budget = ctx.capital_inr * p.max_loss_per_stock_spread_pct / 100.0     # max_risk_per_position_pct
+        budget = ctx.capital_inr * p.max_risk_per_position_pct / 100.0     # max_risk_per_position_pct
         lo, hi = p.hedge_strikes_out
         n, why = 0, []
         for k in further[:hi + MAX_HEDGE_PROBES]:
@@ -268,7 +268,7 @@ class StockOptionSelling(CreditSpread):
                 continue
             if lots == 0:
                 why.append((ZERO_SIZE, f"{ks:g}/{k:g} {right}: one lot's max loss Rs {fmt(float(pay.max_loss_inr))} is "
-                                       f"above the position risk budget of {p.max_loss_per_stock_spread_pct:g}% of capital "
+                                       f"above the position risk budget of {p.max_risk_per_position_pct:g}% of capital "
                                        f"(Rs {fmt(budget)}): 0 whole lots"))
                 continue
             return k, q, legs, credit, pay, n
@@ -284,7 +284,7 @@ class StockOptionSelling(CreditSpread):
         p = self.params
         self.last_no_trade = []          # the reasons of THIS assessment only (roll decisions call assess directly)
         out = Assessment(ctx.underlying)
-        direction, clarity, trend_text = trend_of(ctx.daily, p.trend_fast_sma, p.trend_slow_sma, p.atr_days)
+        direction, clarity, trend_text = trend_of(ctx.daily, p.sma_short, p.sma_mid, p.atr_days)
         out.scores = {"iv_rank": None if ctx.iv_rank is None else round(ctx.iv_rank / 100.0, 3),
                       "trend_clarity": clarity, "distance": None, "liquidity": None}
         out.reasons.append(trend_text)
@@ -306,7 +306,7 @@ class StockOptionSelling(CreditSpread):
         base_low = rev.get("base_low") if (rev.get("lift_active") or rev.get("confirmed_today")) and right == "PE" else None
         below = base_low if self.below_base_low and not ctx.no_filter else None
         if self.applies("trend_block", ctx):
-            code, why_block = trend_block(ctx.daily, ctx.index_daily, right, p.trend_block)
+            code, why_block = trend_block(ctx.daily, ctx.index_daily, right, p.trend_block, p.sma_long)
             if code == DOWNTREND_BLOCK and base_low is not None and p.reversal.enabled:
                 below = base_low              # REVERSAL_CONFIRMED lifts the block, only for a put spread below the base low
                 out.reasons.append(f"REVERSAL_CONFIRMED ({rev.get('confirmed_on')}): the falling-stock block is lifted "
@@ -320,7 +320,7 @@ class StockOptionSelling(CreditSpread):
         if right == "PE" and self.applies("market_block", ctx):
             # put selling is the side a weak market hurts; unknown market state blocks as well
             code, why_mkt = market_weak(ctx.index_daily, ctx.market.get("breadth_pct"), p.market_block,
-                                        p.trend_block.long_sma_days)
+                                        p.sma_long, p.sma_mid)
             if code:
                 self.no(code, "; ".join(why_mkt))
                 return stop()
@@ -375,9 +375,9 @@ class StockOptionSelling(CreditSpread):
         level_name = ("the base low" if below is not None and level == below else "support") if right == "PE" else "resistance"
         out.reasons.append(f"{level_name} {fmt(level)} (confirmed {p.swing_pivot_bars}-bar pivot "
                            f"{'low' if right == 'PE' else 'high'}), {fmt(gap)} from the price {fmt(ctx.spot)}")
-        lctx = replace(ctx, max_spread_pct=p.max_bid_ask_spread_pct, min_oi_lots=p.min_open_interest)
+        lctx = replace(ctx, max_spread_pct=p.max_bid_ask_pct_of_mid, min_oi_lots=p.min_open_interest_lots)
         got = pick_short_strike(replace(lctx, quotes=BeyondLevel(ctx.quotes, right, level)), exp.expiry, right,
-                                p.max_short_delta)
+                                p.short_delta_max)
         if got[0] is None:
             self.no("NO_STRIKE", f"beyond {level_name} {fmt(level)}: {got[1]}")
             return stop()
@@ -387,18 +387,18 @@ class StockOptionSelling(CreditSpread):
         if lp:
             self.no("ILLIQUID", lp)
             return stop()
-        if qs.oi is not None and p.min_open_interest:
-            out.scores["liquidity"] = round(min(1.0, qs.oi / exp.lot_size / (5.0 * p.min_open_interest)), 3)
+        if qs.oi is not None and p.min_open_interest_lots:
+            out.scores["liquidity"] = round(min(1.0, qs.oi / exp.lot_size / (5.0 * p.min_open_interest_lots)), 3)
         hedge = self.pick_hedge(lctx, exp, right, ks, qs)
         if hedge is None:
             return stop()
         kl, ql, legs, credit, pay, n_out = hedge
         net_inr, max_loss_inr = float(pay.max_profit_inr), float(pay.max_loss_inr)
         net_pct = round(net_inr / max_loss_inr * 100, 2) if max_loss_inr > 0 else None
-        if self.min_credit_applies(ctx) and (net_pct is None or net_pct < p.min_net_credit_pct_of_max_loss):
+        if self.min_credit_applies(ctx) and (net_pct is None or net_pct < p.min_credit_to_max_loss * 100):
             self.no("CREDIT_TOO_SMALL", f"{ks:g}/{kl:g} {right}: credit after the hedge and charges Rs {fmt(net_inr)} per lot "
                                         f"is {net_pct}% of the max loss Rs {fmt(max_loss_inr)}, under "
-                                        f"{p.min_net_credit_pct_of_max_loss:g}%")
+                                        f"{p.min_credit_to_max_loss * 100:g}% (min_credit_to_max_loss {p.min_credit_to_max_loss:g})")
             return stop()
         ml = metrics(ctx, exp.expiry, kl, right)
         views = [leg_view(legs[0], iv_s, d_s, qs), leg_view(legs[1], ml[1] if ml else None, ml[2] if ml else None, ql)]
@@ -413,9 +413,9 @@ class StockOptionSelling(CreditSpread):
             why = [f"{trend_text}: {SIDE_NAME[right]}",
                    f"IV rank {ctx.iv_rank:.0f} at or above {p.min_iv_rank:g} (premium is rich)"]
         why.append(f"sold strike {ks:g} is beyond {level_name} {fmt(level)}: delta {views[0]['delta']} "
-                   f"(limit {p.max_short_delta:g}); " + "; ".join(notes))
+                   f"(limit {p.short_delta_max:g}); " + "; ".join(notes))
         why.append(f"bought strike {kl:g}, {n_out} strikes further out; {legs[0].lots} lot(s): max loss "
-                   f"Rs {fmt(float(pay.max_loss_inr))} within the {p.max_loss_per_stock_spread_pct:g}% risk budget")
+                   f"Rs {fmt(float(pay.max_loss_inr))} within the {p.max_risk_per_position_pct:g}% risk budget")
         lots = legs[0].lots
         setup = (f"{SIDE_NAME[right]} {ks:g}/{kl:g} {exp.expiry:%d-%b-%Y}, {lots} lot(s) of {exp.lot_size}: credit "
                  f"{fmt(credit)} a share, max loss Rs {fmt(float(pay.max_loss_inr))} for the position")
@@ -443,7 +443,7 @@ class StockOptionSelling(CreditSpread):
                           "hedge_cost_inr": round(legs[1].price * exp.lot_size * lots, 2),
                           "net_credit_after_costs_inr": round(net_inr, 2),
                           "net_credit_after_costs_per_share": round(net_inr / (exp.lot_size * lots), 2),
-                          "sizing": {"lots": lots, "risk_budget_inr": round(ctx.capital_inr * p.max_loss_per_stock_spread_pct / 100, 2),
+                          "sizing": {"lots": lots, "risk_budget_inr": round(ctx.capital_inr * p.max_risk_per_position_pct / 100, 2),
                                      "max_loss_one_lot_inr": round(float(pay.max_loss_inr) / lots, 2), "rule": "whole lots within the risk budget, rounded down"},
                           "net_credit_pct_of_max_loss": net_pct,
                           "sizing_note": "whole lots within the risk budget by the normal rules: earlier losses in this "
@@ -454,7 +454,11 @@ class StockOptionSelling(CreditSpread):
                               "breach_history_pct": breach_frequency(floor_closes, distance, right,
                                                                      p.profile.holding_sessions)["breached_pct"],
                               "iv_rank": ctx.iv_rank, "fii_bias": ctx.market.get("fii_bias"),
-                              "vix_change_pct": ctx.market.get("vix_change_pct")},
+                              "vix_spike": ctx.market.get("vix_spike"),
+                              "expected_move_inr": (None if (em := expected_move(ctx.spot, ctx.iv_reference_pct,
+                                                                                 (exp.expiry - today).days)) is None
+                                                    else round(em, 2)),
+                              "short_strike_beyond_expected_move": (None if em is None else abs(ctx.spot - ks) >= em)},
                           "warnings": ["Stock options settle physically: close before expiry week."]})
         out.signal, out.status = s, "CANDIDATE"
         out.reasons.append(setup)
@@ -514,7 +518,7 @@ class SpreadPosition:
 
 def exit_levels(credit: float, p: StockOptionSellingParams) -> tuple[float, float]:
     """(buy back at or below, stop at or above), per share."""
-    return credit * (1 - p.profit_target_pct_of_credit / 100.0), credit * p.stop_multiple_of_credit
+    return credit * (1 - p.profit_target_pct_of_credit / 100.0), credit * p.stop_spread_value_multiple
 
 
 def strike_breached(right: str, short_strike: float, stock_close: float) -> bool:
@@ -539,9 +543,9 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
         out.append({"kind": "FORCED_EXPIRY_EXIT", "action": "Exit now: physical settlement",
                     "reason": f"{left} trading day(s) to expiry, inside the forced-exit window; stock options settle "
                               f"physically"})
-    elif days <= p.exit_days_before_expiry:
+    elif days <= p.time_exit_dte:
         out.append({"kind": "TIME_EXIT", "action": "Exit: time exit",
-                    "reason": f"{days} day(s) to expiry, at or inside the {p.exit_days_before_expiry}-day time exit"})
+                    "reason": f"{days} day(s) to expiry, at or inside the {p.time_exit_dte}-day time exit"})
     if close_cost is None:
         out.append({"kind": "DATA_MISSING", "action": "Check the position by hand",
                     "reason": "no usable price for one of the legs: target and stop cannot be checked"})
@@ -549,7 +553,7 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
         if close_cost >= stop:
             out.append({"kind": "STOP", "action": "Exit: stop reached",
                         "reason": f"cost to close {fmt(close_cost)} is at or above {fmt(stop)} "
-                                  f"({p.stop_multiple_of_credit:g}x the credit {fmt(pos.credit)})",
+                                  f"({p.stop_spread_value_multiple:g}x the credit {fmt(pos.credit)})",
                         "pnl_before_costs_inr": pnl(close_cost)})
         elif close_cost <= target:
             out.append({"kind": "TARGET", "action": "Exit: profit target reached",
@@ -720,11 +724,11 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
             codes.append("ROLL_PRICE_UNKNOWN")
             continue
         if not (m["roll_net_credit_pct_of_width"] is not None
-                and m["roll_net_credit_pct_of_width"] > p.roll.min_net_credit_pct_of_width):
+                and m["roll_net_credit_pct_of_width"] > p.roll.min_roll_net_credit_pct_of_width):
             why_not.append(f"{exp.expiry:%d-%b-%Y}: roll net credit Rs {fmt(m['roll_net_credit_inr'])} (new credit Rs "
                            f"{fmt(m['new_credit_inr'])} - close Rs {fmt(m['close_debit_inr'])} - charges Rs "
                            f"{fmt(m['roll_charges_inr'])}) is {m['roll_net_credit_pct_of_width']}% of the replacement "
-                           f"width, not above {p.roll.min_net_credit_pct_of_width:g}%")
+                           f"width, not above {p.roll.min_roll_net_credit_pct_of_width:g}%")
             codes.append("ROLL_NET_CREDIT_TOO_SMALL")
             continue
         best, money = a.signal, m
@@ -749,8 +753,7 @@ def position_alerts(strategy: StockOptionSelling, ctx: OptionContext, pos: Sprea
     """Alerts for an open spread: what changed since the previous close (stock_profile.alert_kinds),
     each with the exit and roll choices in numbers. With no usable price for the legs the choices
     say so instead of showing numbers. Phase 6 sends these (Telegram) and repeats them."""
-    changes = list(alert_kinds(prev, now, pos.right, strategy.params.profile.vix_spike_pct,
-                               strategy.params.reversal.alerts_approved))
+    changes = list(alert_kinds(prev, now, pos.right, strategy.params.reversal.alerts_approved))
     q = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
     stuck = stuck_position(pos, q.price(ctx.historical) if q is not None else None, ctx.spot,
                            ctx.asof.astimezone(IST).date(), strategy.params)

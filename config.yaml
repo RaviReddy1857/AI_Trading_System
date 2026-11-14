@@ -329,24 +329,25 @@ options:
 
 # ---- Phase 9: stock option selling (monthly hedged credit spreads on F&O stocks). Core rules and backtest; ----
 # ---- signal cards, alerts and manual positions come after phase 6. ----
-stock_option_selling:
+stock_option_selling:          # names follow section 2 of the Phase 9 specification (docs/implementation.md has the table)
   enabled: true
   min_iv_rank: 50               # sell only when the stock's IV rank is at least this
-  min_open_interest: 200        # min_open_interest_lots (spec section 2): each traded strike, open interest in lots
-  max_bid_ask_spread_pct: 5     # max_bid_ask_pct_of_mid (spec section 2): live eligibility
-  max_short_delta: 0.20
+  min_open_interest_lots: 200   # each traded strike: open interest, in lots, at least this
+  max_bid_ask_pct_of_mid: 5     # each traded strike (live eligibility): bid-ask width within 5% of the mid price
+  short_delta_max: 0.20
   hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
-  max_loss_per_stock_spread_pct: 2.5  # max_risk_per_position_pct (spec section 2): a position's max loss, % of capital
-  min_net_credit_pct_of_max_loss: 10  # min_credit_to_max_loss 0.10: set by you on 2026-11-14 from the pre-outcome distribution (not from results)
-  entry_min_days_to_expiry: 20
-  entry_max_days_to_expiry: 35
+  max_risk_per_position_pct: 2.5   # a position's cost-inclusive max loss, % of capital; whole lots, rounded down
+  min_credit_to_max_loss: 0.10  # set by you on 2026-11-14 from the pre-outcome distribution (not from results)
+  entry_dte_min: 20             # calendar days to expiry
+  entry_dte_max: 35
   profit_target_pct_of_credit: 50
-  stop_multiple_of_credit: 2.0  # close when buying the spread back costs 2x the credit
-  exit_days_before_expiry: 10   # time_exit_dte (spec section 2): out at the open of the first session within 10 calendar days of expiry
+  stop_spread_value_multiple: 2.0   # exit when buying the spread back costs 2x the entry credit
+  time_exit_dte: 10             # out at the open of the first session within 10 calendar days of expiry
   forced_exit_trading_days_before_expiry: 5   # no position inside the last 5 trading days, whatever else
-  event_coverage_max_age_days: 7 # EVENT_COVERAGE_UNKNOWN unless events.csv has a COVERAGE row for the stock, retrieved within 7 days, covering expiry
-  trend_fast_sma: 20            # swing trend rule: close above the 50-day average and 20-day above 50-day = up trend
-  trend_slow_sma: 50
+  event_coverage_max_age_days: 7   # EVENT_COVERAGE_UNKNOWN unless events.csv has a COVERAGE row for the stock, retrieved within 7 days, covering expiry
+  sma_short: 20                 # swing trend rule: close above sma_mid and sma_short above sma_mid = up trend
+  sma_mid: 50                   # also the breadth average of the market block
+  sma_long: 200                 # falling-stock block, market block (NIFTY), washed-out list
   atr_days: 14
   swing_pivot_bars: 5           # a pivot needs 5 sessions on each side and is usable only after the 5 later ones completed
   pivot_lookback_sessions: 252  # support = nearest confirmed pivot low below the close, resistance = nearest pivot high above it
@@ -354,16 +355,14 @@ stock_option_selling:
   weights: {iv_rank: 0.35, trend_clarity: 0.25, distance: 0.20, liquidity: 0.20}
   trend_block:                  # DOWNTREND_BLOCK: no put selling in a falling stock (mirrored for calls in a strong uptrend)
     enabled: true
-    long_sma_days: 200          # blocked below (puts) / above (calls) this average
-    extreme_lookback_sessions: 252   # 52-week low (puts) / high (calls) ...
-    extreme_recent_sessions: 20      # ... made in the last 20 sessions
-    relative_return_sessions: 63     # 3-month return against NIFTY
-    max_underperformance_pct: 5      # rel_strength_max_lag_pct: blocked when it trails (puts) / leads (calls) NIFTY by more than 5 points
-  market_block:                 # MARKET_WEAK: no put selling when NIFTY is below its 200-day average or breadth is thin
+    new_low_lookback: 20        # a 52-week low (lowest close of low_52w_sessions) made within the last 20 sessions blocks
+    low_52w_sessions: 252
+    rel_strength_lookback: 63   # 3-month return against NIFTY
+    rel_strength_max_lag_pct: 5 # blocked when it trails (puts) / leads (calls) NIFTY by more than 5 points
+  market_block:                 # MARKET_WEAK: no put selling when NIFTY is below its sma_long or breadth is thin
     enabled: true
-    breadth_sma_days: 50        # breadth = share of the Nifty 50 watchlist stocks above their 50-session average
-    min_breadth_pct: 40         # market_breadth_min_pct
-    min_coverage_pct: 80        # fewer stocks with usable data than this: breadth unknown, which blocks too
+    market_breadth_min_pct: 40  # share of the Nifty 50 watchlist stocks closing above their sma_mid
+    min_coverage_pct: 80        # fewer stocks with usable data than this: breadth unknown (MARKET_UNKNOWN), which blocks too
   portfolio:                    # CORRELATED_LIMIT, CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN (every position counts on its own)
     enabled: true
     max_open_spreads: 6
@@ -373,20 +372,20 @@ stock_option_selling:
     correlation_min_overlap: 50 # common return observations needed, else CORRELATION_UNKNOWN
     group_max_positions: 2      # per connected group of linked stocks, the proposed position included
     group_max_risk_pct: 5       # of capital, per group
-  campaign_limit:               # STOCK_LOSS_LIMIT: per stock, closed manual positions included
+  campaign_limit:               # STOCK_LOSS_LIMIT: per stock, closed manual positions included once recorded
     enabled: true
-    window_days: 90
-    max_stopped_trades: 2       # this many stopped trades in the window ...
-    max_cumulative_loss_pct: 1.5 # stock_loss_max_pct_capital: ... or a net loss of 1.5% of capital in the window
-    cooling_off_days: 30        # stock_cooloff_days: no new signal in that stock for 30 calendar days
+    stock_loss_window_days: 90
+    stock_loss_max_stops: 2     # this many stopped trades in the window ...
+    stock_loss_max_pct_capital: 1.5   # ... or a net loss of 1.5% of capital in the window
+    stock_cooloff_days: 30      # no new signal in that stock for 30 calendar days
   roll:                         # a roll is suggested only if every rule holds (spec section 6); otherwise the alert is "exit"
     max_rolls: 1                # rolls allowed in one campaign (the original trade and its rolls)
-    min_net_credit_pct_of_width: 10   # min_roll_net_credit_pct_of_width: (new credit - debit to close the old spread - all roll charges) above 10% of the replacement width
+    min_roll_net_credit_pct_of_width: 10   # (new credit - debit to close the old spread - all roll charges) above 10% of the replacement width
     stuck_time_value_pct: 20    # stuck: sold option in the money with time value under 20% of its price, or inside the forced-exit window
   reversal:                     # reversal detector for washed-out stocks: a watch list and candidates, never a signal
     enabled: true
     alerts_approved: false      # no reversal alert is produced until you set this to true
-    drawdown_pct: 25            # washed_out_drawdown_pct: 25% or more below the 52-week high ...
+    washed_out_drawdown_pct: 25 # 25% or more below the 52-week high ...
     min_sessions_below_long: 63 # ... with at least 63 sessions in a row below the 200-day average
     high_lookback_sessions: 252
     base_no_new_low_sessions: 15     # base forming: no new low for 15 sessions ...
@@ -414,7 +413,10 @@ stock_option_selling:
     holding_sessions: 20        # breach history: a strike this far away, held this many sessions
     scenario_horizon_days: 30
     scenario_min_cases: 10      # fewer past cases are marked LOW SAMPLE
-    vix_spike_pct: 15           # India VIX up 15% in a session
+    vix_spike_rise_pct: 20      # vix_spike: India VIX up 20% over 5 sessions ...
+    vix_spike_sessions: 5
+    vix_spike_percentile: 80    # ... or closing above its 80th percentile of the previous 252 sessions
+    vix_percentile_lookback: 252
   backtest:
     priority_stocks: 30         # the 30 most liquid watchlist F&O stocks (median daily traded value) are downloaded and tested
     liquidity_lookback_days: 60
