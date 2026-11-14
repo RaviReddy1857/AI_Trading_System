@@ -34,6 +34,7 @@ from ..strategies.base import fmt
 from .base import OptionContext, OptionStrategy, leg_view, liquidity_problem, metrics, pick_expiry, round_trip_costs
 from .greeks import days_to_expiry
 from .payoff import InvalidStructure, OptionLeg, debit_spread
+from .sizing import ZERO_SIZE, size_spread
 from ..quality import IST
 from .stock_selling import EVENT_COVERAGE_UNKNOWN, StockOptionSelling, event_coverage, events_before_expiry
 
@@ -345,18 +346,18 @@ class BullCallSpread(OptionStrategy):
         debit, width = buy - sell, ks - kl
         if debit <= 0 or debit >= width:
             return self.no("NO_DEBIT", f"{kl:g}/{ks:g} CE: net debit {debit:.2f} on width {width:g}")
-        legs = [OptionLeg("BUY", "CE", kl, exp.expiry, 1, buy, exp.lot_size),
-                OptionLeg("SELL", "CE", ks, exp.expiry, 1, sell, exp.lot_size)]
+        one = [OptionLeg("BUY", "CE", kl, exp.expiry, 1, buy, exp.lot_size),
+               OptionLeg("SELL", "CE", ks, exp.expiry, 1, sell, exp.lot_size)]
+        budget = ctx.capital_inr * sos.max_loss_per_stock_spread_pct / 100.0
         try:
-            pay = debit_spread("CE", kl, ks, debit, exp.lot_size, 1, round_trip_costs(ctx.costs, legs).total)
+            lots, legs, pay = size_spread("debit", one, exp.lot_size, ctx.costs, budget, ctx.max_lots)
         except InvalidStructure as e:
             return self.no("NO_DEBIT", str(e))
         if pay.max_profit_inr <= 0:
             return self.no("NO_PROFIT_AFTER_COSTS", f"{kl:g}/{ks:g} CE: the costs take the whole possible profit")
-        limit = ctx.capital_inr * sos.max_loss_per_stock_spread_pct / 100.0
-        if float(pay.max_loss_inr) > limit:
-            return self.no("MAX_LOSS_ABOVE_LIMIT", f"max loss Rs {fmt(float(pay.max_loss_inr))} per lot is above "
-                                                   f"{sos.max_loss_per_stock_spread_pct:g}% of capital (Rs {fmt(limit)})")
+        if lots == 0:
+            return self.no(ZERO_SIZE, f"one lot's max loss Rs {fmt(float(pay.max_loss_inr))} is above the position risk "
+                                      f"budget of {sos.max_loss_per_stock_spread_pct:g}% of capital (Rs {fmt(budget)}): 0 whole lots")
         target = debit + (width - debit) * p.target_pct_of_max_profit / 100.0
         stop = debit * (1 - p.stop_pct_of_debit / 100.0)
         if round(stop, 2) <= 0 or round(stop, 2) >= round(debit, 2) or round(target, 2) <= round(debit, 2):
@@ -365,7 +366,7 @@ class BullCallSpread(OptionStrategy):
         ms = metrics(ctx, exp.expiry, ks, "CE")
         dte = days_to_expiry(ctx.asof, exp.expiry)
         details = {**pay.as_dict(ctx.capital_inr), "expiry": exp.expiry.isoformat(), "expiry_kind": exp.kind,
-                   "days_to_expiry": dte, "lot_size": exp.lot_size, "lots": 1, "premium": round(debit, 2),
+                   "days_to_expiry": dte, "lot_size": exp.lot_size, "lots": lots, "premium": round(debit, 2),
                    "net_debit": round(debit, 2), "total_cost_inr": float(-pay.net_premium_inr), "margin_inr": None,
                    "margin_note": "a debit spread is paid for in full: the debit is the most it can lose",
                    "iv_rank": ctx.iv_rank, "price_basis": "last traded (history)" if ctx.historical else "buy at ask, sell at bid",
@@ -380,7 +381,7 @@ class BullCallSpread(OptionStrategy):
                 else f"{REVERSAL_CONFIRMED}: " + "; ".join(rev.get("reasons", [])[:3])),
                f"bull call spread on {ctx.underlying} {exp.expiry:%d-%b-%Y} ({dte} days): buy {kl:g} CE at {fmt(buy)}, "
                f"sell {ks:g} CE at {fmt(sell)}",
-               f"net debit {fmt(debit)} x lot {exp.lot_size}; max loss Rs {fmt(float(pay.max_loss_inr))}, max profit "
+               f"net debit {fmt(debit)} x {lots} lot(s) of {exp.lot_size}; max loss Rs {fmt(float(pay.max_loss_inr))}, max profit "
                f"Rs {fmt(float(pay.max_profit_inr))}; breakeven {', '.join(fmt(float(b)) for b in pay.breakevens)}",
                f"exit: sell at {fmt(target)} or higher, stop at {fmt(stop)}, out {p.exit_days_before_expiry} days before expiry"]
         if rev.get("stall_zones"):

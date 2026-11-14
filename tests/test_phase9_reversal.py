@@ -192,9 +192,11 @@ def test_ACCEPTANCE_confirmation_gives_a_bull_call_spread_with_stall_zones(s):
     assert x.direction == "LONG" and x.asset_class == "STOCK_OPTION" and x.entry == pytest.approx(debit, abs=0.01)
     assert x.stop < x.entry < x.target
     assert x.stop == pytest.approx(debit * 0.5, abs=0.01) and x.target == pytest.approx(debit + (20 - debit) * 0.6, abs=0.01)
-    assert d["structure"] == "DEBIT_SPREAD" and d["max_loss_inr"] == pytest.approx(debit * LOT + d["costs_inr"], abs=0.02)
-    assert d["max_profit_inr"] == pytest.approx((20 - debit) * LOT - d["costs_inr"], abs=0.02)
-    assert d["breakevens"][0] == pytest.approx(bought.strike + debit + d["costs_inr"] / LOT, abs=0.01)
+    n = d["lots"]
+    assert n >= 1 and bought.lots == sold.lots == n
+    assert d["structure"] == "DEBIT_SPREAD" and d["max_loss_inr"] == pytest.approx(debit * LOT * n + d["costs_inr"], abs=0.02)
+    assert d["max_profit_inr"] == pytest.approx((20 - debit) * LOT * n - d["costs_inr"], abs=0.02)
+    assert d["breakevens"][0] == pytest.approx(bought.strike + debit + d["costs_inr"] / (LOT * n), abs=0.01)
     assert d["stall_zones"] == [800.0] and d["base_low"] == pytest.approx(BASE_LOW) and "stall zones" in x.why_now[-1]
     assert d["max_loss_inr"] <= s.account.capital_inr * s.stock_option_selling.max_loss_per_stock_spread_pct / 100
     assert any("approve" in w for w in d["warnings"])
@@ -202,7 +204,7 @@ def test_ACCEPTANCE_confirmation_gives_a_bull_call_spread_with_stall_zones(s):
     assert call.evaluate(replace(ctx, market={})) == [] and any(r.startswith("NO_REVERSAL") for r in call.last_no_trade)
     assert call.evaluate(replace(ctx, market={}, no_filter=True))
     small, = [build_reversal_strategies(settings(stock_option_selling={"max_loss_per_stock_spread_pct": 0.5}))[1]]
-    assert small.evaluate(ctx) == [] and any(r.startswith("MAX_LOSS_ABOVE_LIMIT") for r in small.last_no_trade)
+    assert small.evaluate(ctx) == [] and any(r.startswith("ZERO_SIZE") for r in small.last_no_trade)
     assert call.evaluate(replace(ctx, kind="index")) == []
     for bad in ({"reversal": {"bull_call": {"entry_min_dte": 70}}}, {"reversal": {"outcome_sessions": []}},
                 {"reversal": {"drawdown_pct": 0}}):
@@ -341,7 +343,7 @@ def test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_
             assert buy["right"] == sell["right"] == "CE" and buy["strike"] < sell["strike"] and t["structure"] == "DEBIT_SPREAD"
             assert t["exit_reason"] in ("TARGET", "STOP", "TIME", "PERIOD_END")
             # by hand: gross P&L = (sold back - paid) on the bought call plus (sold - bought back) on the sold call
-            gross = ((buy["exit_price"] - buy["entry_price"]) + (sell["entry_price"] - sell["exit_price"])) * 250
+            gross = ((buy["exit_price"] - buy["entry_price"]) + (sell["entry_price"] - sell["exit_price"])) * 250 * t["lots"]
             assert t["gross_pnl"] == pytest.approx(gross, abs=0.03) and t["net_pnl"] == pytest.approx(gross - t["costs"]["total"], abs=0.03)
             assert set(rep["baseline"]["by_variant"]) == {"baseline"}
     # the engine gives the strategies the same point-in-time reversal state as the scanner

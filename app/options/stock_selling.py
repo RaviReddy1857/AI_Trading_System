@@ -60,6 +60,7 @@ from .base import (ExpiryInfo, OptionContext, OptionQuote, add_costs, leg_view, 
 from .credit_spread import SIDE_NAME, CreditSpread
 from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
+from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
 from .stock_profile import (DOWNTREND_BLOCK, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
@@ -238,7 +239,7 @@ class StockOptionSelling(CreditSpread):
             return None
         further = sorted((k for k in ctx.quotes.strikes(exp.expiry) if (k < ks if right == "PE" else k > ks)),
                          key=lambda k: abs(k - ks))
-        limit = ctx.capital_inr * p.max_loss_per_stock_spread_pct / 100.0
+        budget = ctx.capital_inr * p.max_loss_per_stock_spread_pct / 100.0     # max_risk_per_position_pct
         lo, hi = p.hedge_strikes_out
         n, why = 0, []
         for k in further[:hi + MAX_HEDGE_PROBES]:
@@ -260,10 +261,10 @@ class StockOptionSelling(CreditSpread):
             if credit <= 0 or credit >= width:
                 why.append(("NO_CREDIT", f"{ks:g}/{k:g} {right}: net credit {credit:.2f} on width {width:g}"))
                 continue
-            legs = [OptionLeg("SELL", right, ks, exp.expiry, 1, round(sell, 2), exp.lot_size),
-                    OptionLeg("BUY", right, k, exp.expiry, 1, round(buy, 2), exp.lot_size)]
+            one = [OptionLeg("SELL", right, ks, exp.expiry, 1, round(sell, 2), exp.lot_size),
+                   OptionLeg("BUY", right, k, exp.expiry, 1, round(buy, 2), exp.lot_size)]
             try:
-                pay = credit_spread(right, ks, k, credit, exp.lot_size, 1, round_trip_costs(ctx.costs, legs).total)
+                lots, legs, pay = size_spread("credit", one, exp.lot_size, ctx.costs, budget, ctx.max_lots)
             except InvalidStructure as e:
                 why.append(("NO_CREDIT", str(e)))
                 continue
@@ -271,10 +272,10 @@ class StockOptionSelling(CreditSpread):
                 why.append(("NO_CREDIT_AFTER_COSTS", f"{ks:g}/{k:g} {right}: credit {credit:.2f} x lot {exp.lot_size} "
                                                      f"does not cover the round-trip costs"))
                 continue
-            if float(pay.max_loss_inr) > limit:
-                why.append(("MAX_LOSS_ABOVE_LIMIT",
-                            f"{ks:g}/{k:g} {right}: max loss Rs {fmt(float(pay.max_loss_inr))} per lot is above "
-                            f"{p.max_loss_per_stock_spread_pct:g}% of capital (Rs {fmt(limit)})"))
+            if lots == 0:
+                why.append((ZERO_SIZE, f"{ks:g}/{k:g} {right}: one lot's max loss Rs {fmt(float(pay.max_loss_inr))} is "
+                                       f"above the position risk budget of {p.max_loss_per_stock_spread_pct:g}% of capital "
+                                       f"(Rs {fmt(budget)}): 0 whole lots"))
                 continue
             return k, q, legs, credit, pay, n
         if why:
@@ -412,10 +413,11 @@ class StockOptionSelling(CreditSpread):
                    f"IV rank {ctx.iv_rank:.0f} at or above {p.min_iv_rank:g} (premium is rich)"]
         why.append(f"sold strike {ks:g} is beyond {level_name} {fmt(level)}: delta {views[0]['delta']} "
                    f"(limit {p.max_short_delta:g}); " + "; ".join(notes))
-        why.append(f"bought strike {kl:g}, {n_out} strikes further out; max loss within "
-                   f"{p.max_loss_per_stock_spread_pct:g}% of capital")
-        setup = (f"{SIDE_NAME[right]} {ks:g}/{kl:g} {exp.expiry:%d-%b-%Y}: credit {fmt(credit)}, "
-                 f"max loss Rs {fmt(float(pay.max_loss_inr))} per lot")
+        why.append(f"bought strike {kl:g}, {n_out} strikes further out; {legs[0].lots} lot(s): max loss "
+                   f"Rs {fmt(float(pay.max_loss_inr))} within the {p.max_loss_per_stock_spread_pct:g}% risk budget")
+        lots = legs[0].lots
+        setup = (f"{SIDE_NAME[right]} {ks:g}/{kl:g} {exp.expiry:%d-%b-%Y}, {lots} lot(s) of {exp.lot_size}: credit "
+                 f"{fmt(credit)} a share, max loss Rs {fmt(float(pay.max_loss_inr))} for the position")
         if coverage_missing is not None:
             # a research candidate stays visible with the reason; it is never an actionable signal
             self.no(EVENT_COVERAGE_UNKNOWN, coverage_missing)
@@ -436,12 +438,15 @@ class StockOptionSelling(CreditSpread):
                           "reversal": ({"base_low": below, "confirmed_on": rev.get("confirmed_on"),
                                         "stall_zones": rev.get("stall_zones", [])} if below is not None else None),
                           # what is left of the premium after paying for the hedge and every charge, one lot
-                          "sold_premium_inr": round(legs[0].price * exp.lot_size, 2),
-                          "hedge_cost_inr": round(legs[1].price * exp.lot_size, 2),
+                          "sold_premium_inr": round(legs[0].price * exp.lot_size * lots, 2),
+                          "hedge_cost_inr": round(legs[1].price * exp.lot_size * lots, 2),
                           "net_credit_after_costs_inr": round(net_inr, 2),
-                          "net_credit_after_costs_per_share": round(net_inr / exp.lot_size, 2),
+                          "net_credit_after_costs_per_share": round(net_inr / (exp.lot_size * lots), 2),
+                          "sizing": {"lots": lots, "risk_budget_inr": round(ctx.capital_inr * p.max_loss_per_stock_spread_pct / 100, 2),
+                                     "max_loss_one_lot_inr": round(float(pay.max_loss_inr) / lots, 2), "rule": "whole lots within the risk budget, rounded down"},
                           "net_credit_pct_of_max_loss": net_pct,
-                          "sizing_note": "one lot by the normal rules: earlier losses in this stock never raise the size",
+                          "sizing_note": "whole lots within the risk budget by the normal rules: earlier losses in this "
+                                         "stock never raise the size",
                           "entry_conditions": {
                               "state": state_now(closes, p.profile.state_lookback_sessions, p.profile.trending_efficiency)[0],
                               "short_strike_distance_pct": round(distance, 2),
@@ -686,7 +691,7 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
         mode, expiries = "", [e for e in ctx.expiries if e.expiry >= pos.expiry]
     best, money, why_not, codes = None, None, [], []
     for exp in expiries:
-        a = strategy.assess(replace(ctx, expiries=(exp,), rolling=mode, no_filter=False,
+        a = strategy.assess(replace(ctx, expiries=(exp,), rolling=mode, no_filter=False, max_lots=pos.lots,
                                     baseline_right=pos.right if unlimited else None))
         if a.signal is None:
             why_not += [r for r in strategy.last_no_trade if r not in why_not]

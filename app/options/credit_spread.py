@@ -109,7 +109,9 @@ class CreditSpread(OptionStrategy):
         if not ctx.no_filter and credit < width * p.min_credit_pct_of_width / 100:
             return self.no("CREDIT_TOO_SMALL", f"credit {credit:.2f} is under {p.min_credit_pct_of_width:g}% of the "
                                                f"{width:g}-point width")
-        margin = ctx.margin(self.structure, width) if ctx.margin is not None else None
+        lots = legs[0].lots
+        per_lot = ctx.margin(self.structure, width) if ctx.margin is not None else None
+        margin = None if per_lot is None else per_lot * lots
         if margin is None and ctx.require_margin:
             return self.no(MARGIN_UNKNOWN, f"enter the margin for one lot of {ctx.underlying} {self.structure} "
                                            f"width {width:g} from ICICI's margin calculator (Options page)")
@@ -118,10 +120,10 @@ class CreditSpread(OptionStrategy):
         dte = days_to_expiry(ctx.asof, exp.expiry)
         details = {
             **pay.as_dict(ctx.capital_inr), "expiry": exp.expiry.isoformat(), "expiry_kind": exp.kind,
-            "days_to_expiry": dte, "lot_size": exp.lot_size, "lots": 1, "premium": round(credit, 2),
+            "days_to_expiry": dte, "lot_size": exp.lot_size, "lots": lots, "premium": round(credit, 2),
             "net_credit": round(credit, 2), "total_cost_inr": None,
-            "margin_inr": margin,
-            "margin_note": "margin for one lot as entered by you" if margin is not None
+            "margin_inr": margin, "margin_per_lot_inr": per_lot,
+            "margin_note": f"margin for {lots} lot(s) from your per-lot entry" if margin is not None
             else "margin not known for this date (backtest)",
             "iv_rank": ctx.iv_rank, "price_basis": "last traded (history)" if ctx.historical else "sell at bid, buy at ask",
             "legs": views, "warnings": [],
@@ -131,8 +133,8 @@ class CreditSpread(OptionStrategy):
         why = why + [
             f"{structure_name} on {ctx.underlying} {exp.expiry:%d-%b-%Y} ({dte} days): "
             + ", ".join(f"{leg.action.lower()} {leg.strike:g} {leg.right} at {fmt(leg.price)}" for leg in legs),
-            f"net credit {fmt(credit)} per share x lot {exp.lot_size} = Rs {fmt(float(pay.net_premium_inr))}; "
-            f"max loss Rs {fmt(float(pay.max_loss_inr))} per lot ({details['max_loss_pct_of_capital']}% of capital); "
+            f"net credit {fmt(credit)} per share x {lots} lot(s) of {exp.lot_size} = Rs {fmt(float(pay.net_premium_inr))}; "
+            f"max loss Rs {fmt(float(pay.max_loss_inr))} ({details['max_loss_pct_of_capital']}% of capital); "
             f"breakeven {', '.join(fmt(float(b)) for b in pay.breakevens) or 'none: costs exceed the credit'}",
             f"exit: buy back at {fmt(target)} or lower ({p.profit_target_pct_of_credit:g}% of credit kept), "
             f"stop at {fmt(stop)} ({p.stop_multiple_of_credit:g}x credit), out {p.exit_days_before_expiry} day(s) before expiry"]

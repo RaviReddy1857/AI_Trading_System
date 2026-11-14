@@ -140,6 +140,7 @@ class OptionContext:
     # rules apply but not the entry trend and IV-rank rules; "any" = the next month whatever it costs
     # (backtest comparison only). "" = a new entry.
     rolling: str = ""
+    max_lots: int | None = None        # phase 9 roll: the replacement is never larger than the position it replaces
     events: tuple = field(default_factory=tuple)   # manual_data.Event rows (results, board meetings, corporate actions)
     daily: tuple = field(default_factory=tuple)    # the underlying's daily bars up to asof (phase 9: trend, support, resistance)
     index_daily: tuple = field(default_factory=tuple)   # the index's daily bars up to asof (phase 9: relative return)

@@ -128,8 +128,10 @@ def test_ACCEPTANCE_roll_net_credit_is_new_credit_less_the_debit_to_close_less_a
     s_new, b_new = (next(x for x in sig.legs if x.action == k) for k in ("SELL", "BUY"))
     slip = cfg.costs.slippage_pct.options / 100
     exp_close = (2.1 * (1 + slip) - 1.5 * (1 - slip)) * LOT_R                # last prices 2.10 and 1.50
-    exp_new = (s_new.price * (1 - slip) - b_new.price * (1 + slip)) * LOT_R
-    assert m["close_debit_inr"] == pytest.approx(exp_close, abs=11) and m["new_credit_inr"] == pytest.approx(exp_new, abs=11)
+    exp_new = (s_new.price * (1 - slip) - b_new.price * (1 + slip)) * LOT_R * s_new.lots
+    # each leg's execution price is rounded to the paise: up to 0.01 a share on each of two legs
+    assert m["close_debit_inr"] == pytest.approx(exp_close, abs=0.011 * LOT_R)
+    assert m["new_credit_inr"] == pytest.approx(exp_new, abs=0.011 * LOT_R * s_new.lots)
     assert m["roll_net_credit_inr"] == pytest.approx(m["new_credit_inr"] - m["close_debit_inr"] - m["roll_charges_inr"], abs=0.02)
 
 
@@ -190,10 +192,11 @@ def test_ACCEPTANCE_every_signal_shows_net_credit_after_hedge_and_charges_and_a_
     bars = stock_bars()
     d = strat.evaluate(ctx_for(s, bars))[0].details
     sold, hedge = d["legs"][0]["price"], d["legs"][1]["price"]
-    assert d["sold_premium_inr"] == pytest.approx(sold * LOT, abs=0.01) and d["hedge_cost_inr"] == pytest.approx(hedge * LOT, abs=0.01)
-    assert d["net_credit_after_costs_inr"] == pytest.approx((sold - hedge) * LOT - d["costs_inr"], abs=0.02)
+    q = LOT * d["lots"]
+    assert d["sold_premium_inr"] == pytest.approx(sold * q, abs=0.01) and d["hedge_cost_inr"] == pytest.approx(hedge * q, abs=0.01)
+    assert d["net_credit_after_costs_inr"] == pytest.approx((sold - hedge) * q - d["costs_inr"], abs=0.02)
     assert d["net_credit_after_costs_inr"] == d["max_profit_inr"]
-    assert d["net_credit_after_costs_per_share"] == pytest.approx(d["net_credit_after_costs_inr"] / LOT, abs=0.01)
+    assert d["net_credit_after_costs_per_share"] == pytest.approx(d["net_credit_after_costs_inr"] / q, abs=0.01)
     assert d["net_credit_pct_of_max_loss"] == pytest.approx(d["net_credit_after_costs_inr"] / d["max_loss_inr"] * 100, abs=0.01)
     assert d["net_credit_pct_of_max_loss"] >= s.stock_option_selling.min_net_credit_pct_of_max_loss
     strict = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 60}))
@@ -250,7 +253,7 @@ def test_ACCEPTANCE_a_signal_after_a_losing_campaign_uses_the_normal_rules_and_s
     lost = (ClosedTrade(date(2026, 10, 20), True, -9000.0), )            # one stop, a loss under the campaign limit
     after = strat.evaluate(ctx_for(s, bars, closed_trades=lost))[0]
     assert after.to_dict() == fresh.to_dict()                            # same strikes, same credit, same everything
-    assert all(leg.lots == 1 for leg in after.legs) and after.details["lots"] == 1
+    assert all(leg.lots == fresh.details["lots"] for leg in after.legs) and after.details["lots"] == fresh.details["lots"]
     assert "never raise the size" in after.details["sizing_note"]
     big = strat.evaluate(ctx_for(s, bars, closed_trades=(ClosedTrade(date(2026, 3, 1), True, -500000.0),)))[0]
     assert big.to_dict() == fresh.to_dict()                              # even a huge old loss changes nothing
@@ -333,7 +336,7 @@ def test_roll_always_never_stops_and_rolls_a_losing_spread_into_the_next_month(s
         assert datetime.fromisoformat(t.exit_time).astimezone(IST).hour == 9
         # the roll is linked to its original trade, and the campaign's figures add up
         assert child.campaign_id == t.campaign_id == next(x.signal_id for x in always if x.campaign_id == t.campaign_id and x.roll_no == 0)
-        assert child.lots == 1 and ist_date(child.signal_time) < ist_date(child.entry_time)
+        assert child.lots <= t.lots and ist_date(child.signal_time) < ist_date(child.entry_time)      # never larger
     camps = {c["campaign_id"]: c for c in campaigns_from_trades(always)}
     first = rolled[0]
     legs = [x for x in always if x.campaign_id == first.campaign_id]

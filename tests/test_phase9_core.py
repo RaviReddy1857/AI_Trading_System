@@ -237,9 +237,11 @@ def test_ACCEPTANCE_hedge_is_two_strikes_out_same_expiry_and_within_the_max_loss
     assert long_.expiry == short.expiry and long_.right == short.right
     limit = s.account.capital_inr * s.stock_option_selling.max_loss_per_stock_spread_pct / 100
     assert 0 < sig.details["max_loss_inr"] <= limit
-    # max loss = (width - credit) x lot + costs, by hand
+    # max loss = (width - credit) x lot x lots + costs, by hand
     d = sig.details
-    assert d["max_loss_inr"] == pytest.approx((20 - d["net_credit"]) * LOT + d["costs_inr"], abs=0.02)
+    n = d["lots"]
+    assert n >= 1 and short.lots == long_.lots == n
+    assert d["max_loss_inr"] == pytest.approx((20 - d["net_credit"]) * LOT * n + d["costs_inr"], abs=0.02)
     assert unhedged_short_legs(sig.legs) == []
 
 
@@ -255,10 +257,10 @@ def test_ACCEPTANCE_hedge_moves_to_three_strikes_out_when_two_is_illiquid_and_no
     assert sig and legs_of(sig[0])[1].strike == three
     assert strat.evaluate(ctx_for(s, bars, chain(spot, oi={(two, "PE"): 5, (three, "PE"): 5}))) == []
     assert any(r.startswith("ILLIQUID") for r in strat.last_no_trade)
-    # max loss above the limit at both widths: no signal
+    # one lot's max loss above the risk budget at both widths: zero whole lots, no signal
     small = build_stock_selling(settings(stock_option_selling={"max_loss_per_stock_spread_pct": 1.0}))
     assert small.evaluate(ctx_for(s, bars)) == []
-    assert any(r.startswith("MAX_LOSS_ABOVE_LIMIT") for r in small.last_no_trade)
+    assert any(r.startswith("ZERO_SIZE") and "0 whole lots" in r for r in small.last_no_trade)
 
 
 def test_ACCEPTANCE_a_short_leg_without_a_hedge_is_never_suggested(s, strat):
@@ -923,7 +925,9 @@ def test_every_backtest_trade_is_hedged_enters_at_the_next_session_and_is_flat_b
         assert unhedged_short_legs(t["legs"], t["expiry"], t["lots"], t["lot_size"]) == []
         sell, buy = (next(x for x in t["legs"] if x["action"] == a) for a in ("SELL", "BUY"))
         assert sell["right"] == buy["right"] and sell["expiry"] == buy["expiry"]
-        assert t["symbol"] == "RELIANCE" and t["lot_size"] == 500 and t["lots"] == 1
+        assert t["symbol"] == "RELIANCE" and t["lot_size"] == 500 and t["lots"] >= 1
+        assert all(x["lots"] == t["lots"] for x in t["legs"])
+        assert t["max_loss_inr"] <= cfg.account.capital_inr * cfg.stock_option_selling.max_loss_per_stock_spread_pct / 100
         signal_d, entry_d, exit_d = ist_date(t["signal_time"]), ist_date(t["entry_time"]), ist_date(t["exit_time"])
         assert entry_d == sessions[sessions.index(signal_d) + 1]            # never the signal day
         exp = date.fromisoformat(t["expiry"])
@@ -1270,3 +1274,44 @@ def test_download_completes_the_priority_years_for_every_stock_before_an_earlier
     from app.options import stock_backtest
     src = inspect.getsource(stock_backtest.download_blocks)
     assert "waiting_for_priority_years" in src and "year < first_from" in src     # the gate is applied before earlier years
+
+
+
+# ---------------- whole-lot sizing ----------------
+def test_ACCEPTANCE_sizing_is_whole_lots_within_the_risk_budget_rounded_down():
+    from app.options.payoff import OptionLeg
+    from app.options.sizing import ZERO_SIZE, size_spread
+    costs = CostModel(settings().costs)
+    one = [OptionLeg("SELL", "PE", 1060, EXP, 1, 6.0, LOT), OptionLeg("BUY", "PE", 1040, EXP, 1, 2.0, LOT)]
+    n1, legs1, pay1 = size_spread("credit", one, LOT, costs, 1e9, max_lots=1)
+    one_loss = float(pay1.max_loss_inr)                          # (20 - 4) x 250 + charges = about 4,100
+    assert n1 == 1 and 4000 < one_loss < 4300
+    for budget, want in ((one_loss * 3.9, 3), (one_loss * 3 + 1, 3), (one_loss * 1.2, 1), (one_loss, 1)):
+        n, legs, pay = size_spread("credit", one, LOT, costs, budget)
+        assert n == want and float(pay.max_loss_inr) <= budget and all(x.lots == want for x in legs)
+        if want > 1:                                             # one more lot would break the budget
+            bigger = size_spread("credit", one, LOT, costs, 1e9, max_lots=want + 1)[2]
+            assert float(bigger.max_loss_inr) > budget
+    n, legs, pay = size_spread("credit", one, LOT, costs, one_loss - 1)
+    assert (n, legs) == (0, None) and float(pay.max_loss_inr) == one_loss            # zero lots: no signal
+    assert size_spread("credit", one, LOT, costs, one_loss * 10, max_lots=2)[0] == 2  # a roll never grows the position
+    debit = [OptionLeg("BUY", "CE", 600, EXP, 1, 12.0, LOT), OptionLeg("SELL", "CE", 620, EXP, 1, 4.0, LOT)]
+    n, legs, pay = size_spread("debit", debit, LOT, costs, 6000.0)
+    assert n == 2 and float(pay.max_loss_inr) <= 6000 and pay.structure == "DEBIT_SPREAD"
+    assert ZERO_SIZE == "ZERO_SIZE"
+    # the strategy: lots by the budget at the capital in use; the margin is for the whole position
+    s1 = settings(stock_option_selling={"max_loss_per_stock_spread_pct": 2.5})
+    bars = stock_bars()
+    st = build_stock_selling(s1)
+    small = st.evaluate(ctx_for(s1, bars))                       # Rs 2,00,000 x 2.5% = Rs 5,000: one lot
+    big_cfg = settings(account={"capital_inr": 1000000.0}, stock_option_selling={"max_loss_per_stock_spread_pct": 2.5})
+    big = build_stock_selling(big_cfg).evaluate(ctx_for(big_cfg, bars))         # Rs 25,000: six lots
+    assert small and big
+    a, b = small[0].details, big[0].details
+    assert a["lots"] == 1 and b["lots"] == math.floor(25000 / a["max_loss_inr"]) or b["lots"] == math.floor(25000 / a["max_loss_inr"]) - 1
+    assert b["max_loss_inr"] <= 25000 < b["max_loss_inr"] / b["lots"] * (b["lots"] + 1)
+    assert b["margin_inr"] == b["margin_per_lot_inr"] * b["lots"] == 40000.0 * b["lots"]
+    assert b["sizing"]["lots"] == b["lots"] and b["sizing"]["risk_budget_inr"] == 25000.0
+    assert f"{b['lots']} lot(s)" in " ".join(big[0].why_now)
+    tiny = settings(stock_option_selling={"max_loss_per_stock_spread_pct": 0.5})                  # Rs 1,000
+    assert build_stock_selling(tiny).evaluate(ctx_for(tiny, bars)) == []
