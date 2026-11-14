@@ -316,10 +316,13 @@ def write_status(settings: Settings, status: dict) -> Path:
 
 
 def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOptionSelling, stocks: list[str],
-                    dev: list[date], status: dict, progress=print) -> dict:
+                    dev: list[date], status: dict, progress=print, offline: bool = False, checkpoint=None) -> dict:
     """Fetch what the backtest needs, newest year first, most liquid stock first, until the request
     budget is used or Breeze returns an error. Marks a (stock, year) complete when its streams ran
-    without wanting anything that is not stored. Returns a summary of this run."""
+    without wanting anything that is not stored. Returns a summary of this run.
+    `offline`: ask Breeze for nothing; only mark what is already completely stored (after a run that
+    was interrupted before it could record its progress). `checkpoint(status)` is called after every
+    (stock, year), so an interrupted run keeps its marks."""
     hist: OptionHistory = engine.prices
     intr = engine.intraday
     years = sorted({d.year for d in dev}, reverse=True)
@@ -339,17 +342,23 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
         for sym in stocks:
             if year in done.get(sym, set()):
                 continue
+            if not engine.base.daily(sym):
+                progress(f"  {year} {sym:12s} no daily bars stored: skipped (run python -m app.history)")
+                continue
             if hist.error is not None:
                 stopped = f"Breeze error: {hist.error}"
                 break
-            if hist.fetcher is None or not hist.fetcher.budget_left:
+            if not offline and (hist.fetcher is None or not hist.fetcher.budget_left):
                 stopped = "request budget used"
                 break
-            before, used = missing(), hist.fetcher.requests
-            loose = variant(settings, off=("trend_block", "campaign_limit"))
-            loose.params = loose.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
-            for st, names in ((strategy, ["strategy"] + baseline_variants(strategy)), (loose, ["strategy"])):
-                for name in names:                           # the rule-effect rows need no other contracts than these
+            before, used = missing(), (hist.fetcher.requests if hist.fetcher else 0)
+            no_min = variant(settings)
+            no_min.params = no_min.params.model_copy(update={"min_net_credit_pct_of_max_loss": 0.0})
+            runs = [(strategy, ["strategy"] + baseline_variants(strategy)), (no_min, ["strategy"]),
+                    (variant(settings, off=("trend_block",)), ["strategy"]),      # each rule-effect row enters its own trades
+                    (variant(settings, off=("campaign_limit",)), ["strategy"])]
+            for st, names in runs:
+                for name in names:
                     engine.run_stream(st, sym, block, name, Counter(), exit_check="intraday")
             policy_runs(settings, engine, sym, block)        # the spreads the roll policies open
             for st in build_reversal_strategies(settings):   # the two reversal candidates and their baselines
@@ -358,13 +367,19 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
             if missing() == before and hist.error is None:
                 done.setdefault(sym, set()).add(year)
                 newly += 1
-            progress(f"  {year} {sym:12s} requests {hist.fetcher.requests - used:4d}  "
+            sent = hist.fetcher.requests if hist.fetcher else 0
+            progress(f"  {year} {sym:12s} requests {sent - used:4d}  "
                      f"{'complete' if year in done.get(sym, set()) else 'INCOMPLETE'}  "
-                     f"(run total {hist.fetcher.requests}, left {hist.fetcher.budget_left})")
+                     f"(run total {sent}, left {hist.fetcher.budget_left if hist.fetcher else 0})")
+            status["complete"] = {s: sorted(v) for s, v in sorted(done.items())}
+            if checkpoint is not None:
+                checkpoint(status)
         if stopped:
             break
     if stopped is None and hist.error is not None:
         stopped = f"Breeze error: {hist.error}"
+    if stopped is None and not offline and hist.fetcher is not None and not hist.fetcher.budget_left:
+        stopped = "request budget used"
     engine.set_expiry_floor(None)
     status["complete"] = {s: sorted(v) for s, v in sorted(done.items())}
     return {"stopped": stopped, "stock_years_completed_this_run": newly,
@@ -395,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-index", action="store_true", help="with --download: do not first fetch the contracts the "
                                                               "index (phase 4) backtests still want")
     ap.add_argument("--status", action="store_true", help="show the liquidity ranking, the request budget and progress")
+    ap.add_argument("--recheck", action="store_true", help="ask Breeze for nothing: mark the stocks and years whose option "
+                                                           "history is already completely stored (after an interrupted run)")
+    ap.add_argument("--years", nargs="*", type=int, help="with --recheck: only these years")
+    ap.add_argument("--no-report", action="store_true", help="download or recheck only; do not run the reports")
     ap.add_argument("--all-data", action="store_true", help="report on every priority stock and the whole period, "
                                                             "also where contracts are missing (marked INCOMPLETE)")
     args = ap.parse_args(argv)
@@ -459,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
             run["index_contracts_still_missing"] = len(hist.not_stored)
             hist.not_stored.clear()
         print(f"\nstock option history: {len(stocks)} stocks, newest year first")
-        run.update(download_blocks(settings, eng, strategy, stocks, dev, status))
+        run.update(download_blocks(settings, eng, strategy, stocks, dev, status,
+                                   checkpoint=lambda st: write_status(settings, st)))
         run["requests_used_today"] = store.requests_used(today)
         status.setdefault("runs", []).append(run)
         status["updated"] = run["at"]
@@ -474,6 +494,17 @@ def main(argv: list[str] | None = None) -> int:
         eng.intraday.not_stored.clear()
         eng.set_expiry_floor(None)
 
+    if args.recheck:
+        want = [d for d in dev if not args.years or d.year in args.years]
+        print(f"recheck (no requests): {len(stocks)} stocks")
+        download_blocks(settings, eng, strategy, stocks, want, status, offline=True,
+                        checkpoint=lambda st: write_status(settings, st))
+        print(f"progress written to {write_status(settings, status)}")
+        hist.not_stored.clear()
+        eng.intraday.not_stored.clear()
+        eng.set_expiry_floor(None)
+    if args.no_report:
+        return 0
     years, covered = coverage(status, stocks, sorted({d.year for d in dev}))
     if args.all_data or not covered:
         use_stocks, first, note = stocks, None, ""

@@ -838,11 +838,6 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             "days_checked_on_daily_close_instead": ms.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0)
             + mbs.get("INTRADAY_BARS_UNKNOWN_DAY_CHECKED_ON_DAILY_CLOSE", 0),
             "comparison": compare(so, bo)}
-    download = dict(eng.prices.download_stats())
-    if eng.intraday is not None:
-        download["intraday"] = eng.intraday.download_stats()
-        download["contracts_wanted_but_not_stored"] = (download.get("contracts_wanted_but_not_stored", 0)
-                                                       + download["intraday"]["contracts_wanted_but_not_stored"])
     wf = []
     for w in windows(dev, cfg.window_sessions * 3, cfg.step_sessions * 3):
         ws = set(w)
@@ -900,7 +895,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "data_exclusions": {k: skipped.get(k, 0) for k in DATA_EXCLUSION_KEYS},
         "filtered_signals": {},
         "strategy_status": {"alerts": strategy.alerts_enabled, "mode": strategy.mode, "label": strategy.status_label},
-        "download": download,
+        "download": {},
         "notes": [
             f"Price source: {PRICE_SOURCE_LABEL[label]}.",
             "Signals come from a day's close; entries fill at the next session's open of every leg plus slippage.",
@@ -915,6 +910,13 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
     }
     if extra is not None:                    # further tables computed on the same engine, sessions and stocks
         rep.update(extra(eng, syms, dev, by_mode))
+    # after every table: whatever any of them wanted and did not find makes the report INCOMPLETE
+    download = dict(eng.prices.download_stats())
+    if eng.intraday is not None:
+        download["intraday"] = eng.intraday.download_stats()
+        download["contracts_wanted_but_not_stored"] = (download.get("contracts_wanted_but_not_stored", 0)
+                                                       + download["intraday"]["contracts_wanted_but_not_stored"])
+    rep["download"] = download
     run_id = f"{strategy.id}-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
     rep["run_id"], rep["created_utc"] = run_id, now.isoformat()
     all_trades = [asdict(t) for mode in exit_checks for part in by_mode[mode][:2] for t in part]

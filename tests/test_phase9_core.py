@@ -925,6 +925,13 @@ def test_download_fills_an_empty_store_and_the_backtest_then_matches_the_full_on
     assert coverage(status, ["RELIANCE"], [2025]) == ([2025], ["RELIANCE"])
     key = lambda t: (t["variant"], t["exit_check"], t["signal_id"], t["exit_time"], t["exit_reason"], t["net_pnl"])
     assert sorted(map(key, run_bt(empty)["trades"])) == sorted(map(key, run_bt(world)["trades"]))
+    # an offline recheck (after a run that could not record its progress) marks the same thing without a request
+    offline_eng = engine_for(empty[0], empty[1], empty[2], OptionHistory(empty[1], "sim"))
+    marks, saved = {}, []
+    out3 = download_blocks(empty[0], offline_eng, build_stock_selling(empty[0]), ["RELIANCE", "TCS"], dev, marks,
+                           progress=lambda x: None, offline=True, checkpoint=lambda st: saved.append(dict(st["complete"])))
+    assert marks["complete"] == {"RELIANCE": [2025]} and out3["requests_this_run"] == 0      # TCS has nothing stored
+    assert saved and saved[0] == {"RELIANCE": [2025]}                                        # recorded as it goes
     # a second run asks for nothing: everything stored (or asked for) is skipped
     n = len(feed.calls)
     hist2, eng2, _ = download_into(empty, feed)
