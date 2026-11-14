@@ -761,6 +761,16 @@ def position_alerts(strategy: StockOptionSelling, ctx: OptionContext, pos: Sprea
              f"{pos.long_strike:g} {pos.expiry:%d-%b-%Y}", **choices} for c in changes]
 
 
+def phase9_settings(settings):
+    """The settings every Phase 9 output uses (backtests and the research pages): the same file, with
+    the capital set to the user's stock-option capital (stock_option_selling.backtest.capital_inr).
+    Every limit stays a % of it."""
+    cap = settings.stock_option_selling.backtest.capital_inr
+    if settings.account.capital_inr == cap:
+        return settings
+    return settings.model_copy(update={"account": settings.account.model_copy(update={"capital_inr": cap})})
+
+
 def build_stock_selling(settings) -> StockOptionSelling:
     """The strategy with its thresholds from config.yaml (`stock_option_selling`) and its status."""
     st = StockOptionSelling(settings.stock_option_selling)

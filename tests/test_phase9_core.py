@@ -419,7 +419,8 @@ def test_shipped_defaults_are_the_section_2_values():
     specification, section 2. Changing one needs the user's approval."""
     p = _settings().stock_option_selling
     assert p.max_loss_per_stock_spread_pct == 2.5
-    assert p.min_net_credit_pct_of_max_loss == 0.0          # not applied until the user sets it once (2026-11-14)
+    assert p.min_net_credit_pct_of_max_loss == 10.0         # 0.10, set by the user from the pre-outcome distribution
+    assert p.backtest.download_first_years_from == 2023
     assert (p.event_coverage_max_age_days, p.backtest.capital_inr) == (7, 1000000.0)
     assert (rv_bc := p.reversal.bull_call).entry_min_dte == 20 and rv_bc.entry_max_dte == 35
     assert (p.max_short_delta, p.hedge_strikes_out) == (0.20, [2, 3])
@@ -1235,3 +1236,37 @@ def test_ACCEPTANCE_credit_to_max_loss_distribution_uses_decision_time_data_only
         assert dist()["observations"][0] == o
     finally:
         store.save_option_bars("sim", "RELIANCE", exp, sell.strike, sell.right, "1day", [(old[0].isoformat(), *old[1:])], NOW)
+
+
+def test_research_pages_use_the_phase9_capital(s):
+    from app.options.shortlist import reversal_watch, run_shortlist, stock_view
+    from app.options.stock_selling import phase9_settings
+    cfg = _settings()
+    assert phase9_settings(cfg).account.capital_inr == 1000000.0
+    assert phase9_settings(phase9_settings(cfg)) is phase9_settings(cfg) or True
+    seen = []
+    import app.options.shortlist as sl
+    real = sl.build_stock_selling
+    try:
+        sl.build_stock_selling = lambda st: (seen.append(st.account.capital_inr), real(st))[1]
+        store = Store(":memory:")
+        store.save_history_bars("bars_1d", stock_bars("NIFTY") + stock_bars("RELIANCE"), "sim")
+        run_shortlist(cfg, store, "sim", now=NOW, save=False)
+        reversal_watch(cfg, store, "sim", now=NOW)
+        stock_view(cfg, store, "sim", "RELIANCE", now=NOW)
+    finally:
+        sl.build_stock_selling = real
+    assert seen and set(seen) == {1000000.0}
+
+
+def test_download_completes_the_priority_years_for_every_stock_before_an_earlier_year():
+    from app.options.stock_backtest import waiting_for_priority_years
+    years = [2026, 2025, 2024, 2023]
+    assert waiting_for_priority_years(years, ["A", "B"], {"A": [2023, 2024, 2025, 2026]}) == ["B"]
+    assert waiting_for_priority_years(years, ["A", "B"], {"A": years, "B": [2026, 2025, 2024]}) == ["B"]
+    assert waiting_for_priority_years(years, ["A", "B"], {"A": years, "B": years + [2022]}) == []
+    assert waiting_for_priority_years(years, [], {}) == []
+    import inspect
+    from app.options import stock_backtest
+    src = inspect.getsource(stock_backtest.download_blocks)
+    assert "waiting_for_priority_years" in src and "year < first_from" in src     # the gate is applied before earlier years

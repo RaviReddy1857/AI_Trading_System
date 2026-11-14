@@ -39,7 +39,7 @@ from .instruments import InstrumentBook
 from .margin import MarginBook
 from .reversal import ReversalScanner, build_reversal_strategies
 from .stock_profile import HISTORY_LABEL, breadth_pct, fii_streak_starts, range_speed_profile, scenario_history, vix_spike_dates
-from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling
+from .stock_selling import StockOptionSelling, build_shortlist, build_stock_selling, phase9_settings
 
 log = logging.getLogger("shortlist")
 
@@ -138,6 +138,7 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
     stored session. With a fresh option chain it also shows the move implied by option prices and,
     when the rules reach a sold strike, how often a strike that far away was passed before."""
     now = now or utcnow()
+    settings = phase9_settings(settings)                   # research pages use the Phase 9 capital
     sos = settings.stock_option_selling
     floor = settings.backtest.test_start.get("1day")
     session = session_date(settings, store, source)
@@ -214,6 +215,7 @@ def reversal_watch(settings: Settings, store: Store, source: str, now: datetime 
     For a confirmed reversal (while the base low holds, for `lift_sessions`) the two candidate trades
     are worked out from the option chain stored that session; without one the row says so. Read-only."""
     now = now or utcnow()
+    settings = phase9_settings(settings)                   # research pages use the Phase 9 capital
     sos = settings.stock_option_selling
     session = session_date(settings, store, source)
     out = {"session_date": session.isoformat() if session else None, "note": WATCH_NOTE, "rows": [],
@@ -269,6 +271,7 @@ def run_shortlist(settings: Settings, store: Store, source: str, now: datetime |
                   strategy: StockOptionSelling | None = None, save: bool = True) -> dict:
     """Assess the universe at the close of the newest stored session and store the ranked list."""
     now = now or utcnow()
+    settings = phase9_settings(settings)                   # research pages use the Phase 9 capital
     session = session_date(settings, store, source)
     if session is None:
         return {"session_date": None, "rows": [], "error": "no daily bars stored for the index"}

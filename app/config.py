@@ -498,6 +498,9 @@ class StockSellingBacktest(StrictModel):
     exit_on_strike_breach: bool = True                  # close (next open) when the stock closes beyond the sold strike
     # Capital the Phase 9 backtests are run at (the user's stock-option capital). Every limit stays a % of it.
     capital_inr: float = Field(1000000.0, gt=0)
+    # Download order: every priority stock is completed for this year and later (newest first) before any earlier
+    # year is asked for (user, 2026-11-14).
+    download_first_years_from: int = Field(2023, ge=2019, le=2100)
     # Exit policies compared on the SAME entries (daily exit check): "stop" = close at the stop; "roll_rules" =
     # roll a threatened spread when the roll rules allow it, else close; "roll_always" = never stop, roll a
     # losing spread into the next month at the forced exit, without limit.
@@ -626,9 +629,9 @@ class StockOptionSelling(StrictModel):
     hedge_strikes_out: list[int] = [2, 3]                     # bought strike: this many strikes further out (min, max)
     max_loss_per_stock_spread_pct: float = Field(2.5, gt=0, le=100)    # max_risk_per_position_pct: a position's max loss, % of capital
     # Net credit after the hedge and all charges must be at least this % of the max loss (CREDIT_TOO_SMALL). 0 = off.
-    # min_credit_to_max_loss. NOT APPLIED (0) until the user sets it once, after seeing the distribution of
-    # net credit / max loss on stored data (user, 2026-11-14). The specification's starting value was 0.20.
-    min_net_credit_pct_of_max_loss: float = Field(0.0, ge=0, le=100)
+    # min_credit_to_max_loss = 0.10, set by the user on 2026-11-14 from the distribution of net credit / max loss
+    # measured on stored data BEFORE any outcome was looked at (median 0.10, n 28). Not chosen from results.
+    min_net_credit_pct_of_max_loss: float = Field(10.0, ge=0, le=100)
     entry_min_days_to_expiry: int = Field(20, ge=8, le=90)
     entry_max_days_to_expiry: int = Field(35, ge=8, le=120)
     profit_target_pct_of_credit: float = Field(50.0, gt=0, lt=100)

@@ -47,7 +47,7 @@ from .backtest import (OptionEngine, baseline_variants, prepare_history, print_r
 from .campaign import campaigns_from_trades
 from .option_history import OptionHistory, OptionIntraday, budgeted_fetcher
 from .reversal import build_reversal_strategies, reversal_outcomes
-from .stock_selling import StockOptionSelling, build_stock_selling
+from .stock_selling import StockOptionSelling, build_stock_selling, phase9_settings
 
 log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
@@ -56,13 +56,6 @@ STATUS_FILE = "data/option_download_status.json"
 PLAN_VERSION = 5        # 5: capital 10,00,000, bull call window 20-35 days, minimum credit not applied
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
-
-
-def phase9_settings(settings: Settings) -> Settings:
-    """The settings the Phase 9 backtests run with: the same file, with the capital set to the user's
-    stock-option capital (stock_option_selling.backtest.capital_inr). Every limit stays a % of it."""
-    cap = settings.stock_option_selling.backtest.capital_inr
-    return settings.model_copy(update={"account": settings.account.model_copy(update={"capital_inr": cap})})
 
 
 def liquid_stocks(settings: Settings, engine: OptionEngine, before: date | None = None) -> list[dict]:
@@ -474,6 +467,12 @@ def write_status(settings: Settings, status: dict) -> Path:
     return p
 
 
+def waiting_for_priority_years(priority_years: list[int], stocks: list[str], done: dict) -> list[str]:
+    """Newest first: the stocks (with price history) not yet complete for every priority year. An
+    earlier year is downloaded only when this is empty."""
+    return [s for s in stocks if not set(priority_years) <= set(done.get(s, ()))]
+
+
 def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOptionSelling, stocks: list[str],
                     dev: list[date], status: dict, progress=print, offline: bool = False, checkpoint=None) -> dict:
     """Fetch what the backtest needs, newest year first, most liquid stock first, until the request
@@ -495,7 +494,15 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
     def missing() -> int:
         return len(hist.not_stored) + (len(intr.not_stored) if intr is not None else 0)
 
+    first_from = settings.stock_option_selling.backtest.download_first_years_from
+    priority_years = [y for y in years if y >= first_from]
     for year in years:
+        if year < first_from and not offline:
+            waiting = waiting_for_priority_years(priority_years, [s for s in stocks if engine.base.daily(s)], done)
+            if waiting:
+                stopped = (f"waiting: {len(waiting)} stock(s) not yet complete for {min(priority_years)}-"
+                           f"{max(priority_years)} ({', '.join(waiting[:5])}{' ...' if len(waiting) > 5 else ''})")
+                break
         block = [d for d in dev if d.year >= year]           # to the end: a rolled campaign can run past the year
         engine.set_expiry_floor(date(year - 1, 1, 1))        # a year of earlier months for the IV rank
         for sym in stocks:

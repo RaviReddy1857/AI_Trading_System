@@ -337,7 +337,7 @@ stock_option_selling:
   max_short_delta: 0.20
   hedge_strikes_out: [2, 3]     # bought strike 2 strikes further out; 3 if 2 does not qualify
   max_loss_per_stock_spread_pct: 2.5  # max_risk_per_position_pct (spec section 2): a position's max loss, % of capital
-  min_net_credit_pct_of_max_loss: 0   # min_credit_to_max_loss: NOT APPLIED until you set it once (spec starting value 0.20); see docs/STATUS.md
+  min_net_credit_pct_of_max_loss: 10  # min_credit_to_max_loss 0.10: set by you on 2026-11-14 from the pre-outcome distribution (not from results)
   entry_min_days_to_expiry: 20
   entry_max_days_to_expiry: 35
   profit_target_pct_of_credit: 50
@@ -413,6 +413,7 @@ stock_option_selling:
     exit_checks: [intraday, daily]   # first = main result. intraday = synchronized 5-minute bars of every leg; daily = daily closes
     exit_on_strike_breach: true      # close at the next open when the stock closes beyond the sold strike
     capital_inr: 1000000             # capital the Phase 9 backtests run at (your stock-option capital); limits stay a % of it
+    download_first_years_from: 2023  # complete 2023-2026 for every priority stock (newest first) before any earlier year
     exit_policies: [stop, roll_rules, roll_always]   # compared on the same entries: stop at 2x credit / roll by the rules / roll every month
 
 # ---- Phase 3: backtest and walk-forward ----
