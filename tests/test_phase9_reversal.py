@@ -67,9 +67,9 @@ def test_ACCEPTANCE_washed_out_then_base_forming_then_reversal_confirmed():
     info = sc.info(m["confirmed"])
     assert info["confirmed_today"] and info["lift_active"] and info["base_low"] == pytest.approx(BASE_LOW)
     assert info["confirmed_on"] == sc.dates[m["confirmed"]].isoformat() and len(info["reasons"]) == 5
-    assert "above the 20-day average" in info["reasons"][0] and "last swing high 600.00" in info["reasons"][1]
+    assert "above the 20-day average" in info["reasons"][0] and "last confirmed swing high 612.00" in info["reasons"][1]
     assert "volume" in info["reasons"][2] and "ahead of the index" in info["reasons"][3] and "has held" in info["reasons"][4]
-    assert info["stall_zones"] == [800.0]                # the swing low the second leg down broke
+    assert info["stall_zones"] == [784.0]                # the swing low the second leg down broke
     assert sc.info_on(sc.dates[m["confirmed"]]) == info and sc.info_on(date(1999, 1, 1))["state"] is None
 
 
@@ -137,7 +137,7 @@ def test_ACCEPTANCE_reversal_lifts_the_falling_stock_block_only_for_a_put_spread
     assert short.right == "PE" and short.strike < BASE_LOW and long_.strike < short.strike
     assert any("REVERSAL_CONFIRMED" in r and "block is lifted" in r for r in a.reasons)
     assert a.signal.details["reversal"]["base_low"] == pytest.approx(BASE_LOW)
-    assert a.signal.details["reversal"]["stall_zones"] == [800.0]
+    assert a.signal.details["reversal"]["stall_zones"] == [784.0]
     # after the lift has run out the block is back
     late, info2 = reversal_ctx(cfg, after=REV.lift_sessions + 3)
     assert info2["lift_active"] is False
@@ -197,7 +197,7 @@ def test_ACCEPTANCE_confirmation_gives_a_bull_call_spread_with_stall_zones(s):
     assert d["structure"] == "DEBIT_SPREAD" and d["max_loss_inr"] == pytest.approx(debit * LOT * n + d["costs_inr"], abs=0.02)
     assert d["max_profit_inr"] == pytest.approx((20 - debit) * LOT * n - d["costs_inr"], abs=0.02)
     assert d["breakevens"][0] == pytest.approx(bought.strike + debit + d["costs_inr"] / (LOT * n), abs=0.01)
-    assert d["stall_zones"] == [800.0] and d["base_low"] == pytest.approx(BASE_LOW) and "stall zones" in x.why_now[-1]
+    assert d["stall_zones"] == [784.0] and d["base_low"] == pytest.approx(BASE_LOW) and "stall zones" in x.why_now[-1]
     assert d["max_loss_inr"] <= s.account.capital_inr * s.stock_option_selling.max_loss_per_stock_spread_pct / 100
     assert any("approve" in w for w in d["warnings"])
     # no confirmation: nothing. Baseline (no filter): the same structure without a reversal
@@ -264,10 +264,10 @@ def test_reversal_outcomes_by_hand_and_low_sample():
     sessions = sc.dates
     out = reversal_outcomes({"RELIANCE": sc}, sessions, [10, 20, 40], 30)
     assert out["label"] == "history, not a forecast" and out["confirmations"] == 1 and out["stocks"] == 1
-    assert out["events"] == [{"stock": "RELIANCE", "date": sc.dates[c].isoformat(), "close": 606.0, "base_low": pytest.approx(BASE_LOW)}]
+    assert out["events"] == [{"stock": "RELIANCE", "date": sc.dates[c].isoformat(), "close": 620.0, "base_low": pytest.approx(BASE_LOW)}]
     for row, h in zip(out["outcomes"], (10, 20, 40)):
         assert row["sessions"] == h and row["cases"] == 1 and row["low_sample"] is True
-        assert row["median_pct"] == pytest.approx(((606 + 2 * h) / 606 - 1) * 100, abs=0.01) and row["up_pct_of_cases"] == 100.0
+        assert row["median_pct"] == pytest.approx(((620 + 2 * h) / 620 - 1) * 100, abs=0.01) and row["up_pct_of_cases"] == 100.0
     assert out["new_low_afterwards"] == {"within_sessions": 40, "cases": 1, "share_pct": 0.0, "low_sample": True}
     # a horizon that runs past the tested period is not a case; nothing is filled in
     short = reversal_outcomes({"RELIANCE": sc}, sessions[:c + 25], [10, 20, 40], 30)
@@ -378,7 +378,7 @@ def test_ACCEPTANCE_washed_out_stocks_are_shown_as_watch_never_as_a_signal(s):
     assert [r["stock"] for r in w["rows"]] == ["RELIANCE"]                       # the healthy stock is not listed
     r = w["rows"][0]
     assert r["state"] == "REVERSAL_CONFIRMED" and r["label"] == "watch" and r["confirmed_on"] == "2026-11-13"
-    assert r["base_low"] == pytest.approx(BASE_LOW) and r["stall_zones"] == [800.0] and r["drawdown_pct"] > 30
+    assert r["base_low"] == pytest.approx(BASE_LOW) and r["stall_zones"] == [784.0] and r["drawdown_pct"] > 30
     assert [c["candidate"] for c in r["candidates"]] == ["bull call spread", "put credit spread below the base low"]
     assert all(c["status"] == "NO_TRADE" and "NO_CHAIN" in c["reasons"][0] for c in r["candidates"])   # no chain: said, not guessed
     # earlier sessions: washed out, then base forming, both "watch"

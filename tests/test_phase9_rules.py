@@ -14,9 +14,9 @@ from app.options.option_history import OptionHistory
 from app.options.shortlist import scenario_triggers, stock_view
 from app.options.stock_backtest import ALERT_SETS, rule_effects, variant
 from app.options.stock_profile import (DOWNTREND_BLOCK, HISTORY_LABEL, INSUFFICIENT_HISTORY, STOCK_LOSS_LIMIT,
-                                       UPTREND_BLOCK, ClosedTrade, Snapshot, alert_kinds, breach_frequency,
+                                       UPTREND_BLOCK, ClosedTrade, Snapshot, alert_kinds, alternating, breach_frequency, pivots, support_resistance,
                                        fii_streak_starts, range_speed_profile, scenario_history, snapshot, state_now,
-                                       stock_loss_limit, swings, trend_block, vix_spike_dates)
+                                       stock_loss_limit, trend_block, vix_spike_dates)
 from app.options.stock_selling import SpreadPosition, build_stock_selling, position_alerts
 from app.quality import IST
 from app.store import Store
@@ -83,7 +83,8 @@ def test_strategy_gives_no_put_signal_in_a_falling_stock_and_the_block_can_be_sw
     strat = build_stock_selling(s)
     assert strat.evaluate(ctx_for(s, bars)) == []
     assert any(r.startswith(DOWNTREND_BLOCK) and "200-day average" in r for r in strat.last_no_trade)
-    off = build_stock_selling(settings(stock_option_selling={"trend_block": {**TB.model_dump(), "enabled": False}}))
+    off = build_stock_selling(settings(stock_option_selling={"trend_block": {**TB.model_dump(), "enabled": False},
+                                                             "min_net_credit_pct_of_max_loss": 0}))
     sig = off.evaluate(ctx_for(s, bars))
     assert sig and sig[0].details["side"] == "PE" and off.version != strat.version
     # the no-filter baseline ignores the block unless the comparison asks for it
@@ -144,12 +145,17 @@ def test_strategy_gives_no_signal_in_a_stock_that_is_cooling_off(s):
 
 # ---------------- 3. range and speed profile ----------------
 def test_swings_state_and_breach_frequency_by_hand():
-    closes = [100, 95, 90, 99, 110, 104, 100, 112, 120, 108]
-    # 100 -> 90 is -10%: the start is a high. Low 90 (index 2) is confirmed at 99 (+10%). From 110: 104 and 100
-    # (-9.1%) do not confirm a high; new highs 112, 120; 108 is -10% from 120: high at index 8
-    assert swings(closes, 10) == [("H", 0), ("L", 2), ("H", 8)]
-    assert swings([100, 111, 99, 110, 98], 10) == [("L", 0), ("H", 1), ("L", 2), ("H", 3)]
-    assert swings([], 10) == [] and swings([100, 101, 102], 10) == []
+    # 2-bar pivots on (low, high) bars: a low below the 2 lows before it and at or below the 2 after it
+    hl = [(10, 12), (9, 11), (7, 9), (8, 10), (8, 14), (11, 15), (10, 13), (12, 16), (13, 18), (14, 19), (12, 15), (11, 14)]
+    bars = [Bar("X", daily_start(d), lo, hi, lo, lo, 1.0) for d, (lo, hi) in zip(weekdays_back(END, len(hl)), hl)]
+    got = pivots(bars, 2)
+    assert ("L", 2, 4, 7) in got
+    assert [x for x in got if x[0] == "H"] == [("H", 9, 11, 19)]          # above the 2 highs before and >= the 2 after
+    assert all(x[2] == x[1] + 2 for x in got)                             # confirmed 2 sessions after the pivot
+    eq = [Bar("X", daily_start(d), 5, 6, lo, 5, 1.0) for d, lo in zip(weekdays_back(END, 7), [5, 4, 3, 3, 4, 5, 6])]
+    assert [x[1] for x in pivots(eq, 2) if x[0] == "L"] == [2]           # of two equal lows only the first counts
+    assert pivots(bars[:4], 2) == []
+    assert alternating([("L", 1, 3, 5), ("L", 4, 6, 4), ("H", 6, 8, 9)]) == [("L", 4, 6, 4), ("H", 6, 8, 9)]
     assert state_now([100 + i for i in range(30)], 20, 0.3) == ("TRENDING_UP", 1.0)
     assert state_now([100 - i for i in range(30)], 20, 0.3) == ("TRENDING_DOWN", 1.0)
     assert state_now([100 + (i % 2) for i in range(31)], 20, 0.3) == ("RANGING", 0.0)
@@ -380,9 +386,10 @@ def test_ACCEPTANCE_an_alert_says_what_changed_and_shows_exit_and_roll_with_numb
 # ---------------- in the backtest: each rule and alert against the baseline ----------------
 @pytest.fixture(scope="module")
 def world():
-    """The fixture stock with two jumps: +16 on 1 July 2025 (a close above resistance while a call
-    spread is open) and +70 on 1 August 2025 (a call spread is stopped)."""
-    return stock_world(shocks={date(2025, 7, 1): 16.0, date(2025, 8, 1): 70.0})
+    """The fixture stock falls 60 on 20 May 2025 (so there are confirmed pivot highs above the price for
+    call spreads), then jumps +16 on 1 July 2025 (a close above resistance while a call spread is open)
+    and +70 on 1 August 2025 (a call spread is stopped)."""
+    return stock_world(shocks={date(2025, 5, 20): -60.0, date(2025, 7, 1): 16.0, date(2025, 8, 1): 70.0})
 
 
 def stream(world, st, name, mode="daily"):
@@ -407,7 +414,8 @@ def test_backtest_trend_block_on_the_baseline_blocks_calls_in_the_rising_fixture
 def test_backtest_campaign_limit_stops_new_entries_after_a_stopped_trade(world):
     cfg = world[0]
     one = settings(backtest=cfg.backtest.model_dump(), options=cfg.options.model_dump(),
-                   stock_option_selling={"campaign_limit": {**CL.model_dump(), "max_stopped_trades": 1}})
+                   stock_option_selling={"campaign_limit": {**CL.model_dump(), "max_stopped_trades": 1,
+                                                                "cooling_off_days": 60}})
     plain, _ = stream(world, variant(one), "baseline:CE")
     limited, sk = stream(world, variant(one, baseline_rules=("campaign_limit",)), "baseline:CE")
     stops = [t for t in plain if t.exit_reason == "STOP"]
@@ -432,7 +440,7 @@ def test_backtest_alert_exit_closes_at_the_next_open_after_the_alert(world):
     for t in hits:
         exit_d = ist_date(t.exit_time)
         i = dates.index(exit_d) - 1                                   # the session whose close raised the alert
-        resistance_before = max(b.high for b in bars[i - 20:i])
+        resistance_before = support_resistance(bars[:i], 252, 5)[1]     # known at the previous close
         assert bars[i].close > resistance_before and bars[i - 1].close <= resistance_before
         assert datetime.fromisoformat(t.exit_time).astimezone(IST).hour == 9 and t.exit_basis == "alert at the close"
         assert dates[i] > ist_date(t.entry_time) or dates[i] == ist_date(t.entry_time)
@@ -540,3 +548,16 @@ def test_backtest_market_block_uses_breadth_known_at_each_close(world):
     assert blocked == [] and sk["NO_SIGNAL:MARKET_UNKNOWN"] >= 3     # unknown breadth blocks every scheduled put spread
     calls = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:CE", Counter())
     assert calls                                                     # call spreads are not blocked by the market block
+
+
+def test_ACCEPTANCE_support_is_a_confirmed_pivot_used_only_after_its_five_later_sessions():
+    """A pivot low is not support on its own day nor in the four sessions after it: only from the fifth."""
+    lows = [110, 109, 108, 107, 106, 100, 104, 105, 106, 107, 108, 109, 110]
+    bars = [Bar("X", daily_start(d), lo + 2, lo + 4, lo, lo + 2, 1.0) for d, lo in zip(weekdays_back(END, len(lows)), lows)]
+    for k in range(5, 10):                                           # the low is at index 5; bars up to k are known
+        assert support_resistance(bars[:k + 1], 10, 5)[0] is None, k
+    assert support_resistance(bars[:11], 10, 5)[0] == 100            # confirmed at index 10
+    # the profile uses the same confirmed pivots for its swings
+    wave = series([1000 * (1 + 0.2 * math.sin(i / 20)) for i in range(700)])
+    w = range_speed_profile(wave, PR, pivot_bars=5)["windows"]["2"]
+    assert w["upswings"] >= 3 and 50 <= w["avg_sessions_low_to_high"] <= 70

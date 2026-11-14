@@ -367,7 +367,7 @@ class OptionEngine:
             bars = [b for b in self.base.daily(sym) if floor is None or bar_date(b) >= floor]
             breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], self.s.history.max_overnight_gap_pct)
             self._reversal[sym] = ReversalScanner(bars, self.base.daily(self.s.regime.index_symbol), sos.reversal,
-                                                  sos.trend_block.long_sma_days, breaks)
+                                                  sos.trend_block.long_sma_days, breaks, sos.swing_pivot_bars)
         return self._reversal[sym]
 
     def snapshot_at(self, sym: str, bars: tuple, d: date) -> Snapshot | None:
@@ -375,9 +375,9 @@ class OptionEngine:
         m = self.market_at(d)
         code, _ = market_weak(self.base.index_daily(d)[-400:], self.breadth_at(d), sos.market_block,
                               sos.trend_block.long_sma_days)
-        return snapshot(bars, sos.support_resistance_lookback_days, sos.trend_block, m["fii_bias"], m["vix_change_pct"],
+        return snapshot(bars, sos.pivot_lookback_sessions, sos.trend_block, m["fii_bias"], m["vix_change_pct"],
                         self.base.regime.at_close(d).regime,
-                        market_weak=None if code == MARKET_UNKNOWN else code == MARKET_WEAK)
+                        market_weak=None if code == MARKET_UNKNOWN else code == MARKET_WEAK, pivot_bars=sos.swing_pivot_bars)
 
     def trigger_strategy(self):
         if self._trigger is None:

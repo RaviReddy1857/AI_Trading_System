@@ -26,7 +26,8 @@ from app.options.option_history import (INTRADAY, IntradayBar, OptionHistory, Op
 from app.options.shortlist import run_shortlist
 from app.options.stock_backtest import coverage, download_blocks, liquid_stocks
 from app.options.stock_selling import (SpreadPosition, StockOptionSelling, build_shortlist, build_stock_selling,
-                                       exit_calls, exit_levels, roll_choices, support_resistance, trend_of)
+                                       exit_calls, exit_levels, roll_choices, trend_of)
+from app.options.stock_profile import pivots, support_resistance
 from app.quality import IST
 from app.store import Store
 from tests.test_phase3 import FixedRegime
@@ -168,9 +169,12 @@ def test_trend_and_support_resistance_by_hand():
     flat = stock_bars(drift=0.0, wobble=0.0)
     assert trend_of(flat, 20, 50, 14)[0] is None                  # close equals both averages: no clear trend
     assert trend_of(up[:30], 20, 50, 14)[0] is None                # not enough history is unknown, not a trend
-    lows, highs = [b.low for b in up[-20:]], [b.high for b in up[-20:]]
-    assert support_resistance(up, 20) == (min(lows), max(highs))
-    assert support_resistance(up[:10], 20) == (None, None)
+    # support: the nearest confirmed 5-bar pivot low below the close; resistance: the nearest pivot high above it
+    sup, res = support_resistance(up, 252, 5)
+    piv = [x for x in pivots(up[-257:], 5) if x[1] >= 5]
+    assert sup == max(x[3] for x in piv if x[0] == "L" and x[3] < up[-1].close)
+    assert res is None or res == min(x[3] for x in piv if x[0] == "H" and x[3] > up[-1].close)
+    assert sup < up[-1].close and support_resistance(up[:100], 252, 5) == (None, None)
     assert 0 < trend_of(up, 20, 50, 14)[1] <= 1
 
 
@@ -178,7 +182,7 @@ def test_trend_and_support_resistance_by_hand():
 def test_ACCEPTANCE_short_strike_is_beyond_support_beyond_the_highest_oi_strike_and_within_the_delta_limit(s, strat):
     bars = stock_bars()
     spot = bars[-1].close
-    support, _ = support_resistance(bars, 20)
+    support, _ = support_resistance(bars, 252, 5)
     wall = float(int(support // 10) * 10 - 10)                     # highest-OI put strike just below support
     quotes = chain(spot, oi={(int(wall), "PE"): 5000})
     sig = strat.evaluate(ctx_for(s, bars, quotes))
@@ -202,7 +206,7 @@ def test_ACCEPTANCE_short_strike_is_beyond_support_beyond_the_highest_oi_strike_
 def test_ACCEPTANCE_bear_call_short_strike_is_above_resistance(s, strat):
     bars = stock_bars(start=1200, drift=-1.0)
     spot = bars[-1].close
-    _, resistance = support_resistance(bars, 20)
+    _, resistance = support_resistance(bars, 252, 5)
     strat = build_stock_selling(settings(stock_option_selling={"min_net_credit_pct_of_max_loss": 5}))
     sig = strat.evaluate(ctx_for(s, bars, chain(spot)))
     assert sig, strat.last_no_trade
@@ -218,7 +222,7 @@ def test_ACCEPTANCE_no_signal_when_no_strike_meets_all_three_conditions(s, strat
     assert strat.evaluate(ctx_for(s, bars, chain(spot, oi={(800, "PE"): 9000}))) == []
     assert any(r.startswith("NO_STRIKE") for r in strat.last_no_trade)
     # no strike below support at all
-    support, _ = support_resistance(bars, 20)
+    support, _ = support_resistance(bars, 252, 5)
     lo = int(support // 10) * 10 + 10
     assert strat.evaluate(ctx_for(s, bars, chain(spot, lo=lo))) == []
     assert any(r.startswith("NO_STRIKE") for r in strat.last_no_trade)
@@ -459,7 +463,7 @@ def test_config_is_validated():
 # ---------------- shortlist ----------------
 def shortlist_contexts(s):
     good = stock_bars("RELIANCE")
-    strong = stock_bars("TCS", drift=2.0)
+    strong = stock_bars("TCS", drift=1.5)            # steady enough to keep confirmed pivot lows below the price
     illiquid = stock_bars("INFY")
     event = stock_bars("HDFCBANK")
     flat = stock_bars("ICICIBANK", drift=0.0, wobble=0.0)
@@ -1180,21 +1184,21 @@ def test_ACCEPTANCE_excluded_campaigns_are_counted_and_above_30_percent_a_labell
     clean, all_trades = summary_of(stock_world())
     assert clean["baseline"]["excluded"] == 0 and clean["baseline"]["excluded_share_pct"] == 0.0 and clean["sensitivity"] is None
     total = clean["baseline"]["kept"]
-    # one session without bars: the campaigns open that day are left out; 2 of 8 is under the 30% line
+    # one session without bars: the campaign open that day is left out; 1 of 5 is under the 30% line
     w = stock_world()
     drop_session(w[1], date(2025, 7, 3))
     one, _ = summary_of(w)
-    assert one["baseline"]["excluded"] == 2 and one["baseline"]["kept"] == total - 2
-    assert one["baseline"]["excluded_share_pct"] == pytest.approx(2 / total * 100, abs=0.1)
+    assert one["baseline"]["excluded"] == 1 and one["baseline"]["kept"] == total - 1
+    assert one["baseline"]["excluded_share_pct"] == pytest.approx(1 / total * 100, abs=0.1)
     assert one["baseline"]["excluded_share_pct"] <= 30 and one["sensitivity"] is None
     # sessions without bars in two months: above 30%, so the sensitivity run is added, clearly labelled
     drop_session(w[1], date(2025, 8, 1))
     two, kept = summary_of(w)
-    assert two["baseline"]["excluded"] == 4 and two["baseline"]["excluded_share_pct"] > 30 and two["threshold_pct"] == 30.0
+    assert two["baseline"]["excluded"] == 2 and two["baseline"]["excluded_share_pct"] > 30 and two["threshold_pct"] == 30.0
     sv = two["sensitivity"]
     assert sv is not None and sv["label"].startswith("SENSITIVITY, not the primary result")
     assert sv["baseline"]["trades"] == total and sv["still_excluded"]["baseline"] == 0     # judged at the daily close instead
-    assert len(kept) == total - 4                                    # the primary result still leaves them out
+    assert len(kept) == total - 2                                    # the primary result still leaves them out
     assert all("sensitivity" not in t.exit_basis for t in kept)
 
 

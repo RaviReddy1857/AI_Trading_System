@@ -29,8 +29,9 @@ Entry rules (StockOptionSelling.assess; every number is computed here, none by a
   within 90 days, no new signal in it for the cooling-off period (STOCK_LOSS_LIMIT). The context's
   `closed_trades` carries signals and manual positions alike.
 
-Support = the lowest low and resistance = the highest high of the last
-`support_resistance_lookback_days` sessions (today included).
+Support = the nearest confirmed 5-bar pivot low below the close, resistance = the nearest confirmed
+pivot high above it, among the pivots of the last `pivot_lookback_sessions` sessions; a pivot is used
+only once its 5 later sessions have completed (stock_profile.pivots).
 
 Exits (exit_calls; the backtest applies the same rules): keep `profit_target_pct_of_credit` of the
 credit; stop when buying the spread back costs `stop_multiple_of_credit` x the credit; threat when the
@@ -62,7 +63,7 @@ from .margin import MARGIN_UNKNOWN
 from .campaign import after_roll
 from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (DOWNTREND_BLOCK, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -89,14 +90,6 @@ def trend_of(daily, fast: int, slow: int, atr_days: int) -> tuple[str | None, fl
     if c < s and f < s:
         return "DOWN", clarity, "down trend: " + text
     return None, clarity, "no clear trend: " + text
-
-
-def support_resistance(daily, lookback: int) -> tuple[float | None, float | None]:
-    """(support, resistance): the lowest low and the highest high of the last `lookback` sessions."""
-    if len(daily) < lookback:
-        return None, None
-    recent = daily[-lookback:]
-    return min(b.low for b in recent), max(b.high for b in recent)
 
 
 EVENT_COVERAGE_UNKNOWN = "EVENT_COVERAGE_UNKNOWN"
@@ -358,12 +351,19 @@ class StockOptionSelling(CreditSpread):
                     out.reasons.append(text)
                 else:
                     coverage_missing = text
-        support, resistance = support_resistance(ctx.daily, p.support_resistance_lookback_days)
+        support, resistance = support_resistance(ctx.daily, p.pivot_lookback_sessions, p.swing_pivot_bars)
         level = support if right == "PE" else resistance
         if level is not None and below is not None:
             level = min(level, below)
+        elif below is not None:
+            level = below                      # a reversal candidate: below the base low is the rule
         if level is None:
-            self.no("INSUFFICIENT_HISTORY", f"fewer than {p.support_resistance_lookback_days} daily bars for support/resistance")
+            if len(ctx.daily) < p.pivot_lookback_sessions:
+                self.no("INSUFFICIENT_HISTORY", f"{len(ctx.daily)} daily bars, the confirmed pivots need "
+                                                f"{p.pivot_lookback_sessions}")
+            else:
+                self.no("NO_CONFIRMED_LEVEL", f"no confirmed {'support (pivot low) below' if right == 'PE' else 'resistance (pivot high) above'} "
+                                              f"the price in the last {p.pivot_lookback_sessions} sessions")
             return stop()
         closes = [b.close for b in ctx.daily]
         a = last(atr([b.high for b in ctx.daily], [b.low for b in ctx.daily], closes, p.atr_days)) \
@@ -372,7 +372,7 @@ class StockOptionSelling(CreditSpread):
         if ok(a) and a > 0:
             out.scores["distance"] = round(max(0.0, min(1.0, gap / (5 * a))), 3)
         level_name = ("the base low" if below is not None and level == below else "support") if right == "PE" else "resistance"
-        out.reasons.append(f"{level_name} {fmt(level)} ({p.support_resistance_lookback_days}-session "
+        out.reasons.append(f"{level_name} {fmt(level)} (confirmed {p.swing_pivot_bars}-bar pivot "
                            f"{'low' if right == 'PE' else 'high'}), {fmt(gap)} from the price {fmt(ctx.spot)}")
         lctx = replace(ctx, max_spread_pct=p.max_bid_ask_spread_pct, min_oi_lots=p.min_open_interest)
         got = pick_short_strike(replace(lctx, quotes=BeyondLevel(ctx.quotes, right, level)), exp.expiry, right,

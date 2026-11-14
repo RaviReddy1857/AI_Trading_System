@@ -586,7 +586,6 @@ class Reversal(StrictModel):
     confirm_sma_days: int = Field(20, ge=5, le=100)
     volume_sma_days: int = Field(20, ge=5, le=100)
     relative_return_sessions: int = Field(10, ge=2, le=60)         # return ahead of NIFTY over these sessions
-    swing_pct: float = Field(5.0, gt=0, le=50)                     # zigzag size for "the last swing high" and breakdown levels
     lift_sessions: int = Field(20, ge=1, le=120)                   # the falling-stock block stays lifted this long (put spreads below the base low only)
     rearm_sessions: int = Field(40, ge=1, le=250)                  # no second confirmation of the same stock sooner than this
     outcome_sessions: list[int] = [10, 20, 40]
@@ -602,7 +601,6 @@ class Reversal(StrictModel):
 class StockProfile(StrictModel):
     """Range and speed profile, scenario history and the levels the open-position alerts use."""
     windows_years: list[int] = [2, 5]
-    swing_pct: float = Field(8.0, gt=0, le=50)                     # a swing is a move of at least this % (zigzag)
     state_lookback_sessions: int = Field(20, ge=5, le=120)
     trending_efficiency: float = Field(0.30, gt=0, lt=1)           # net move / path length at or above this = trending
     holding_sessions: int = Field(20, ge=1, le=120)                # a spread is held about this long
@@ -644,7 +642,12 @@ class StockOptionSelling(StrictModel):
     trend_fast_sma: int = Field(20, ge=2, le=200)             # the swing trend rule: close and fast average vs slow average
     trend_slow_sma: int = Field(50, ge=3, le=400)
     atr_days: int = Field(14, ge=2, le=100)
-    support_resistance_lookback_days: int = Field(20, ge=5, le=250)   # support = lowest low, resistance = highest high
+    # swing_pivot_bars: a pivot low (high) is a session whose low (high) is below (above) the 5 sessions before it and at
+    # or below (above) the 5 after; it is usable only once those 5 later sessions have completed, never on its own day.
+    swing_pivot_bars: int = Field(5, ge=1, le=20)
+    # Support = the nearest confirmed pivot low below the close, resistance = the nearest confirmed pivot high above it,
+    # among the pivots of the last `pivot_lookback_sessions` sessions (a new definition, recorded 2026-11-15).
+    pivot_lookback_sessions: int = Field(252, ge=20, le=500)
     shortlist_size: int = Field(10, ge=1, le=100)
     weights: ShortlistWeights = ShortlistWeights()
     trend_block: TrendBlock = TrendBlock()

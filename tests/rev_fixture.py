@@ -30,9 +30,9 @@ def washed_out_stock(end=date(2026, 11, 13), breakout=True, after=0, sym="RELIAN
     add([562.0 + (k % 2) for k in range(22)], 0.005, 7e5)          # quiet base: ranges shrink
     marks["breakout"] = len(px)
     if breakout:
-        add([575.0, 590.0, 606.0], 0.008, 7e5 if quiet_volume else 3e6)   # third close is above 600
+        add([580.0, 600.0, 620.0], 0.008, 7e5 if quiet_volume else 3e6)   # third close is above the pivot high 612
         marks["confirmed"] = len(px) - 1
-        add([606.0 + 2 * (k + 1) for k in range(after)], 0.008, 1e6)
+        add([620.0 + 2 * (k + 1) for k in range(after)], 0.008, 1e6)
     days = weekdays_back(end, len(px))
     bars = [Bar(sym, daily_start(d), p, p * (1 + r), p * (1 - r), p, v) for d, p, r, v in zip(days, px, rng, vol)]
     level = [24000 * (1 + index_growth) ** k for k in range(len(days))]

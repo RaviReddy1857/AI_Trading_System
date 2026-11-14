@@ -171,7 +171,7 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
         right, distance, iv = a.side, a.distance_pct, ctx.iv_reference_pct
         out["setup"] = {"status": a.status, "side": a.side, "expiry": a.expiry.isoformat() if a.expiry else None,
                         "short_strike": a.short_strike, "distance_pct": a.distance_pct, "reasons": a.reasons}
-    out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv)
+    out["profile"] = range_speed_profile(bars, sos.profile, floor, right, distance, iv, sos.swing_pivot_bars)
     out["scenarios"] = scenario_history(bars, scenario_triggers(settings, store, source, sym, floor or bar_date(bars[0]),
                                                                 bar_date(bars[-1])), sos.profile, floor)
     return out
@@ -204,7 +204,7 @@ def reversal_scanner(settings: Settings, store: Store, source: str, sym: str) ->
     breaks = gap_breaks([b.open for b in bars], [b.close for b in bars], settings.history.max_overnight_gap_pct)
     sos = settings.stock_option_selling
     return ReversalScanner(bars, store.history_bars("bars_1d", settings.regime.index_symbol, source), sos.reversal,
-                           sos.trend_block.long_sma_days, breaks)
+                           sos.trend_block.long_sma_days, breaks, sos.swing_pivot_bars)
 
 
 WATCH_NOTE = "Watch list only, never a signal. Reversal candidates do not alert until you approve them."

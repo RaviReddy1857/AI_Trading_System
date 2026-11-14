@@ -145,40 +145,47 @@ def stock_loss_limit(trades: Sequence[ClosedTrade], today: date, cfg, capital_in
 
 
 # ---------------- 3. range and speed profile ----------------
-def swings(closes: Sequence[float], pct: float) -> list[tuple[str, int]]:
-    """Confirmed swing points ('L' | 'H', index) of a zigzag: a low is confirmed once the close has
-    risen `pct` % from it, a high once it has fallen `pct` % from it."""
-    t = pct / 100.0
-    out: list[tuple[str, int]] = []
-    if not closes:
-        return out
-    lo = hi = 0
-    direction = None
-    for i, c in enumerate(closes):
-        if direction is None:
-            if c < closes[lo]:
-                lo = i
-            if c > closes[hi]:
-                hi = i
-            if c >= closes[lo] * (1 + t):
-                out.append(("L", lo))
-                direction, hi = "up", i
-            elif c <= closes[hi] * (1 - t):
-                out.append(("H", hi))
-                direction, lo = "down", i
-        elif direction == "up":
-            if c > closes[hi]:
-                hi = i
-            elif c <= closes[hi] * (1 - t):
-                out.append(("H", hi))
-                direction, lo = "down", i
-        else:
-            if c < closes[lo]:
-                lo = i
-            elif c >= closes[lo] * (1 + t):
-                out.append(("L", lo))
-                direction, hi = "up", i
+def pivots(bars: Sequence, n: int) -> list[tuple[str, int, int, float]]:
+    """Confirmed swing pivots of daily bars: (L | H, index, index at which it is confirmed, price).
+    A pivot low at j: its low is below the lows of the n sessions before it and at or below the lows of
+    the n sessions after it (so of equal lows only the first counts); a pivot high is the mirror image
+    on highs. It is confirmed at j + n: it may be used only from that session on, never on day j."""
+    out = []
+    lows, highs = [b.low for b in bars], [b.high for b in bars]
+    for j in range(n, len(bars) - n):
+        if lows[j] < min(lows[j - n:j]) and lows[j] <= min(lows[j + 1:j + n + 1]):
+            out.append(("L", j, j + n, lows[j]))
+        if highs[j] > max(highs[j - n:j]) and highs[j] >= max(highs[j + 1:j + n + 1]):
+            out.append(("H", j, j + n, highs[j]))
     return out
+
+
+def alternating(piv: Sequence[tuple[str, int, int, float]]) -> list[tuple[str, int, int, float]]:
+    """Pivots in time order with runs of the same kind reduced to their extreme (lowest low, highest
+    high), so lows and highs alternate: the swings of the stock."""
+    out: list = []
+    for x in sorted(piv, key=lambda p: (p[1], p[0])):
+        if out and out[-1][0] == x[0]:
+            if (x[0] == "L" and x[3] < out[-1][3]) or (x[0] == "H" and x[3] > out[-1][3]):
+                out[-1] = x
+            continue
+        out.append(x)
+    return out
+
+
+def support_resistance(daily: Sequence, lookback: int, n: int) -> tuple[float | None, float | None]:
+    """(support, resistance) at the close of the last bar given: the nearest confirmed pivot low below
+    the close and the nearest confirmed pivot high above it, among the pivots of the last `lookback`
+    sessions. None when there is none (or too little history): unknown, never a guess."""
+    if len(daily) < lookback:
+        return None, None
+    seg = list(daily[-(lookback + n):])
+    first = len(seg) - lookback
+    close = seg[-1].close
+    piv = [p for p in pivots(seg, n) if p[1] >= first]           # confirmed by the last bar by construction
+    lows = [p[3] for p in piv if p[0] == "L" and p[3] < close]
+    highs = [p[3] for p in piv if p[0] == "H" and p[3] > close]
+    return (max(lows) if lows else None), (min(highs) if highs else None)
 
 
 def state_now(closes: Sequence[float], lookback: int, trending_efficiency: float) -> tuple[str | None, float | None]:
@@ -221,7 +228,7 @@ def _window(daily: Sequence, years: int, floor: date | None) -> list:
 
 
 def range_speed_profile(daily: Sequence, cfg, floor: date | None = None, right: str | None = None,
-                        distance_pct: float | None = None, atm_iv_pct: float | None = None) -> dict:
+                        distance_pct: float | None = None, atm_iv_pct: float | None = None, pivot_bars: int = 5) -> dict:
     """The stock's profile over each window in `cfg.windows_years`, from bars on or after `floor`.
     `distance_pct` and `right`: the proposed sold strike's distance from the price, for the breach
     history. `atm_iv_pct`: current at-the-money implied volatility, for the implied move.
@@ -249,9 +256,10 @@ def range_speed_profile(daily: Sequence, cfg, floor: date | None = None, right: 
         keys = sorted(months)[1:-1]                      # the first and the current month are partial
         ranges = [(max(b.high for b in months[k]) - min(b.low for b in months[k])) / months[k][0].open * 100
                   for k in keys if months[k][0].open > 0]
-        piv = swings(closes, cfg.swing_pct)
-        up = [(j - i, (closes[j] / closes[i] - 1) * 100) for (a, i), (b2, j) in zip(piv, piv[1:]) if a == "L" and b2 == "H"]
-        down = [(j - i, (closes[j] / closes[i] - 1) * 100) for (a, i), (b2, j) in zip(piv, piv[1:]) if a == "H" and b2 == "L"]
+        piv = alternating(pivots(bars, pivot_bars))              # confirmed 5-bar pivots, lows and highs in turn
+        pairs = list(zip(piv, piv[1:]))
+        up = [(y[1] - x[1], (y[3] / x[3] - 1) * 100) for x, y in pairs if x[0] == "L" and y[0] == "H"]
+        down = [(y[1] - x[1], (y[3] / x[3] - 1) * 100) for x, y in pairs if x[0] == "H" and y[0] == "L"]
         moves = [abs(closes[i + h] / closes[i] - 1) * 100 for i in range(len(closes) - h)]
         w = {"years": years, "bars": len(bars), "from": bar_date(bars[0]).isoformat() if bars else None,
              "months": len(ranges),
@@ -357,7 +365,7 @@ class Snapshot:
     """What is known about a stock and the market at one close. None = unknown."""
     day: date
     close: float | None = None
-    support: float | None = None          # lowest low of the support/resistance lookback
+    support: float | None = None          # nearest confirmed pivot low below the close (support_resistance)
     resistance: float | None = None
     low_52w: float | None = None          # of the sessions BEFORE this one
     high_52w: float | None = None
@@ -372,17 +380,16 @@ class Snapshot:
 
 def snapshot(daily: Sequence, sr_lookback: int, block_cfg, fii_bias: str | None = None,
              vix_change_pct: float | None = None, regime: str | None = None, news_tags: Sequence[str] = (),
-             reversal: bool = False, market_weak: bool | None = None) -> Snapshot | None:
+             reversal: bool = False, market_weak: bool | None = None, pivot_bars: int = 5) -> Snapshot | None:
     """The snapshot at the close of the last bar given."""
     if not daily:
         return None
     closes = [b.close for b in daily]
-    recent = daily[-sr_lookback:] if len(daily) >= sr_lookback else None
+    support, resistance = support_resistance(daily, sr_lookback, pivot_bars)
     before = daily[-1 - block_cfg.extreme_lookback_sessions:-1] if len(daily) > block_cfg.extreme_lookback_sessions else None
     n = block_cfg.long_sma_days
     avg = sum(closes[-n:]) / n if len(closes) >= n else None
-    return Snapshot(bar_date(daily[-1]), closes[-1],
-                    min(b.low for b in recent) if recent else None, max(b.high for b in recent) if recent else None,
+    return Snapshot(bar_date(daily[-1]), closes[-1], support, resistance,
                     min(b.low for b in before) if before else None, max(b.high for b in before) if before else None,
                     avg if ok(avg) else None, fii_bias, vix_change_pct, regime, tuple(news_tags), reversal, market_weak)
 

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..history import bar_date
+from .stock_profile import pivots
 from ..indicators import percentile
 from ..strategies.base import fmt
 from .base import OptionContext, OptionStrategy, leg_view, liquidity_problem, metrics, pick_expiry, round_trip_costs
@@ -39,7 +40,6 @@ from ..quality import IST
 from .stock_selling import EVENT_COVERAGE_UNKNOWN, StockOptionSelling, event_coverage, events_before_expiry
 
 REVERSAL_CONFIRMED = "REVERSAL_CONFIRMED"
-MONTH_SESSIONS = 21
 
 
 @dataclass(frozen=True)
@@ -59,11 +59,12 @@ class ReversalScanner:
     """The reversal state of one stock on every day of its history. The state of day i uses bars up
     to and including i only; a price break (unadjusted split or bonus) starts the history afresh."""
 
-    def __init__(self, daily: Sequence, index_daily: Sequence, cfg, long_sma_days: int, breaks: Sequence[int] = ()):
-        self.bars, self.cfg = list(daily), cfg
+    def __init__(self, daily: Sequence, index_daily: Sequence, cfg, long_sma_days: int, breaks: Sequence[int] = (),
+                 pivot_bars: int = 5):
+        self.bars, self.cfg, self.pivot_bars = list(daily), cfg, pivot_bars
         self.dates = [bar_date(b) for b in self.bars]
         self._pos = {d: i for i, d in enumerate(self.dates)}
-        self.pivots: list[tuple[str, int, int]] = []          # (L | H, index of the pivot, index it was confirmed at)
+        self.pivots: list[tuple[str, int, int, float]] = []   # confirmed pivots: (L | H, index, confirmed at, price)
         self.days: list[ReversalDay] = []
         self._scan({bar_date(b): b.close for b in index_daily}, long_sma_days, sorted(breaks))
 
@@ -72,46 +73,29 @@ class ReversalScanner:
         bars = self.bars
         closes = [b.close for b in bars]
         need = max(c.high_lookback_sessions, n_long)
-        t = c.swing_pct / 100.0
         seg = 0                     # first index of the current unbroken stretch
         below_run = 0               # consecutive sessions closing below the long average
-        lo = hi = 0
-        direction = None
-        last_h = None               # close of the newest confirmed swing high
+        last_h = None               # price (high) of the newest confirmed pivot high
         base_days: list[tuple[int, float]] = []       # (index, base low) of recent base-forming days
         last_conf, conf_low = None, None
+        # confirmed pivots of each unbroken stretch (a pivot never spans a price break)
+        starts = [0] + list(breaks)
+        ends = list(breaks) + [len(bars)]
+        for a, z in zip(starts, ends):
+            self.pivots += [(k, j + a, at + a, px) for k, j, at, px in pivots(bars[a:z], self.pivot_bars)]
+        by_confirm: dict[int, list] = {}
+        for pv in self.pivots:
+            by_confirm.setdefault(pv[2], []).append(pv)
         nb = 0
         for i, b in enumerate(bars):
             while nb < len(breaks) and breaks[nb] <= i:
-                seg, below_run, direction, last_h, lo, hi = breaks[nb], 0, None, None, breaks[nb], breaks[nb]
+                seg, below_run, last_h = breaks[nb], 0, None
                 base_days, last_conf, conf_low = [], None, None
-                self.pivots = []
                 nb += 1
-            # ---- zigzag on closes (confirmed pivots only) ----
+            for kind, j, at, px in by_confirm.get(i, ()):              # usable from its confirmation session on
+                if kind == "H":
+                    last_h = px
             x = closes[i]
-            if direction is None:
-                if x < closes[lo]:
-                    lo = i
-                if x > closes[hi]:
-                    hi = i
-                if x >= closes[lo] * (1 + t):
-                    self.pivots.append(("L", lo, i))
-                    direction, hi = "up", i
-                elif x <= closes[hi] * (1 - t):
-                    self.pivots.append(("H", hi, i))
-                    last_h, direction, lo = closes[hi], "down", i
-            elif direction == "up":
-                if x > closes[hi]:
-                    hi = i
-                elif x <= closes[hi] * (1 - t):
-                    self.pivots.append(("H", hi, i))
-                    last_h, direction, lo = closes[hi], "down", i
-            else:
-                if x < closes[lo]:
-                    lo = i
-                elif x >= closes[lo] * (1 + t):
-                    self.pivots.append(("L", lo, i))
-                    direction, hi = "up", i
             if i - seg + 1 < need:
                 self.days.append(ReversalDay(last_confirmed=last_conf))
                 continue
@@ -148,7 +132,7 @@ class ReversalScanner:
                 if held and x > avg and last_h is not None and x > last_h and vol_ok and rel_ok:
                     confirmed, last_conf, conf_low = True, i, low
                     why = (f"close {fmt(x)} above the {n}-day average {fmt(avg)}",
-                           f"close above the last swing high {fmt(last_h)}",
+                           f"close above the last confirmed swing high {fmt(last_h)}",
                            f"volume {b.volume:,.0f} above its {v}-day average {sum(vols) / v:,.0f}",
                            f"{k}-session return {(x / closes[i - k] - 1) * 100:.1f}% ahead of the index "
                            f"({(idx[d1] / idx[d0] - 1) * 100:.1f}%)",
@@ -161,12 +145,12 @@ class ReversalScanner:
                                          conf_low if lift else base_low, last_conf, lift, why))
 
     def stall_zones(self, i: int, n: int = 3) -> list[float]:
-        """Prior breakdown levels above the price on day i: closes of swing lows of the 52-week window
-        that the fall later broke, nearest first. A rebound often stalls there."""
+        """Prior breakdown levels above the price on day i: confirmed pivot lows of the 52-week window
+        (confirmed by day i) that the fall later broke, nearest first. A rebound often stalls there."""
         first = i - self.cfg.high_lookback_sessions
         x = self.bars[i].close
-        levels = sorted({round(self.bars[p].close, 2) for kind, p, at in self.pivots
-                         if kind == "L" and at <= i and p >= first and self.bars[p].close > x})
+        levels = sorted({round(px, 2) for kind, p, at, px in self.pivots
+                         if kind == "L" and at <= i and p >= first and px > x})
         return levels[:n]
 
     def info(self, i: int) -> dict:

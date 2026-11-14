@@ -348,7 +348,8 @@ stock_option_selling:
   trend_fast_sma: 20            # swing trend rule: close above the 50-day average and 20-day above 50-day = up trend
   trend_slow_sma: 50
   atr_days: 14
-  support_resistance_lookback_days: 20   # support = lowest low, resistance = highest high of these sessions
+  swing_pivot_bars: 5           # a pivot needs 5 sessions on each side and is usable only after the 5 later ones completed
+  pivot_lookback_sessions: 252  # support = nearest confirmed pivot low below the close, resistance = nearest pivot high above it
   shortlist_size: 10
   weights: {iv_rank: 0.35, trend_clarity: 0.25, distance: 0.20, liquidity: 0.20}
   trend_block:                  # DOWNTREND_BLOCK: no put selling in a falling stock (mirrored for calls in a strong uptrend)
@@ -387,7 +388,6 @@ stock_option_selling:
     confirm_sma_days: 20             # confirmed: close above the 20-day average and above the last swing high,
     volume_sma_days: 20              # volume above its 20-day average,
     relative_return_sessions: 10     # and the 10-session return ahead of NIFTY
-    swing_pct: 5                     # a swing high / breakdown level needs a 5% move
     lift_sessions: 20                # the falling-stock block is lifted for 20 sessions, only for put spreads below the base low
     rearm_sessions: 40               # one confirmation per stock in 40 sessions
     outcome_sessions: [10, 20, 40]
@@ -400,7 +400,6 @@ stock_option_selling:
       exit_days_before_expiry: 7
   profile:                      # range and speed profile, scenario history, alert levels (data from 2019-01-22 only)
     windows_years: [2, 5]
-    swing_pct: 8                # a swing low/high needs a move of at least 8%
     state_lookback_sessions: 20
     trending_efficiency: 0.30   # net move / distance travelled over the lookback; below = ranging
     holding_sessions: 20        # breach history: a strike this far away, held this many sessions
