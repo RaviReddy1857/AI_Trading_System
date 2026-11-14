@@ -1201,6 +1201,39 @@ conclusion.
   raises no alert. A scenario case is the first day of a spike episode.
 - Score factors and bands are M2 (below / next).
 
+## Phase 9 M2: the candidate score and score bands (2026-11-15)
+
+Built and tested: `app/options/score.py` (six equal-weight factors, point rules written in the module and in
+docs/implementation.md before any result), the score on every signal and assessment, the shortlist ranked by it with
+each factor's points and contribution, score bands by each day's candidates, and each factor against the baseline.
+`tests/test_phase9_score.py` (7 tests); whole suite 557 passing.
+
+### Result on the stored data (same run as M1: 25 stocks, Jan-Jun 2026, INCOMPLETE - 430 contracts not stored)
+`data/diagnostics/stock_report_2026-11-15_M2.txt`. **The cross-sections are too small for score bands to mean anything:**
+22 decision days had candidates, 20 of them only one, 1 had two and 1 had three. So almost every trade falls in the
+"small cross-section" band.
+
+| Band (strategy trades without portfolio limits, synchronized execution) | Trades | Net after costs (Rs) |
+|---|---|---|
+| top third | 0 | - |
+| middle third | 1 | -2,882 |
+| bottom third | 1 | +1,361 |
+| small cross-section (under 3 candidates that day) | 5 | +1,926 |
+
+Baseline trades by score factor at entry (32 trades; fixed bins under 33.3 / 33.3-66.7 / 66.7 and more): every bin has
+fewer than 30 trades, so no factor is evidence either way. Total score: high 4 trades (-52 per trade), middle 20 (+246),
+unknown 8 (-265; IV history missing). Score was not used to select anything; nothing was tuned.
+
+### Decisions recorded for M2
+- Point rules as in docs/implementation.md ("Score point rules"); a 90th-percentile 21-session fall of zero or less gives
+  that half of strike_distance in full (the stock never fell that far in its worst tenth of windows).
+- A factor whose inputs are unknown has no points; the total is then "incomplete" and ranks after every scored candidate.
+- Relative strength uses the sector peers among the watchlist stocks (median of their 63-session returns); a stock with
+  no peer uses the index only.
+- Score bands use the strategy's trades without the portfolio limits (each stock trades whenever flat), each placed in
+  its decision day's cross-section of candidates (every block applied except the campaign limit and the portfolio
+  limits, which depend on results and positions). Ties: by stock, then expiry, then side.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1269,6 +1302,7 @@ conclusion.
 | 72 | 9 | Open interest minimum of 200 lots skips 159 of 250 baseline attempts in the stored period | Reported; no default changed |
 | 73 | 9 | After the M1 rule changes the report wants 430 contracts that are not stored | Open: next `--download` (plan version raised, every stock-year is checked again) |
 | 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
+| 75 | 9 | Score bands need several candidates a day; the stored months give 1 on 20 of 22 days | Open: needs more stocks and years downloaded |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
