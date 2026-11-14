@@ -254,6 +254,7 @@ class BullCallSpread(OptionStrategy):
     structure = "DEBIT_SPREAD"
     expiry_kinds = ("monthly",)
     needs_daily = True
+    report_open_at_cutoff = True
 
     def __init__(self, params, sos):
         super().__init__(params)

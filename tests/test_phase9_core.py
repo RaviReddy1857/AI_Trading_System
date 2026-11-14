@@ -946,7 +946,7 @@ def test_every_backtest_trade_is_hedged_enters_at_the_next_session_and_is_flat_b
         assert 20 <= (exp - signal_d).days <= 35
         assert exit_d < exp - timedelta(days=exp.weekday())                # before the Monday of expiry week
         assert (exp - exit_d).days >= cfg.stock_option_selling.exit_days_before_expiry - 3
-        assert t["exit_reason"] in ("TARGET", "STOP", "TIME", "STRIKE_BREACHED", "PERIOD_END")
+        assert t["exit_reason"] in ("TARGET", "STOP", "TIME", "STRIKE_BREACHED", "OPEN_AT_CUTOFF")
         if t["variant"] == "strategy":
             assert sell["right"] == "PE"                                    # the fixture stock is in an up trend
     # a forced (time) exit fills at 09:15 of the first session within 7 days of expiry
@@ -1327,3 +1327,34 @@ def test_ACCEPTANCE_sizing_is_whole_lots_within_the_risk_budget_rounded_down():
     assert f"{b['lots']} lot(s)" in " ".join(big[0].why_now)
     tiny = settings(stock_option_selling={"max_loss_per_stock_spread_pct": 0.5})                  # Rs 1,000
     assert build_stock_selling(tiny).evaluate(ctx_for(tiny, bars)) == []
+
+
+# ---------------- open positions at the cutoff ----------------
+def test_ACCEPTANCE_a_position_open_at_the_cutoff_is_reported_open_not_as_a_closed_trade(world):
+    from app.options.backtest import OPEN_AT_CUTOFF, option_stats
+    res = run_bt(world, exit_checks=("daily",))
+    rep, trades = res["report"], res["trades"]
+    still = [t for t in trades if t["exit_reason"] == OPEN_AT_CUTOFF]
+    closed = [t for t in trades if t["exit_reason"] != OPEN_AT_CUTOFF and t["variant"] != "strategy"]
+    assert still, "the fixture has spreads open on the last tested session"
+    assert all(t["exit_reason"] != "PERIOD_END" for t in trades)
+    o = rep["baseline"]["overall"]
+    n_open = sum(1 for t in still if t["variant"] != "strategy")
+    assert o["trades"] == len(closed) and o["open_at_cutoff"]["positions"] == n_open      # not counted as trades
+    assert o["net_pnl_inr"] == pytest.approx(sum(t["net_pnl"] for t in closed), abs=0.02)  # realised only
+    unreal = sum(t["net_pnl"] for t in still if t["variant"] != "strategy")
+    assert o["open_at_cutoff"]["unrealised_inr"] == pytest.approx(unreal, abs=0.02)
+    assert o["net_incl_open_inr"] == pytest.approx(o["net_pnl_inr"] + unreal, abs=0.05)     # no double counting
+    assert o["max_drawdown_incl_open_inr"] >= 0 and o["open_at_cutoff"]["mark_time"].startswith("2025-09-30")
+    for t in still:
+        assert t["liquidation_costs_inr"] > 0 and ist_date(t["exit_time"]) == date(2025, 9, 30)
+    assert rep["valuation_incomplete"] == {"strategy": 0, "baseline": 0}
+    # without open positions the figures equal the plain statistics
+    from app.backtest import stats
+    from app.options.backtest import OptionTrade
+    s = option_stats([], 1e6, 30)
+    assert s["open_at_cutoff"] == {"positions": 0} and s["net_incl_open_inr"] == s["net_pnl_inr"] == stats([], 1e6, 30)["net_pnl_inr"]
+    # the phase 4 strategies keep closing at the end of the period
+    from app.options.backtest import OptionEngine
+    from app.options import build_option_strategies
+    assert OptionEngine._cutoff_reason(build_option_strategies(settings(), ["credit_spread"])[0]) == "PERIOD_END"

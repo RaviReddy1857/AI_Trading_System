@@ -178,6 +178,7 @@ class StockOptionSelling(CreditSpread):
 
     exit_policy = "stop"                 # backtest comparison: stop | roll_rules | roll_always
     below_base_low = False               # reversal candidate: the sold strike always sits below the base low
+    report_open_at_cutoff = True         # backtests: a position open at the end of the period is reported open
 
     def applies(self, rule: str, ctx: OptionContext) -> bool:
         if ctx.rolling:

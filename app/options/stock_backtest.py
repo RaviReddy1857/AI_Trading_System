@@ -43,7 +43,7 @@ from ..models import utcnow
 from ..quality import IST
 from ..store import Store
 from . import build_option_strategies
-from .backtest import (OptionEngine, baseline_variants, prepare_history, print_report, run_option_backtest)
+from .backtest import (OPEN_AT_CUTOFF, OptionEngine, baseline_variants, option_stats, prepare_history, print_report, run_option_backtest)
 from .campaign import campaigns_from_trades
 from .portfolio import PortfolioGate, universe_groups
 from .option_history import OptionHistory, OptionIntraday, budgeted_fetcher
@@ -110,7 +110,7 @@ def variant(settings: Settings, off: tuple[str, ...] = (), baseline_rules: tuple
 
 
 def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict:
-    s = stats(trades, settings.account.capital_inr, settings.backtest.min_trades)
+    s = option_stats(trades, settings.account.capital_inr, settings.backtest.min_trades)
     blocked = {k.split(":", 1)[1]: v for k, v in skipped.items()
                if k.startswith("NO_SIGNAL:") and k.split(":", 1)[1] in ("DOWNTREND_BLOCK", "UPTREND_BLOCK", "STOCK_LOSS_LIMIT",
                                                                          "INSUFFICIENT_HISTORY", "CREDIT_TOO_SMALL", "MARKET_WEAK",
@@ -121,7 +121,8 @@ def _row(label: str, trades: list, skipped: Counter, settings: Settings) -> dict
             "per_trade_inr": round(s["net_pnl_inr"] / s["trades"], 2) if s["trades"] else None,
             "profit_factor": s["profit_factor"], "max_drawdown_inr": s["max_drawdown_inr"], "low_sample": s["low_sample"],
             "blocked": blocked, "alert_exits": sum(1 for t in trades if t.exit_reason.startswith("ALERT_")),
-            "stops": sum(1 for t in trades if t.exit_reason == "STOP")}
+            "stops": sum(1 for t in trades if t.exit_reason == "STOP"),
+            "open_at_cutoff": s["open_at_cutoff"]["positions"], "net_incl_open_inr": s["net_incl_open_inr"]}
 
 
 def _bucket(trades: list, key) -> dict:
@@ -273,10 +274,12 @@ def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], de
     min_n = settings.backtest.min_trades
 
     def row(policy: str, trades: list, sk: Counter) -> dict:
-        camps = campaigns_from_trades(trades)
+        all_camps = campaigns_from_trades(trades)
+        camps = [c for c in all_camps if c["last_exit"] != OPEN_AT_CUTOFF]         # closed campaigns
+        still = [c for c in all_camps if c["last_exit"] == OPEN_AT_CUTOFF]
         nets = [c["realised_pnl_inr"] for c in camps]
         wins, losses = [x for x in nets if x > 0], [x for x in nets if x <= 0]
-        s = stats(trades, settings.account.capital_inr, min_n)
+        s = option_stats(trades, settings.account.capital_inr, min_n)
         n = len(camps)
         return {"policy": policy, "label": POLICY_LABEL[policy], "campaigns": n, "positions": len(trades),
                 "rolls": sum(c["rolls"] for c in camps), "campaigns_rolled": sum(1 for c in camps if c["rolls"]),
@@ -285,7 +288,12 @@ def policy_comparison(settings: Settings, eng: OptionEngine, syms: list[str], de
                 "avg_win_inr": round(sum(wins) / len(wins), 2) if wins else None,
                 "avg_loss_inr": round(sum(losses) / len(losses), 2) if losses else None,
                 "profit_factor": round(sum(wins) / -sum(losses), 2) if losses and sum(losses) < 0 else None,
-                "net_pnl_inr": s["net_pnl_inr"], "per_campaign_inr": round(s["net_pnl_inr"] / n, 2) if n else None,
+                "net_pnl_inr": round(sum(nets), 2), "per_campaign_inr": round(sum(nets) / n, 2) if n else None,
+                "open_campaigns": len(still),
+                "open_realised_inr": round(sum(t.net_pnl for t in trades if t.exit_reason != OPEN_AT_CUTOFF
+                                               and (t.campaign_id or t.signal_id) in {c["campaign_id"] for c in still}), 2),
+                "open_unrealised_inr": round(sum(t.net_pnl for t in trades if t.exit_reason == OPEN_AT_CUTOFF), 2),
+                "net_incl_open_inr": s["net_incl_open_inr"], "max_drawdown_incl_open_inr": s["max_drawdown_incl_open_inr"],
                 "worst_campaign_inr": min(nets) if nets else None, "max_drawdown_inr": s["max_drawdown_inr"],
                 "costs_inr": s["costs_inr"], "hedge_cost_inr": round(sum(c["hedge_cost_inr"] for c in camps), 2),
                 "rolled_when_recovery_was_not_possible": sum(1 for c in camps if c["rolled_when_recovery_was_not_possible"]),

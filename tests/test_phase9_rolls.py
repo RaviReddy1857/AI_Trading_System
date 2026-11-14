@@ -359,9 +359,9 @@ def test_ACCEPTANCE_report_compares_the_three_exit_policies_per_campaign_on_dail
         for group in ("strategy", "baseline"):
             rows = {r["policy"]: r for r in out[group]}
             assert list(rows) == ["stop", "roll_rules", "roll_always"]
-            assert rows["stop"]["rolls"] == 0 and rows["stop"]["positions"] == rows["stop"]["campaigns"] > 0
+            assert rows["stop"]["rolls"] == 0 and rows["stop"]["positions"] == rows["stop"]["campaigns"] + rows["stop"]["open_campaigns"] > 0
             for r in rows.values():
-                assert r["positions"] == r["campaigns"] + r["rolls"] and r["low_sample"] is True      # under 30 campaigns
+                assert r["positions"] == r["campaigns"] + r["open_campaigns"] + r["rolls"] and r["low_sample"] is True
                 assert r["worst_campaign_inr"] <= r["per_campaign_inr"] and r["hedge_cost_inr"] > 0
                 assert r["avg_win_inr"] is None or r["avg_win_inr"] > 0
                 assert r["campaigns"] + r["data_incomplete_campaigns"] + r["entries_without_synchronized_bar"] >= rows["stop"]["campaigns"]

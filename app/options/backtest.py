@@ -101,6 +101,35 @@ EXIT_CHECK_LABEL = {
                 "after the signal, target and stop checked on synchronized bar closes, every fill at the next "
                 "synchronized bar's open; a campaign with a session lacking such a bar is data-incomplete and left out",
 }
+OPEN_AT_CUTOFF = "OPEN_AT_CUTOFF"
+
+
+def option_stats(trades: list, capital: float, min_trades: int) -> dict:
+    """Backtest statistics with positions still open at the cutoff kept apart (phase 9). Closed trades
+    give the counts, win rate, averages, profit factor and the realised net; open positions are marked
+    at the last close after estimated liquidation costs and enter only the equity figures
+    (net_incl_open_inr, max_drawdown_incl_open_inr). Without open positions it equals stats()."""
+    closed = [t for t in trades if t.exit_reason != OPEN_AT_CUTOFF]
+    still = [t for t in trades if t.exit_reason == OPEN_AT_CUTOFF]
+    s = stats(closed, capital, min_trades)
+    if not still:
+        s.update({"net_incl_open_inr": s["net_pnl_inr"], "max_drawdown_incl_open_inr": s["max_drawdown_inr"],
+                  "open_at_cutoff": {"positions": 0}})
+        return s
+    eq = stats(trades, capital, min_trades)
+    s.update({"net_incl_open_inr": eq["net_pnl_inr"], "max_drawdown_incl_open_inr": eq["max_drawdown_inr"],
+              "open_at_cutoff": {
+                  "positions": len(still),
+                  "unrealised_inr": round(sum(t.net_pnl for t in still), 2),
+                  "estimated_liquidation_costs_inr": round(sum(t.liquidation_costs_inr or 0.0 for t in still), 2),
+                  "mark_time": max(t.exit_time for t in still),
+                  "age_days": sorted((datetime.fromisoformat(t.exit_time) - datetime.fromisoformat(t.entry_time)).days
+                                     for t in still),
+                  "note": "marked at the last tested close after estimated liquidation costs; excluded from the trade "
+                          "count, win rate and profit factor; included in the equity and drawdown figures"}})
+    return s
+
+
 DATA_INCOMPLETE_KEYS = ("DATA_INCOMPLETE_CAMPAIGNS", "DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED",
                         "DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION")
 ELIGIBILITY_NOTE = ("Backtest results exclude the margin and bid/ask eligibility checks: past margins are not known and "
@@ -126,7 +155,7 @@ class OptionTrade:
     entry_net: float              # per share: credit received (+) or premium paid (-), after slippage
     exit_time: str
     exit_net: float               # per share: paid to close (-) or received (+), after slippage
-    exit_reason: str              # TARGET | STOP | TIME | EXPIRY_EXIT | PERIOD_END
+    exit_reason: str              # TARGET | STOP | TIME | EXPIRY_EXIT | PERIOD_END | OPEN_AT_CUTOFF (still open: a mark)
     gross_pnl: float
     costs: dict
     net_pnl: float
@@ -139,6 +168,8 @@ class OptionTrade:
     roll_no: int = 0              # 0 = the original trade, 1 = its first roll, ...
     max_profit_inr: float | None = None
     roll_refused: str = ""        # exit policy with rolls: the rule that refused a roll when this spread was closed
+    # OPEN_AT_CUTOFF only: estimated charges to close the position at the mark (the net P&L already deducts them)
+    liquidation_costs_inr: float | None = None
     exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
 
@@ -500,6 +531,13 @@ class OptionEngine:
                              "entry_price": float(fill), "exit_price": float(out)})
         entry_net = sum((f * (1 if leg.action == "SELL" else -1) for leg, f in zip(pos.legs, pos.fills)), Decimal(0))
         sig = pos.sig
+        liq = None
+        if reason == OPEN_AT_CUTOFF:                 # what closing it at the mark would cost
+            buy_v = sum((Decimal(str(x["exit_price"])) * x["lots"] * x["lot_size"] for x in legs_out if x["action"] == "SELL"),
+                        Decimal(0))
+            sell_v = sum((Decimal(str(x["exit_price"])) * x["lots"] * x["lot_size"] for x in legs_out if x["action"] == "BUY"),
+                         Decimal(0))
+            liq = float(self.costs.options(pos.legs[0].lots, money(buy_v), money(sell_v)).total)
         t_exit = exit_dt or datetime.combine(d, time(9, 15) if at_open else time(15, 30), IST).astimezone(timezone.utc)
         return OptionTrade(
             strategy_id=strategy.id, strategy_version=strategy.version, variant=pos.variant, symbol=sym,
@@ -513,7 +551,8 @@ class OptionEngine:
             iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
             entry_conditions=dict(sig.details.get("entry_conditions") or {}),
             campaign_id=pos.campaign_id or sig.signal_id, roll_no=pos.roll_no,
-            max_profit_inr=sig.details.get("max_profit_inr"), exit_check=exit_check, exit_basis=basis)
+            max_profit_inr=sig.details.get("max_profit_inr"), exit_check=exit_check, exit_basis=basis,
+            liquidation_costs_inr=liq)
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -662,7 +701,7 @@ class OptionEngine:
             return ("trade", self._close(pos, sym, d, mark, False, "EXPIRY_EXIT", strategy, "intraday", basis,
                                          exit_dt=at_close), None)
         if d >= last_allowed:
-            return ("trade", self._close(pos, sym, d, mark, False, "PERIOD_END", strategy, "intraday", basis,
+            return ("trade", self._close(pos, sym, d, mark, False, self._cutoff_reason(strategy), strategy, "intraday", basis,
                                          exit_dt=at_close), None)
         cost = sum(s * c for s, c in zip(signs, mark))
         credit = float(sum((f * s for f, s in zip(pos.fills, signs)), Decimal(0)))
@@ -694,7 +733,10 @@ class OptionEngine:
         """Position at the close of day d. Returns ('trade', OptionTrade) | ('drop',) | ('hold',)."""
         bars = self._leg_bars(sym, pos.legs, d)
         if bars is None:
-            skipped["DROPPED_MISSING_OPTION_BAR"] += 1
+            if d >= last_allowed and getattr(strategy, "report_open_at_cutoff", False):
+                skipped["OPEN_AT_CUTOFF_VALUATION_UNKNOWN"] += 1     # open at the cutoff, no price to mark it
+            else:
+                skipped["DROPPED_MISSING_OPTION_BAR"] += 1
             return ("drop",)
         sig, expiry = pos.sig, pos.legs[0].expiry
         nxt = self.base.next_session(d)
@@ -706,7 +748,7 @@ class OptionEngine:
                                              "rule at the close"))
             signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
             if d >= last_allowed:
-                return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check,
+                return ("trade", self._close(pos, sym, d, closes, False, self._cutoff_reason(strategy), strategy, exit_check,
                                              "rule at the close"))
             value = sum(b.close * s for s, b in zip(signs, bars))
             policy = getattr(strategy, "exit_policy", "stop")
@@ -743,7 +785,7 @@ class OptionEngine:
             if d >= expiry or nxt is None or nxt > expiry:
                 return ("trade", self._close(pos, sym, d, closes, False, "EXPIRY_EXIT", strategy, exit_check, basis))
             if d >= last_allowed:
-                return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy, exit_check, basis))
+                return ("trade", self._close(pos, sym, d, closes, False, self._cutoff_reason(strategy), strategy, exit_check, basis))
             worth = sum(b.close * (1 if leg.action == "BUY" else -1) for leg, b in zip(pos.legs, bars))
             if worth >= sig.target:
                 pos.pending_exit, pos.pending_basis = "TARGET", "daily close"
@@ -762,7 +804,7 @@ class OptionEngine:
         if i - pos.entry_i + 1 >= strategy.params.max_hold_days:
             return ("trade", self._close(pos, sym, d, closes, False, "TIME", strategy))
         if d >= last_allowed:
-            return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy))
+            return ("trade", self._close(pos, sym, d, closes, False, self._cutoff_reason(strategy), strategy))
         return ("hold",)
 
     # ---- the baseline's fixed schedule ----
@@ -794,6 +836,12 @@ class OptionEngine:
     # ---- portfolio gate (phase 9): set by run_portfolio while streams run side by side ----
     _gate = None                         # gate(sym, day, signal, replacing position or None) -> refusing code or None
     _book = None                         # stream key -> the signals open or pending in that stream
+
+    @staticmethod
+    def _cutoff_reason(strategy) -> str:
+        """Phase 9 strategies report a position still open at the end of the tested period as open (a mark);
+        the phase 4 strategies keep closing it there (PERIOD_END)."""
+        return OPEN_AT_CUTOFF if getattr(strategy, "report_open_at_cutoff", False) else "PERIOD_END"
 
     def _roll_gate(self, sym: str, d: date, new: Signal, pos: _Position) -> str | None:
         return self._gate(sym, d, new, pos) if self._gate is not None else None
@@ -1170,13 +1218,13 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             ts.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
         by_mode[mode] = (m_trades, m_base, m_skipped, m_base_skipped, m_log)
     trades, base_trades, skipped, base_skipped, schedule_log = by_mode[exit_checks[0]]
-    overall, base_overall = stats(trades, cap, cfg.min_trades), stats(base_trades, cap, cfg.min_trades)
+    overall, base_overall = option_stats(trades, cap, cfg.min_trades), option_stats(base_trades, cap, cfg.min_trades)
     both_ways = {}
     for mode, (mt, mb, ms, mbs, _) in by_mode.items():
-        so, bo = stats(mt, cap, cfg.min_trades), stats(mb, cap, cfg.min_trades)
+        so, bo = option_stats(mt, cap, cfg.min_trades), option_stats(mb, cap, cfg.min_trades)
         both_ways[mode] = {
             "label": EXIT_CHECK_LABEL[mode], "strategy": so, "baseline": bo,
-            "baseline_by_variant": {k: stats(v, cap, cfg.min_trades) for k, v in _by(mb, lambda t: t.variant).items()},
+            "baseline_by_variant": {k: option_stats(v, cap, cfg.min_trades) for k, v in _by(mb, lambda t: t.variant).items()},
             "strategy_by_exit": {k: len(v) for k, v in _by(mt, lambda t: t.exit_reason).items()},
             "baseline_by_exit": {k: len(v) for k, v in _by(mb, lambda t: t.exit_reason).items()},
             "baseline_by_exit_basis": {k: len(v) for k, v in _by(mb, lambda t: t.exit_basis or "-").items()},
@@ -1192,7 +1240,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         ws = set(w)
         tw = [t for t in trades if datetime.fromisoformat(t.entry_time).astimezone(IST).date() in ws]
         if w:
-            wf.append({"from": w[0].isoformat(), "to": w[-1].isoformat(), "sessions": len(w), **stats(tw, cap, cfg.min_trades)})
+            wf.append({"from": w[0].isoformat(), "to": w[-1].isoformat(), "sessions": len(w), **option_stats(tw, cap, cfg.min_trades)})
     label = eng.prices.label
     rep = {
         "kind": "option", "strategy_id": strategy.id, "strategy_version": strategy.version,
@@ -1204,6 +1252,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "payoff_simulation": label == "model",
         "eligibility_label": ELIGIBILITY_LABEL, "eligibility_note": ELIGIBILITY_NOTE,
         "bypassed_checks": BYPASSED_CHECKS,
+        "valuation_incomplete": {"strategy": skipped.get("OPEN_AT_CUTOFF_VALUATION_UNKNOWN", 0),
+                                 "baseline": base_skipped.get("OPEN_AT_CUTOFF_VALUATION_UNKNOWN", 0)},
         "portfolio_limits": portfolio_stats or None,
         "exit_check": exit_checks[0], "exit_check_label": EXIT_CHECK_LABEL[exit_checks[0]],
         "exit_check_comparison": both_ways,
@@ -1212,8 +1262,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
                    "sessions": len(dev)},
         "capital_inr": cap,
         "overall": overall,
-        "by_underlying": {k: stats(v, cap, cfg.min_trades) for k, v in _by(trades, lambda t: t.symbol).items()},
-        "by_regime": {k: stats(v, cap, cfg.min_trades) for k, v in _by(trades, lambda t: t.regime).items()},
+        "by_underlying": {k: option_stats(v, cap, cfg.min_trades) for k, v in _by(trades, lambda t: t.symbol).items()},
+        "by_regime": {k: option_stats(v, cap, cfg.min_trades) for k, v in _by(trades, lambda t: t.regime).items()},
         "by_exit": {k: len(v) for k, v in _by(trades, lambda t: t.exit_reason).items()},
         "baseline": {
             "description": "the same structure (same strike rule, width, expiry choice, exits, costs and price "
@@ -1227,8 +1277,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
                 "skipped": [r for r in schedule_log if r["result"] != "entered"],
             },
             "overall": base_overall,
-            "by_variant": {k: stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.variant).items()},
-            "by_underlying": {k: stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.symbol).items()},
+            "by_variant": {k: option_stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.variant).items()},
+            "by_underlying": {k: option_stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.symbol).items()},
             "by_exit": {k: len(v) for k, v in _by(base_trades, lambda t: t.exit_reason).items()},
             "skipped_signals": {k: v for k, v in base_skipped.items() if k not in DATA_EXCLUSION_KEYS},
             "data_exclusions": {k: base_skipped.get(k, 0) for k in DATA_EXCLUSION_KEYS},
