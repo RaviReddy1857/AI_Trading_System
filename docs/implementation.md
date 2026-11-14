@@ -449,19 +449,49 @@ enabled (true), recommended_capital_inr (1000000), max_open_stock_spreads, max_l
 24. **Effect of every rule and alert in the backtest**: the strategy with one rule removed, the baseline with one rule or
     one alert-exit added, and the baseline's trades split by what was known at entry.
 
-### Final specification (2026-11-14)
+### Final specification (2026-11-14) and its parameter table
 
 The consolidated Phase 9 specification of 2026-11-14 replaces the build steps above where they differ. Its state against
-the code, the section 2 parameter table and the milestones M1-M5 are tracked in docs/STATUS.md ("Phase 9 final
-specification" and the sections after it). Added to section 2 by the user on 2026-11-14:
+the code and the milestones M1-M5 are tracked in docs/STATUS.md ("Phase 9 final specification" and after).
 
-| Name | Value | Unit / comparison | Missing data |
+**Parameter table** (config.yaml `stock_option_selling.`, validated in `app/config.py`; starting defaults, not tuned; a
+change needs the user's approval). Sessions are NSE trading sessions; days are calendar days. "Missing" says what happens
+when the input is not known: it is never treated as a pass and never as zero.
+
+| Name (config key) | Value | Unit, lookback, comparison | Missing data |
 |---|---|---|---|
-| bull call candidate entry window | 20-35 | calendar days to expiry, inclusive (`reversal.bull_call.entry_min_dte`, `entry_max_dte`) | no expiry in the window: no candidate |
-| event_coverage_max_age_days | 7 | days since `retrieved_at` of the stock's COVERAGE row in events.csv; `covered_through` must be on or after expiry | no row, a stale row or short coverage: EVENT_COVERAGE_UNKNOWN, no actionable signal |
-| market_breadth_min_pct / breadth average | 40 / 50 sessions | share of watchlist stocks closing above their 50-session average, compared with the minimum; NIFTY close compared with its 200-day average (`market_block`) | under 80% of stocks usable, or under 200 index bars: MARKET_UNKNOWN, no put signal |
-| Phase 9 backtest capital | 10,00,000 | rupees (`backtest.capital_inr`); every limit is a % of it | - |
-| min_credit_to_max_loss | not applied | to be set once by the user from the stored distribution | - |
+| `sma_short`, `sma_mid`, `sma_long` | 20, 50, 200 | sessions; simple averages of closes including the decision day | fewer bars: INSUFFICIENT_HISTORY (trend block), no trend (NO_TREND), MARKET_UNKNOWN (market block) |
+| `trend_block.new_low_lookback`, `low_52w_sessions` | 20, 252 | DOWNTREND_BLOCK when the lowest close of the last 252 sessions was made in the last 20 (UPTREND_BLOCK: highest close) | fewer than 252 bars: INSUFFICIENT_HISTORY |
+| `trend_block.rel_strength_lookback`, `rel_strength_max_lag_pct` | 63, 5 | sessions; stock return minus NIFTY return, points; below -5 blocks puts, above +5 blocks calls | no NIFTY close on either day: INSUFFICIENT_HISTORY |
+| `market_block.market_breadth_min_pct` | 40 | % of watchlist stocks closing above their sma_mid; below 40 or NIFTY below its sma_long gives MARKET_WEAK (puts only) | under `min_coverage_pct` (80%) of stocks usable, or under 200 NIFTY bars: MARKET_UNKNOWN |
+| `campaign_limit.stock_loss_window_days`, `stock_loss_max_stops`, `stock_loss_max_pct_capital`, `stock_cooloff_days` | 90, 2, 1.5, 30 | days; stops counted and net loss summed over closed trades in the window; % of capital; cooling-off days from the triggering exit | live: positions not recorded yet, PORTFOLIO_UNKNOWN |
+| `max_risk_per_position_pct` | 2.5 | % of capital; cost-inclusive max loss of the whole position; whole lots, rounded down | 0 lots: ZERO_SIZE |
+| `portfolio.max_open_spreads`, `max_total_risk_pct` | 6, 10 | positions (each counted, the proposed one included); % of capital | positions unknown: PORTFOLIO_UNKNOWN |
+| `portfolio.correlation_window`, `correlation_threshold`, `correlation_min_overlap` | 60, 0.7, 50 | sessions of close-to-close returns up to the decision day; linked when correlation >= 0.7 or same sector; groups are connected components | sector unknown, or under 50 common returns between different sectors: CORRELATION_UNKNOWN |
+| `portfolio.group_max_positions`, `group_max_risk_pct` | 2, 5 | positions per group, proposed one included; % of capital | as above |
+| `min_credit_to_max_loss` | 0.10 | net credit after hedge, charges and slippage / cost-inclusive max loss, rupees; below gives CREDIT_TOO_SMALL. Set by the user from the pre-outcome distribution | a price unknown: no setup |
+| `short_delta_max` | 0.20 | absolute delta of the sold strike from its own price (Black-Scholes) | delta not computable: that strike is not used |
+| `hedge_strikes_out` | 2 (2-3) | priced strikes further out than the sold one | no priced strike: UNHEDGED_SHORT, no signal |
+| `entry_dte_min`, `entry_dte_max` | 20, 35 | calendar days to the monthly expiry, inclusive | no expiry in the window: NO_EXPIRY |
+| `profit_target_pct_of_credit` | 50 | % of the entry credit kept: exit when buy-back value <= 50% of the credit | leg price unknown: exit guidance says so |
+| `stop_spread_value_multiple` | 2.0 | exit when the buy-back value >= 2 x the entry credit | as above |
+| `time_exit_dte` | 10 | calendar days before expiry: exit at the next open | - |
+| `forced_exit_trading_days_before_expiry` | 5 | trading days before expiry: no position inside this window | - |
+| `roll.max_rolls` | 1 | completed rolls per campaign | - |
+| `roll.min_roll_net_credit_pct_of_width` | 10 | (new credit - debit to close the old spread - all four legs' charges) / (replacement width x lot x lots), must be above 10% | a leg of the open spread unpriced: ROLL_PRICE_UNKNOWN, exit |
+| `roll.stuck_time_value_pct` | 20 | sold option in the money with time value under 20% of its price, or inside the forced-exit window: "exit; rolling earns little" | price unknown: not claimed stuck |
+| `options.iv_rank_lookback_days` (iv_rank_lookback) | 252 | sessions of the stock's at-the-money IV (point in time) | under 200 days: IV_RANK_UNKNOWN |
+| expected_move (`stock_profile.expected_move`) | formula | spot x IV x sqrt(DTE / 365), IV annualized; a one-standard-deviation model estimate, not a guaranteed range | IV or DTE unknown: shown as unknown |
+| `swing_pivot_bars`, `pivot_lookback_sessions` | 5, 252 | pivot low/high: below/above the 5 sessions before, at or below/above the 5 after; usable only after the 5 later sessions completed; support = nearest pivot low below the close, resistance = nearest pivot high above it, among the last 252 sessions (pivot_lookback_sessions is a new definition, 2026-11-15) | none: NO_CONFIRMED_LEVEL, no signal |
+| `min_open_interest_lots`, `max_bid_ask_pct_of_mid` | 200, 5 | open interest in lots on each traded strike; live bid-ask width, % of mid | OI unknown live: ILLIQUID; no bid/ask: DATA_STALE (not actionable) |
+| `bias.streak_days` (fii_streak_sessions) | 3 | straight sessions of FII net selling (BEARISH) in data/fii_dii.csv | figures missing: bias unknown, scenario "no data" |
+| `profile.vix_spike_rise_pct`, `vix_spike_sessions`, `vix_spike_percentile`, `vix_percentile_lookback` (vix_spike) | 20, 5, 80, 252 | India VIX up >= 20% over 5 sessions, or closing above the 80th percentile of the previous 252 closes | a part without enough history counts only if the other part says yes; otherwise unknown |
+| `reversal.washed_out_drawdown_pct`, `min_sessions_below_long` | 25, 63 | close >= 25% below the 52-week high (highest high of 252 sessions), with 63 sessions in a row below sma_long | under 252 bars: not assessed |
+| `reversal.base_no_new_low_sessions`, `range_sessions`, `range_compare_sessions`, `range_shrink_ratio` (base_range_contraction) | 15, 10, 20, 0.8 | the 52-week low at least 15 sessions old, and the 10-session ATR below 0.8 x the 20-session ATR | as above |
+| `reversal.bull_call.entry_min_dte`, `entry_max_dte` | 20, 35 | calendar days (user, 2026-11-14) | no expiry: no candidate |
+| `event_coverage_max_age_days` | 7 | days since the COVERAGE row's retrieved_at; covered_through must be on or after expiry | EVENT_COVERAGE_UNKNOWN: no actionable signal |
+| `backtest.capital_inr` | 10,00,000 | rupees: the capital of every Phase 9 backtest and research page | - |
+| hist_fall_percentile, iv_falling, score weights | - | M2 (score factors), not built yet | - |
 
 ### Acceptance checks
 
