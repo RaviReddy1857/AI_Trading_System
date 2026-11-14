@@ -44,6 +44,57 @@ class InvalidSignal(ValueError):
     pass
 
 
+UNHEDGED_SHORT = "UNHEDGED_SHORT"
+
+
+class UnhedgedShort(ValueError):
+    """A sold option without a bought option of the same underlying, right and expiry further out."""
+
+
+def _leg_value(leg, name, default=None):
+    v = leg.get(name) if isinstance(leg, dict) else getattr(leg, name, None)
+    return default if v is None else v
+
+
+def unhedged_short_legs(legs, expiry=None, lots=None, lot_size=None) -> list:
+    """The sold legs that are NOT covered. A sold option is covered only by a bought option of the same
+    right and expiry, further out of the money (puts: lower strike; calls: higher), with at least as
+    many shares; each bought option covers one sold option. All legs of one signal or trade belong to
+    one underlying. Legs may be OptionLeg objects or dicts (stored backtest trades); `expiry`, `lots`
+    and `lot_size` are the trade-level values used when a leg dict does not carry its own.
+    A leg whose action, right, strike or size cannot be read counts as uncovered: unknown is never
+    treated as hedged."""
+    def read(leg):
+        try:
+            n = int(_leg_value(leg, "lots", lots)) * int(_leg_value(leg, "lot_size", lot_size))
+            return (str(_leg_value(leg, "action")), str(_leg_value(leg, "right")), float(_leg_value(leg, "strike")),
+                    str(_leg_value(leg, "expiry", expiry)), n)
+        except (TypeError, ValueError):
+            return None
+
+    rows = [(leg, read(leg)) for leg in legs or ()]
+    bought = [list(r) for _, r in rows if r is not None and r[0] == "BUY"]
+    out = []
+    for leg, r in rows:
+        if r is None:
+            out.append(leg)
+            continue
+        action, right, strike, exp, need = r
+        if action == "BUY":
+            continue
+        if action != "SELL" or right not in ("CE", "PE") or exp == "None" or need < 1:
+            out.append(leg)
+            continue
+        for b in bought:
+            further = b[2] < strike if right == "PE" else b[2] > strike
+            if b[1] == right and b[3] == exp and further and b[4] >= need:
+                b[4] -= need
+                break
+        else:
+            out.append(leg)
+    return out
+
+
 @dataclass(frozen=True)
 class Signal:
     """A trade idea (architecture.md section 6). Prices are computed by code, never by an LLM.
@@ -137,4 +188,7 @@ def signal_problems(s: "Signal") -> list[str]:
             out.append("an option signal must list its legs")
         if not isinstance(s.details, dict):
             out.append("an option signal must carry its computed figures (details)")
+        if s.legs and unhedged_short_legs(s.legs):
+            out.append(f"{UNHEDGED_SHORT}: a sold option has no bought option of the same underlying, right "
+                       f"and expiry further out of the money")
     return out

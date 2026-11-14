@@ -25,6 +25,7 @@ Run:  python -m app.options.option_history            # what is stored
 from __future__ import annotations
 
 import argparse
+import bisect
 import calendar as _cal
 import logging
 import math
@@ -414,18 +415,60 @@ class ModelPrices:
 
 
 # ---------------- implied-volatility history from stored bars ----------------
+IV_STRIKE_DAYS_BEFORE_EXPIRY = (35, 15)   # an at-the-money call is struck this many days before each monthly expiry
+
+
+def point_in_time_atm_contracts(contract: Callable, underlying: str, expiries: list[date],
+                                closes: dict[date, float], step: float | None) -> tuple[dict, dict]:
+    """The at-the-money calls that make up a stock's implied-volatility history, chosen with
+    information available at the time: for each monthly expiry, the call struck at the underlying's
+    close about 35 and about 15 days before expiry. Returns (contracts, known_from):
+    contracts[(expiry, strike, 'CE')] = its stored bars, known_from[key] = the date whose close chose
+    that strike. A contract may be used only from that date on (atm_iv_series enforces it), so the
+    value for a day never depends on a later close. `contract(underlying, expiry, strike, right)`
+    returns the stored bars, {} if none exist, None if unknown."""
+    dates = sorted(closes)
+    contracts: dict[tuple, dict] = {}
+    known_from: dict[tuple, date] = {}
+    for e in expiries:
+        for back in IV_STRIKE_DAYS_BEFORE_EXPIRY:
+            want = e - timedelta(days=back)
+            i = bisect.bisect_right(dates, want) - 1
+            if i < 0 or (want - dates[i]).days > 7:
+                continue
+            struck_on = dates[i]
+            for k in atm_candidates(closes[struck_on], step):
+                c = contract(underlying, e, k, "CE")
+                if c is None:
+                    break
+                if c:
+                    key = (e, float(k), "CE")
+                    contracts[key] = c
+                    known_from[key] = min(struck_on, known_from.get(key, struck_on))
+                    break
+    return contracts, known_from
+
+
 def atm_iv_series(contracts: dict[tuple, dict[date, OptionBar]], closes: dict[date, float], rate: float,
                   dividend: float = 0.0, max_moneyness_pct: float = 5.0, min_dte: int = 5,
-                  max_dte: int = 70) -> dict[date, float]:
-    """Implied volatility (%) per day from stored option closes: on each day, the stored contract
-    whose strike is nearest the underlying's close (within max_moneyness_pct, with min_dte..max_dte
-    calendar days left) is inverted with Black-Scholes. Days with no such contract are absent."""
+                  max_dte: int = 70, known_from: dict[tuple, date] | None = None) -> dict[date, float]:
+    """Implied volatility (%) per day from stored option closes: on each day, the contract whose
+    strike is nearest the underlying's close (within max_moneyness_pct, with min_dte..max_dte
+    calendar days left) is inverted with Black-Scholes. Days with no such contract are absent.
+    With `known_from`, a contract is used only on or after its date there (the day its strike was
+    chosen) and contracts without an entry are not used at all: the point-in-time rule."""
     best: dict[date, tuple[float, float]] = {}
-    for (expiry, strike, right), bars in contracts.items():
+    for key, bars in contracts.items():
+        expiry, strike, right = key
+        first = None
+        if known_from is not None:
+            first = known_from.get(key)
+            if first is None:
+                continue
         for d, b in bars.items():
             s = closes.get(d)
             dte = (expiry - d).days
-            if s is None or not (min_dte <= dte <= max_dte):
+            if s is None or not (min_dte <= dte <= max_dte) or (first is not None and d < first):
                 continue
             dist = abs(strike / s - 1) * 100
             if dist > max_moneyness_pct or (d in best and best[d][0] <= dist):
@@ -456,23 +499,19 @@ def atm_candidates(spot: float, step: float | None, n: int = 3) -> list[float]:
 
 
 def download_iv_history(hist: OptionHistory, underlying: str, expiries: list[date],
-                        close_on: Callable[[date], float | None], step: float | None) -> int:
-    """Store at-the-money calls for each given monthly expiry (struck about 35 and about 15 days
-    before expiry), so atm_iv_series has a contract near the money on most days. Returns contracts with data."""
-    n = 0
-    for e in expiries:
-        for back in (35, 15):
-            spot = close_on(e - timedelta(days=back))
-            if spot is None:
-                continue
-            for k in atm_candidates(spot, step):
-                bars = hist.contract(underlying, e, k, "CE")
-                if bars is None:
-                    return n
-                if bars:
-                    n += 1
-                    break
-    return n
+                        closes: dict[date, float], step: float | None) -> int:
+    """Store the at-the-money calls of point_in_time_atm_contracts for the given monthly expiries
+    (the same selection the IV history reads). Returns contracts with data."""
+    contracts, _ = point_in_time_atm_contracts(hist.contract, underlying, expiries, closes, step)
+    return len(contracts)
+
+
+def stock_iv_series(hist, underlying: str, expiries: list[date], closes: dict[date, float], step: float | None,
+                    rate: float, dividend: float = 0.0) -> dict[date, float]:
+    """A stock's at-the-money implied volatility (%) by date, point in time: the value for a day uses
+    only that day's prices and contracts whose strike was chosen on or before that day."""
+    contracts, known_from = point_in_time_atm_contracts(hist.contract, underlying, expiries, closes, step)
+    return atm_iv_series(contracts, closes, rate, dividend, known_from=known_from)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -502,15 +541,8 @@ def main(argv: list[str] | None = None) -> int:
         for sym in (s.upper() for s in args.iv_history):
             bars = store.history_bars("bars_1d", sym, "breeze")
             closes = {b.start.astimezone(IST).date(): b.close for b in bars}
-            dates = sorted(closes)
-
-            def close_on(d: date, closes=closes, dates=dates):
-                import bisect
-                i = bisect.bisect_right(dates, d) - 1
-                return closes[dates[i]] if i >= 0 and (d - dates[i]).days <= 7 else None
-
             cfg = settings.option_underlying(sym)
-            n = download_iv_history(hist, sym, monthly, close_on, cfg.backtest_strike_step if cfg else None)
+            n = download_iv_history(hist, sym, monthly, closes, cfg.backtest_strike_step if cfg else None)
             print(f"{sym}: {n} at-the-money contracts with data")
         print(hist.download_stats())
     print("Stored option history (source breeze):")

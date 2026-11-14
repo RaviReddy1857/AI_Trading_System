@@ -24,7 +24,7 @@ from .chain import stored_quotes, wanted_specs
 from .greeks import days_to_expiry, iv_and_delta, iv_rank, years_to_expiry
 from .instruments import InstrumentBook
 from .margin import MarginBook
-from .option_history import OptionHistory, atm_iv_series
+from .option_history import OptionHistory, stock_iv_series
 
 
 def put_call_ratio(quotes: list[OptionQuote]) -> float | None:
@@ -107,8 +107,10 @@ class OptionDesk:
         else:
             closes = {bar_date(b): b.close for b in self.store.history_bars("bars_1d", sym, self.source, limit=400)}
             cfg = self.s.option_underlying(sym)
-            series = atm_iv_series(OptionHistory(self.store, self.source).stored_contracts(sym), closes,
-                                   o.risk_free_rate_pct / 100, (cfg.dividend_yield_pct if cfg else 0) / 100)
+            hist_src = OptionHistory(self.store, self.source)
+            monthly = [e for e, k in hist_src.expiries(self.s.regime.index_symbol) if k == "monthly"]
+            series = stock_iv_series(hist_src, sym, monthly, closes, cfg.backtest_strike_step if cfg else None,
+                                     o.risk_free_rate_pct / 100, (cfg.dividend_yield_pct if cfg else 0) / 100)
             hist = [v for d, v in series.items() if d < today][-o.iv_rank_lookback_days:]
             now_value = current_atm_iv
             basis = (f"at-the-money implied volatility against {len(hist)} stored days "

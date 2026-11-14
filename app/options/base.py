@@ -138,6 +138,12 @@ class OptionContext:
     baseline_right: str | None = None  # credit spread baseline: which side to sell (PE | CE)
     events: tuple = field(default_factory=tuple)
 
+    def __post_init__(self):
+        # Margin and bid/ask are required for every live signal. Only a backtest context (historical:
+        # traded prices, past margins unknown) may switch the margin rule off.
+        if not self.historical and not self.require_margin:
+            raise ValueError("a live option context must require margin (require_margin=False is for backtests only)")
+
 
 class OptionStrategy(Strategy):
     """An option strategy uses the phase 3 interface (id, version from its thresholds, status,

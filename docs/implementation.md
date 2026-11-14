@@ -151,13 +151,13 @@ Data rules added 2026-11-13: option backtests use Breeze's historical option pri
 6. Every option signal shows premium, lot size, total cost, max loss in rupees and as % of capital, margin blocked, and breakevens.
 7. Add app/options/analytics.py: implied volatility rank against the past year, put-call ratio, change in open interest, and the highest-OI call and put strikes as resistance and support. Show them on an 'Options view' page. Use them in strategy rules: buy options only when IV rank is low or moderate, sell spreads only when IV rank is high, and place sold strikes beyond the highest-OI strike.
 8. Implied volatility and delta are computed by code (Black-Scholes on the option mid price, risk-free rate and dividend assumptions in config.yaml), never estimated by an LLM. Phase 9 uses the same functions.
-9. **No-filter baseline for every option strategy backtest.** Next to each strategy's result, run the same structure (same strike-selection rule, width, expiry choice and exits) sold or bought on a fixed schedule with no entry rules: every month for monthly strategies, every week for weekly ones, on a fixed day. Report both side by side with the same costs and the same price source. A strategy that does not beat its baseline after costs is reported as "no edge vs baseline".
+9. **No-filter baseline for every option strategy backtest.** Next to each strategy's result, run the same structure (same strike-selection rule, width, expiry choice and exits) sold or bought on a fixed schedule with no entry rules: every month for monthly strategies, every week for weekly ones, on a fixed day. Report both side by side with the same costs and the same price source. The baseline makes one attempt per expiry (or month) on a date fixed by the calendar; an attempt that cannot be made or filled is recorded as skipped and never retried. A strategy that does not beat its baseline after costs is reported as "no edge vs baseline".
 10. Backtests that use stock or index daily history start no earlier than `backtest.test_start` (2019-01-22): Breeze history before that is treated as unreliable.
 
 ### Acceptance checks
 
-- No signal if bid/ask, lot size or margin is unknown
-- A single short leg without its hedge is rejected
+- No live signal if bid/ask, lot size or margin is unknown. Backtests on stored option history cannot check margin or bid/ask (past margins are unknown; history has traded prices only): they still need the lot size, and every report is labelled "excludes margin and bid/ask eligibility checks"
+- A single short leg without its hedge is rejected: such a signal cannot be constructed, the backtest does not enter it and `Store.save_backtest()` does not save it
 - Stock option selling returns NO_TRADE in this phase and that is tested
 - Option backtests are labelled 'payoff simulation' unless real historical option quotes are stored, and each backtest trade records whether its prices came from stored option history or a model
 - If Breeze historical option prices exist, a test shows the backtest uses them (a fixture option bar changes the result)

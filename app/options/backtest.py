@@ -21,14 +21,23 @@ Rules (the phase 3 engine's rules, applied to options):
 - Costs: option brokerage per lot per executed leg, STT, exchange, SEBI, stamp duty and GST from
   config.yaml (app/costs.py), plus options slippage per side.
 - Every trade is ONE lot at the lot size in today's instrument list (past lot sizes are not in the
-  list); sizing against capital is phase 5. One open position per underlying per stream, and one
-  entry per expiry for spreads.
+  list); sizing against capital is phase 5. The strategy holds one open position per underlying and
+  enters once per expiry for spreads.
+- A signal whose sold option has no bought hedge is never entered (UNHEDGED_SHORT), whatever built it.
 - Sessions before backtest.test_start (2019-01-22) are never tested; the holdout is not touched.
 
 No-filter baseline: the same strategy code with its entry rules off (no regime, IV-rank, credit or
-trigger rule), entered on a fixed schedule: the first session inside the entry window of every expiry
-(spreads and condors), or the first session of every month (option buying). Same strike rule, width,
-expiry choice, exits, costs and price source. A credit spread has two baselines (bull put, bear call).
+trigger rule), entered on a FIXED SCHEDULE known in advance: for spreads and condors, one attempt per
+expiry on the first market session on which that expiry is inside the entry window; for option buying,
+one attempt on the first market session of every month. There is exactly one attempt: if the scheduled
+day has no valid strikes or prices, or the entry cannot be filled at the next session's open, that
+expiry (or month) is recorded as skipped and never retried on a later day. Baseline positions of
+different expiries may overlap (each is its own one-lot trade). Same strike rule, width, expiry choice,
+exits, costs and price source. A credit spread has two baselines (bull put, bear call).
+
+Not checked in backtests (history cannot know them): the margin entry and the bid/ask eligibility
+rules (a bid and an ask on every traded strike, bid-ask width). Every report is therefore labelled
+"excludes margin and bid/ask eligibility checks"; both stay required for live signals.
 
 Run:  python -m app.options.backtest [--strategy credit_spread ...] [--underlyings NIFTY]
                                      [--source breeze|sim] [--download]
@@ -41,7 +50,7 @@ import json
 import logging
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
@@ -56,9 +65,10 @@ from ..strategies import MarketContext, build_strategies
 from . import build_option_strategies
 from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_costs
 from .greeks import iv_rank
+from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
-from .option_history import (BreezeOptionFetcher, ModelPrices, OptionHistory, atm_candidates, atm_iv_series,
-                             discover_expiries, simulated_expiries)
+from .option_history import (BreezeOptionFetcher, ModelPrices, OptionHistory, atm_candidates, discover_expiries,
+                             simulated_expiries, stock_iv_series)
 
 log = logging.getLogger("option_backtest")
 
@@ -68,6 +78,10 @@ PRICE_SOURCE_LABEL = {
 }
 DATA_EXCLUSION_KEYS = ("DROPPED_MISSING_OPTION_BAR", "DROPPED_MISSING_DAILY_BAR_DURING_TRADE",
                        "DROPPED_DATA_BREAK_DURING_TRADE", "NO_OPTION_BAR_AT_ENTRY")
+ELIGIBILITY_LABEL = "excludes margin and bid/ask eligibility checks"
+ELIGIBILITY_NOTE = ("Backtest results exclude the margin and bid/ask eligibility checks: past margins are not known and "
+                    "option history has traded prices only (no bid/ask). A live signal still needs a current margin "
+                    "entry and a bid and an ask within the width limit on every traded strike.")
 
 
 @dataclass
@@ -174,32 +188,19 @@ class OptionEngine:
     def iv_series(self, sym: str) -> tuple[list[date], list[float]]:
         """Implied-volatility measure by date: India VIX for an index; for a stock, the implied
         volatility of the stored at-the-money calls struck about 35 and 15 days before each monthly
-        expiry (a fixed set, so the series does not depend on what else is stored)."""
+        expiry. Point in time: a call is used only from the day its strike was chosen, so the value
+        for a day never depends on a later close (option_history.stock_iv_series)."""
         if sym not in self._iv:
             if self.kinds.get(sym) == "index":
                 series = self._ref_iv
             elif self.prices.label == "model":
                 series = self._ref_iv
             else:
-                bars = self.base.daily(sym)
-                closes = {bar_date(b): b.close for b in bars}
-                dates = sorted(closes)
+                closes = {bar_date(b): b.close for b in self.base.daily(sym)}
                 cfg = self.s.option_underlying(sym)
-                step = cfg.backtest_strike_step if cfg else None
-                wanted = {}
-                for e, _ in self.expiries(sym):
-                    for back in (35, 15):
-                        i = bisect.bisect_right(dates, e - timedelta(days=back)) - 1
-                        if i < 0 or (e - timedelta(days=back) - dates[i]).days > 7:
-                            continue
-                        for k in atm_candidates(closes[dates[i]], step):
-                            c = self.prices.contract(sym, e, k, "CE")
-                            if c is None:
-                                break
-                            if c:
-                                wanted[(e, k, "CE")] = c
-                                break
-                series = atm_iv_series(wanted, closes, self.rate, (cfg.dividend_yield_pct if cfg else 0) / 100.0)
+                series = stock_iv_series(self.prices, sym, [e for e, _ in self.expiries(sym)], closes,
+                                         cfg.backtest_strike_step if cfg else None, self.rate,
+                                         (cfg.dividend_yield_pct if cfg else 0) / 100.0)
             ds = sorted(series)
             self._iv[sym] = (ds, [series[d] for d in ds])
         return self._iv[sym]
@@ -247,6 +248,9 @@ class OptionEngine:
         return out
 
     def _enter(self, sig: Signal, sym: str, d: date, i: int, variant: str, skipped: Counter) -> _Position | None:
+        if check_hedged(sig.legs or ()):
+            skipped[UNHEDGED_SHORT] += 1          # never entered, whatever produced the signal
+            return None
         if daily_start(d) >= sig.valid_until:
             skipped["NO_NEXT_BAR"] += 1
             return None
@@ -292,6 +296,7 @@ class OptionEngine:
             gross += sell_v - buy_v
             add_costs(total, self.costs.options(leg.lots, buy_v, sell_v))
             legs_out.append({"action": leg.action, "right": leg.right, "strike": leg.strike,
+                             "expiry": leg.expiry.isoformat(), "lots": leg.lots, "lot_size": leg.lot_size,
                              "entry_price": float(fill), "exit_price": float(out)})
         entry_net = sum((f * (1 if leg.action == "SELL" else -1) for leg, f in zip(pos.legs, pos.fills)), Decimal(0))
         sig = pos.sig
@@ -350,22 +355,58 @@ class OptionEngine:
             return ("trade", self._close(pos, sym, d, closes, False, "PERIOD_END", strategy))
         return ("hold",)
 
+    # ---- the baseline's fixed schedule ----
+    def baseline_schedule(self, strategy: OptionStrategy, sym: str) -> dict[date, list]:
+        """scheduled session -> what is attempted on it, fixed in advance from the calendar alone.
+        Spreads and condors: each expiry of an allowed kind, on the first market session on which its
+        days to expiry are inside the entry window. Option buying: None (the nearest valid expiry) on
+        the first market session of each month."""
+        dates = self.base.session_dates()
+        out: dict[date, list] = defaultdict(list)
+        if strategy.id == "long_option":
+            seen: set[tuple[int, int]] = set()
+            for d in dates:
+                if (d.year, d.month) not in seen:
+                    seen.add((d.year, d.month))
+                    out[d].append(None)
+            return dict(out)
+        p = strategy.params
+        kinds = getattr(strategy, "expiry_kinds", ("monthly",))
+        for e, kind in self.expiries(sym):
+            if kind not in kinds:
+                continue
+            i = bisect.bisect_left(dates, e - timedelta(days=p.entry_max_dte))
+            if i < len(dates) and (e - dates[i]).days >= p.entry_min_dte:
+                out[dates[i]].append((e, kind))
+        return dict(out)
+
     # ---- one stream: one strategy (or one of its baselines) on one underlying ----
     def run_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
-                   skipped: Counter) -> list[OptionTrade]:
+                   skipped: Counter, schedule_log: list | None = None) -> list[OptionTrade]:
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
         allowed = set(sessions)
         last_allowed = max(sessions) if sessions else None
         brk = set(self.base.breaks(sym)) if kind == "stock" else set()
         is_long = strategy.id == "long_option"
-        trig = self.trigger_strategy() if is_long and variant == "strategy" else None
+        baseline = variant != "strategy"
+        trig = self.trigger_strategy() if is_long and not baseline else None
+        schedule = self.baseline_schedule(strategy, sym) if baseline else {}
+        attempted: set[date] = set()
+        log_rows = schedule_log if schedule_log is not None else []
         trades: list[OptionTrade] = []
-        pos: _Position | None = None
-        pending: Signal | None = None
+        positions: list[_Position] = []
+        pending: list[tuple[Signal, dict | None]] = []      # (signal, its schedule row for a baseline attempt)
         used_expiries: set[date] = set()
-        used_months: set[tuple[int, int]] = set()
         start = 0
+
+        def scheduled(d: date, item) -> dict:
+            row = {"underlying": sym, "variant": variant, "scheduled_day": d.isoformat(),
+                   "expiry": item[0].isoformat() if item else None, "month": d.strftime("%Y-%m"),
+                   "result": None, "reason": None}
+            log_rows.append(row)
+            return row
+
         for i, bar in enumerate(bars):
             d = bar_date(bar)
             if last_allowed is None or d > last_allowed:
@@ -373,38 +414,76 @@ class OptionEngine:
             gap = i > 0 and self.base.sessions_between(bar_date(bars[i - 1]), d) > 0
             if i in brk:
                 start = i
-                if pos is not None:
-                    skipped["DROPPED_DATA_BREAK_DURING_TRADE"] += 1
-                    pos = None
-                pending = None
-            if pos is not None and gap:
-                skipped["DROPPED_MISSING_DAILY_BAR_DURING_TRADE"] += 1
-                pos = None
-            if pending is not None:
-                sig, pending = pending, None
-                if gap:
-                    skipped["NEXT_BAR_NOT_NEXT_SESSION"] += 1
-                else:
-                    pos = self._enter(sig, sym, d, i, variant, skipped)
-            elif pos is not None and pos.pending_exit:
+                skipped["DROPPED_DATA_BREAK_DURING_TRADE"] += len(positions)
+                positions = []
+                for _, row in pending:
+                    if row is not None:
+                        row.update(result="skipped", reason="DATA_BREAK_AT_ENTRY")
+                pending = []
+            if positions and gap:
+                skipped["DROPPED_MISSING_DAILY_BAR_DURING_TRADE"] += len(positions)
+                positions = []
+            # ---- exits decided at the previous close, filled at this open ----
+            keep: list[_Position] = []
+            for pos in positions:
+                if not pos.pending_exit:
+                    keep.append(pos)
+                    continue
                 legs_bars = self._leg_bars(sym, pos.legs, d)
                 if legs_bars is None:
                     skipped["DROPPED_MISSING_OPTION_BAR"] += 1
                 else:
                     trades.append(self._close(pos, sym, d, [b.open for b in legs_bars], True, pos.pending_exit, strategy))
+            positions = keep
+            # ---- entries from the previous close's signals, at this open ----
+            for sig, row in pending:
+                before = Counter(skipped)
                 pos = None
-            if pos is not None:
+                if gap:
+                    skipped["NEXT_BAR_NOT_NEXT_SESSION"] += 1
+                else:
+                    pos = self._enter(sig, sym, d, i, variant, skipped)
+                if pos is not None:
+                    positions.append(pos)
+                if row is not None:
+                    why = sorted((skipped - before).keys())
+                    row.update(result="entered" if pos is not None else "skipped",
+                               reason=None if pos is not None else (why[0] if why else "NOT_ENTERED"))
+            pending = []
+            # ---- every open position at this close ----
+            keep = []
+            for pos in positions:
                 r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped)
                 if r[0] == "trade":
                     trades.append(r[1])
-                    pos = None
-                elif r[0] == "drop":
-                    pos = None
-            if pos is not None or d not in allowed or d >= last_allowed:
+                elif r[0] == "hold":
+                    keep.append(pos)
+            positions = keep
+            if d not in allowed or d >= last_allowed:
                 continue
-            # ---- a new signal from the close of day d ----
+            # ---- baseline: the fixed schedule, one attempt each, never retried ----
+            if baseline:
+                for item in schedule.get(d, ()):
+                    attempted.add(d)
+                    row = scheduled(d, item)
+                    ctx = self.context(strategy, sym, d, bar.close, variant, None)
+                    if item is not None:
+                        ctx = replace(ctx, expiries=tuple(x for x in ctx.expiries if x.expiry == item[0])
+                                      or (ExpiryInfo(item[0], item[1], self.lot_size(sym)),))
+                    out = strategy.evaluate(ctx)
+                    if not out:
+                        reasons = [r.split(":")[0] for r in strategy.last_no_trade] or ["NO_SIGNAL"]
+                        for reason in reasons:
+                            skipped["NO_SIGNAL:" + reason] += 1
+                        row.update(result="skipped", reason=reasons[0])
+                        continue
+                    pending.append((out[0], row))
+                continue
+            # ---- strategy: a new signal from the close of day d, only when flat ----
+            if positions or pending:
+                continue
             trigger = None
-            if is_long and variant == "strategy":
+            if is_long:
                 # The trigger strategy is a cash-equity rule set; an index is passed as kind "stock"
                 # because here its signal is only a trigger for an option, never a cash trade.
                 mctx = MarketContext(sym, "stock", datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc),
@@ -414,9 +493,6 @@ class OptionEngine:
                 if not got:
                     continue
                 trigger = got[0]
-            elif is_long:
-                if (d.year, d.month) in used_months:
-                    continue
             ctx = self.context(strategy, sym, d, bar.close, variant, trigger)
             if not is_long:
                 if not strategy.entry_checks(ctx):
@@ -431,15 +507,22 @@ class OptionEngine:
                 if exp.expiry in used_expiries:
                     continue
             out = strategy.evaluate(ctx)
-            if is_long and variant != "strategy":
-                used_months.add((d.year, d.month))           # the fixed monthly date is used up, signal or not
             if not out:
                 for reason in strategy.last_no_trade:
                     skipped["NO_SIGNAL:" + reason.split(":")[0]] += 1
                 continue
-            pending = out[0]
+            pending.append((out[0], None))
             if not is_long:
-                used_expiries.add(pending.legs[0].expiry)
+                used_expiries.add(out[0].legs[0].expiry)
+        # a scheduled day inside the tested period on which the underlying has no bar: skipped, not retried
+        for d, items in sorted(schedule.items()):
+            if d in allowed and last_allowed is not None and d < last_allowed and d not in attempted:
+                for item in items:
+                    scheduled(d, item).update(result="skipped", reason="NO_UNDERLYING_BAR_ON_SCHEDULED_DAY")
+                    skipped["NO_SIGNAL:NO_UNDERLYING_BAR_ON_SCHEDULED_DAY"] += 1
+        for _, row in pending:                                # signalled on the last bar: no next session to fill
+            if row is not None:
+                row.update(result="skipped", reason="NO_NEXT_BAR")
         return trades
 
 
@@ -495,12 +578,13 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
     trades: list[OptionTrade] = []
     base_trades: list[OptionTrade] = []
     skipped, base_skipped = Counter(), Counter()
+    schedule_log: list[dict] = []
     notes_lot = {}
     for sym in syms:
         notes_lot[sym] = eng.lot_size(sym)
         trades += eng.run_stream(strategy, sym, dev, "strategy", skipped)
         for v in baseline_variants(strategy):
-            base_trades += eng.run_stream(strategy, sym, dev, v, base_skipped)
+            base_trades += eng.run_stream(strategy, sym, dev, v, base_skipped, schedule_log)
     for ts in (trades, base_trades):
         ts.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
     overall, base_overall = stats(trades, cap, cfg.min_trades), stats(base_trades, cap, cfg.min_trades)
@@ -519,6 +603,7 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "data_note": "SIMULATED DATA - results mean nothing about the real market" if source == "sim" else "",
         "price_source": label, "price_source_label": PRICE_SOURCE_LABEL[label],
         "payoff_simulation": label == "model",
+        "eligibility_label": ELIGIBILITY_LABEL, "eligibility_note": ELIGIBILITY_NOTE,
         "symbols": len(syms), "underlyings": syms, "lot_sizes": notes_lot,
         "period": {"from": dev[0].isoformat() if dev else None, "to": dev[-1].isoformat() if dev else None,
                    "sessions": len(dev)},
@@ -530,6 +615,14 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
         "baseline": {
             "description": "the same structure (same strike rule, width, expiry choice, exits, costs and price "
                            "source) entered on a fixed schedule with no entry rules",
+            "schedule": {
+                "rule": ("one attempt on the first market session of each month" if strategy.id == "long_option" else
+                         "one attempt per expiry, on the first market session on which the expiry is inside the entry "
+                         "window") + "; a scheduled attempt that cannot be made or filled is skipped and never retried",
+                "attempts": len(schedule_log),
+                "entered": sum(1 for r in schedule_log if r["result"] == "entered"),
+                "skipped": [r for r in schedule_log if r["result"] != "entered"],
+            },
             "overall": base_overall,
             "by_variant": {k: stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.variant).items()},
             "by_underlying": {k: stats(v, cap, cfg.min_trades) for k, v in _by(base_trades, lambda t: t.symbol).items()},
@@ -558,7 +651,8 @@ def run_option_backtest(settings: Settings, store: Store, source: str, strategy:
             "Every trade is 1 lot at the lot size in today's instrument list (past lot sizes are not in the list); "
             "position sizing against capital is phase 5.",
             "The highest-OI strike rule is not applied in backtests: history has open interest per contract, not across the chain.",
-            "Margin is not checked in backtests (past margins are unknown); live signals need a margin entry.",
+            ELIGIBILITY_NOTE,
+            "Baseline: one fixed scheduled attempt per expiry (or month); a skipped attempt is never retried later.",
             "A trade is dropped if a leg or the underlying has no bar for a session while it is open (data_exclusions).",
         ],
     }
@@ -682,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
         o, b, c = r["overall"], r["baseline"]["overall"], r["comparison"]
         print(f"\n{st.id} {st.version}  [{r['cost_label']}]  source={args.source}")
         print(f"  PRICE SOURCE: {r['price_source_label']}")
+        print(f"  NOTE: {r['eligibility_label']}")
         print(f"  underlyings {r['underlyings']}  lot sizes {r['lot_sizes']}")
         print(f"  period {r['period']['from']} .. {r['period']['to']} ({r['period']['sessions']} sessions); holdout untouched")
         for name, x in (("strategy", o), ("baseline", b)):
@@ -695,6 +790,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  strategy skipped {r['skipped_signals']}  exclusions {r['data_exclusions']}")
         print(f"  baseline skipped {r['baseline']['skipped_signals']}  exclusions {r['baseline']['data_exclusions']}")
         print(f"  exits: strategy {r['by_exit']}  baseline {r['baseline']['by_exit']}")
+        sch = r["baseline"]["schedule"]
+        print(f"  baseline schedule: {sch['attempts']} attempts, {sch['entered']} entered, {len(sch['skipped'])} skipped "
+              f"{dict(Counter(x['reason'] for x in sch['skipped']))}")
         print(f"  saved {r['run_id']}")
     print(f"\ndownload: {prices.download_stats()}")
     return 0

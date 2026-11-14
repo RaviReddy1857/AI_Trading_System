@@ -278,7 +278,9 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 | Bank Nifty options | Monthly | Credit spread | Weekly contracts do not exist |
 | Stock options | Monthly | Hedged credit spread (phase 9): bull put / bear call, 20-35 days to expiry | Physically settled: no position in expiry week |
 
-- A short option without a bought option of the same expiry is rejected (`UNHEDGED_SHORT`). The system never suggests an
+- A short option without a bought option of the same underlying, right and expiry (further out of the money, at least as
+  many shares) is rejected (`UNHEDGED_SHORT`) at three boundaries: the `Signal` model itself, the option backtest entry and
+  `Store.save_backtest()`. The system never suggests an
   unhedged position (entry or roll). A position the user already holds and enters manually may be unhedged: it is stored,
   flagged UNHEDGED on every view and alert, and still gets exit calls.
 - Phase 9 short strike: beyond the nearest support (puts) or resistance (calls), beyond the highest-OI strike on that side,
@@ -292,7 +294,8 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   option backtests use `option_bars`; only the sim source uses model prices. Every trade records its price source.
 - Margin is entered by the user from ICICI's margin calculator (`margins` table); Breeze's margin calculator is not a
   data call and is not used. A spread without a current margin entry gives no signal (`MARGIN_UNKNOWN`).
-- IV rank: India VIX against its past year for an index; stored at-the-money implied volatility for a stock. Unknown
+- IV rank: India VIX against its past year for an index; stored at-the-money implied volatility for a stock, point in time
+  (a contract is used only from the day its strike was chosen, so a day's value never depends on a later close). Unknown
   IV rank means no signal. Options are bought only at or below `max_iv_rank` and spreads sold only at or above `min_iv_rank`.
 - Sold strikes: |delta| at or below the limit (delta from the strike's own price) and, live, beyond the highest-OI strike.
   In backtests the highest-OI rule is not applied (history has no chain-wide open interest).
@@ -371,7 +374,9 @@ Reports list `skipped_signals` and `data_exclusions`.
 
 Option backtests (`app/options/backtest.py`) reuse these rules: signal at a day's close, entry at the next session's open
 of every leg with slippage per leg, spread exits decided on closes and filled at the next open, never held to settlement,
-one lot per trade at today's lot size (sizing is phase 5).
+one lot per trade at today's lot size (sizing is phase 5). The no-filter baseline makes one attempt per expiry (or month)
+on a date fixed by the calendar; a skipped attempt is recorded and never retried. Reports are labelled "excludes margin
+and bid/ask eligibility checks" (both stay mandatory for live signals).
 
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).

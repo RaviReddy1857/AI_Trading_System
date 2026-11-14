@@ -7,8 +7,9 @@ expiry and right further out of the money. `check_hedged` rejects anything else 
 Figures are per position of `lots` x `lot_size` shares:
 - max_loss_inr and max_profit_inr are at expiry and INCLUDE `costs_inr` (the estimated charges to
   open and close). max_loss_inr is a positive number of rupees lost.
-- breakevens are underlying prices at expiry, including costs. A credit structure whose costs are
-  at least its credit cannot break even: its breakevens are empty.
+- breakevens are underlying prices at expiry, including costs: only prices at which the P&L really
+  is zero. A credit structure whose costs are at least its credit cannot break even (empty). An iron
+  condor with unequal wings whose credit after costs exceeds the narrower width has one breakeven.
 Margin is not computed here (see app/options/margin.py).
 """
 from __future__ import annotations
@@ -18,8 +19,7 @@ from datetime import date
 from decimal import Decimal
 
 from ..costs import money
-
-UNHEDGED_SHORT = "UNHEDGED_SHORT"
+from ..models import UNHEDGED_SHORT, unhedged_short_legs
 
 
 class InvalidStructure(ValueError):
@@ -147,8 +147,17 @@ def iron_condor(put_short, put_long, call_short, call_long, credit, lot_size: in
     q, c = _qty(lots, lot_size), _costs(costs)
     received = money(cr * q)
     per_share_cost = c / q
-    return Payoff("IRON_CONDOR", received, c, money(width * q) - received + c, received - c,
-                  (ps - cr + per_share_cost, cs + cr - per_share_cost) if received > c else (), width)
+    # A breakeven is real only if it lies on that side's sloping part, between the sold and the bought
+    # strike. With unequal wings the credit (after costs) can exceed the narrower width: that side then
+    # never loses and has no breakeven.
+    bes = []
+    if received > c:
+        low, high = ps - cr + per_share_cost, cs + cr - per_share_cost
+        if low >= pl:
+            bes.append(low)
+        if high <= cl:
+            bes.append(high)
+    return Payoff("IRON_CONDOR", received, c, money(width * q) - received + c, received - c, tuple(bes), width)
 
 
 def pnl_at_expiry(legs, spot, costs=0) -> Decimal:
@@ -165,16 +174,6 @@ def pnl_at_expiry(legs, spot, costs=0) -> Decimal:
 def check_hedged(legs) -> list[str]:
     """[] if every sold option is covered by a bought option of the same expiry and right that is
     further out of the money with at least as many shares; otherwise ["UNHEDGED_SHORT"].
-    Each bought option covers one sold option only."""
-    bought = [[leg, leg.lots * leg.lot_size] for leg in legs if leg.action == "BUY"]
-    for s in (leg for leg in legs if leg.action == "SELL"):
-        need = s.lots * s.lot_size
-        for item in bought:
-            b, left = item
-            further = b.strike < s.strike if s.right == "PE" else b.strike > s.strike
-            if b.right == s.right and b.expiry == s.expiry and further and left >= need:
-                item[1] = left - need
-                break
-        else:
-            return [UNHEDGED_SHORT]
-    return []
+    Each bought option covers one sold option only. The rule itself lives in app/models.py, where
+    the Signal model, the backtest entry and Store.save_backtest() enforce the same check."""
+    return [UNHEDGED_SHORT] if unhedged_short_legs(legs) else []

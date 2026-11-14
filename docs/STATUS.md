@@ -15,6 +15,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 3b | Strategy revision (v2 versions, cost-aware stops, longer swing history) | Built and tested; rerun at Prime 4999 rates 2026-11-13: all v1 and v2 still lose after costs, none beats random; all set to no alerts, paper only, "negative in backtests"; holdout not opened | 300 passing (whole suite) | 2026-11-13 |
 | - | Backtest engine review fixes (Codex review of phase 3) | Fixed and tested; dev backtests and random baselines rerun; no conclusion changes; holdout not opened | 327 passing (whole suite) | 2026-11-13 |
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
+| - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
@@ -705,6 +706,75 @@ What it shows:
 - Stock option backtests incomplete (issue 45). The combined sim-source option reports are payoff simulations on fake data.
 - `data/backtests/*_latest.json` holds the last run of each strategy, whatever its source.
 
+## Phase 4 review fixes (2026-11-13, review of commit 033782e)
+
+All six findings were confirmed in the code and fixed. New tests: `tests/test_review5_fixes.py` (26 tests). Run against
+the pre-fix commit in a temporary worktree, **24 fail and 2 pass** (the 2 are guards that hedged signals and trades are
+still accepted); all pass now. Development period only; the holdout was not opened; no strategy threshold changed.
+
+1. **HIGH - hedge rule enforced at every boundary.** The rule lives in `app/models.py` (`unhedged_short_legs`): a sold
+   option is covered only by a bought option of the same right and expiry, further out of the money, with at least as
+   many shares; one bought option covers one sold option; a leg that cannot be read counts as uncovered. All legs of a
+   signal or trade belong to one underlying (the signal's symbol).
+   - `Signal` construction fails (`InvalidSignal`, text `UNHEDGED_SHORT`) for index and stock option signals.
+   - `OptionEngine._enter` refuses such a signal even if the object got past its own validation (`UNHEDGED_SHORT` in
+     `skipped_signals`).
+   - `Store.save_backtest()` raises `UnhedgedShort` and saves nothing (run and trades) if any option trade has an
+     uncovered sold leg. Backtest trade legs now carry their own expiry, lots and lot size so the check is real.
+2. **HIGH - stock IV history is point in time.** Before: the at-the-money calls struck 35 and 15 days before an expiry
+   were pooled, and each day used whichever was nearest the money, so the call struck on a LATER close could set an
+   earlier day's IV (and IV rank). Now a call is used only from the day its strike was chosen
+   (`option_history.point_in_time_atm_contracts`, `stock_iv_series`); the backtest engine and the live Options page use
+   the same function. Test: changing the close 15 days before expiry leaves `iv_at(stock, D)` unchanged for every earlier D.
+   Index IV rank (India VIX) was not affected. Real-data impact: none on the reported phase 4 results (they are index
+   only); the incomplete stock run in the phase 4 notes used the old series.
+3. **payoff.py - condor breakevens.** With unequal wings the credit after costs can exceed the narrower wing; that side
+   never loses, so it has no breakeven. `iron_condor` now returns only prices where the P&L is zero (property test with
+   asymmetric wings evaluates the P&L at every reported breakeven). Equal-width condors (what the strategy builds) are unchanged.
+4. **Baseline - one fixed scheduled attempt per expiry.** The schedule is computed from the calendar alone
+   (`OptionEngine.baseline_schedule`): spreads and condors on the first market session on which the expiry is inside the
+   entry window; option buying on the first market session of each month. One attempt: no valid strikes or prices that
+   day, or no fill at the next open, and the expiry is recorded as skipped (`baseline.schedule.skipped`, with the date
+   and reason) and never retried. Before, a failed day was retried on the following days, and an attempt was delayed
+   while the previous month's baseline position was still open. Baseline positions of different expiries may now overlap.
+5. **Margin and bid/ask.** Still required for live signals: a live `OptionContext` with `require_margin=False` now
+   raises. Backtests cannot check them, so every option report carries `eligibility_label`
+   **"excludes margin and bid/ask eligibility checks"** (report, CLI, backtests page), and the acceptance check in
+   implementation.md is scoped to live signals.
+6. **Weak tests in test_phase4.py.** Every loop over trades first asserts there are trades. Two tests turned out to
+   check nothing: the option-buying strategy had no trades in its fixture (now a rising market with falling VIX), and the
+   exit check allowed `EXPIRY_EXIT`. It now asserts the exact boundary (a time exit fills at 09:15 of the first session
+   within `exit_days_before_expiry` of expiry; no trade exits later), with a new test in which every spread leaves by the
+   time rule. A vacuous `>= 0` assertion was removed.
+
+**Phase 4 backtests rerun from stored prices (same data, costs and rules; `data/diagnostics/option_bt_review5.txt`):**
+
+| Strategy | | Before | After |
+|---|---|---|---|
+| credit_spread | strategy | 6 trades, -2,307, PF 0.51 | identical |
+| | baseline (both) | 289 trades, 64.4%, -125,848, PF 0.59, -435 per trade | 265 trades, 64.2%, -126,716, PF 0.56, -478 per trade |
+| | baseline bull put | 144 trades, -46,748, PF 0.66 | 133 trades, -46,120, PF 0.64 |
+| | baseline bear call | 145 trades, -79,099, PF 0.53 | 132 trades, -80,596, PF 0.50 |
+| iron_condor | strategy | 1 trade, +673 | identical |
+| | baseline | 110 trades, 69.1%, -16,771, PF 0.77, -152 per trade | 105 trades, 69.5%, -14,598, PF 0.79, -139 per trade |
+| long_option | strategy | 81 trades, -3,759, PF 0.99, -46 per trade | identical |
+| | baseline | 153 trades, -1,011, PF 1.00, -7 per trade | 151 trades, +5,817, PF 1.01, +39 per trade |
+
+**Does any result change?** The three strategy results are identical (findings 1-3 and 5 change no trade; the strategy
+path of finding 4 is unchanged). Every baseline changed because of finding 4 (fixed dates, no retries, overlapping
+expiries). **No verdict changes:** credit_spread "no edge vs baseline (LOW SAMPLE)", iron_condor "beats baseline" on one
+trade (no evidence), long_option "no edge vs baseline". The option-buying baseline moved from about zero to slightly
+positive (+39 per trade), so the strategy is a little further below it.
+
+Baseline schedule accounting: credit spread 356 attempts, 272 entered, 84 skipped (28 opening credit outside the
+stop/target band, 22 next weekday not a session, 15 no strike, 9 illiquid, 8 no hedge strike, 1 no credit, 1 fill beyond);
+condor 127 / 106 / 21; option buying 178 / 153 / 25. (Entered attempts can still be dropped later for a missing bar, so
+trades are fewer than entries.)
+
+**Not complete:** the fixed schedule asks for contracts on different days than before; **31 contracts it wanted are not
+stored**, so some of the "no strike / no hedge" skips above are missing data, not real skips. They need one
+`python -m app.options.backtest --download` run (a few dozen requests) and the baseline rows above will move slightly.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -748,6 +818,11 @@ What it shows:
 | 46 | 4 | Margin for spreads must be entered by hand (Breeze's margin calculator is not a data call); none entered yet, so every live spread idea shows MARGIN_UNKNOWN | Waiting for user |
 | 47 | 4 | Live option chain refresh, live IV rank and live option ideas not yet seen in market hours (built after the close) | Waiting for user: restart the app in breeze mode and open /options |
 | 48 | 4 | Risk-free rate 6.5% for IV/delta is an assumption; dividend yield 0 | Waiting for user (low impact on short-dated options) |
+| 50 | review | Phase 4 review: unhedged option signal could be constructed, entered and saved | Fixed 2026-11-13: refused by the Signal model, the backtest entry and Store.save_backtest() |
+| 51 | review | Phase 4 review: stock IV history used contracts chosen from later closes | Fixed 2026-11-13: point-in-time contract selection, shared by backtest and Options page |
+| 52 | review | Phase 4 review: unequal-width condor reported a breakeven that is not real | Fixed 2026-11-13 |
+| 53 | review | Phase 4 review: baseline retried failed days and waited for the previous position | Fixed 2026-11-13: one fixed scheduled attempt per expiry; baselines rerun (no verdict change) |
+| 54 | review | After the schedule fix the phase 4 baselines want 31 contracts that are not stored | Open: needs a Breeze run (`python -m app.options.backtest --download`) |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
@@ -809,3 +884,7 @@ What it shows:
 | 2026-11-13 | Phase 4: in backtests the highest-OI rule and the margin rule are not applied (not knowable for past dates); both are enforced live |
 | 2026-11-13 | Issue 42: a daily-bar trade open across a session with no bar for that stock is dropped, never given an exit from a later bar |
 | 2026-11-13 | NSE charges per circular NSE/FA/73061 (effective 2026-03-01, user): cash Rs 307/crore and options Rs 3,553/crore of premium each side, IPFT included; IPFT rates set to 0. Cash was 0.00307% + a separate 0.0000001% IPFT before (IPFT counted twice); corrected |
+| 2026-11-13 | Review fix: the hedge rule (same right, same expiry, further out, enough shares) is enforced by the Signal model, the option backtest entry and Store.save_backtest(), not only by the strategies |
+| 2026-11-13 | Review fix: a stock's implied-volatility history uses a contract only from the day its strike was chosen |
+| 2026-11-13 | Review fix: no-filter baselines make one attempt per expiry (or month) on a date fixed by the calendar; skipped attempts are recorded and never retried; baseline positions of different expiries may overlap |
+| 2026-11-13 | Review fix: option backtest reports are labelled "excludes margin and bid/ask eligibility checks"; both stay mandatory for live signals (a live context cannot switch the margin rule off) |

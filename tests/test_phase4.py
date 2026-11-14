@@ -839,6 +839,7 @@ def test_ACCEPTANCE_every_option_report_has_the_no_filter_baseline_with_the_same
         assert set(b["by_variant"]) == variants == {t["variant"] for t in base_trades}
         assert {t["price_source"] for t in res["trades"]} == {rep["price_source"]}          # never mixed
         lo, hi = date.fromisoformat(rep["period"]["from"]), date.fromisoformat(rep["period"]["to"])
+        assert res["trades"], sid                                  # the loop below must check something
         for t in res["trades"]:                                    # same period for strategy and baseline
             assert lo <= datetime.fromisoformat(t["signal_time"]).astimezone(IST).date() <= hi
             assert t["costs"]["total"] > 0 and t["costs"]["brokerage"] == 49.0 * 2 * len(t["legs"])   # same cost model
@@ -856,6 +857,7 @@ def test_baseline_has_no_entry_rules_but_the_strategy_does(stored_world):
     # one baseline entry per expiry and side, on the first session inside the entry window
     for v in ("baseline:PE", "baseline:CE"):
         ts = [t for t in res["trades"] if t["variant"] == v]
+        assert ts, v                                               # the loop below must check something
         assert len({t["expiry"] for t in ts}) == len(ts)
         for t in ts:
             dte = (date.fromisoformat(t["expiry"]) - datetime.fromisoformat(t["signal_time"]).astimezone(IST).date()).days
@@ -876,6 +878,8 @@ def test_ACCEPTANCE_option_entry_is_the_next_session_open_never_the_signal_day(s
     hist = OptionHistory(store, "sim")
     res = run(s, store, base, hist, "credit_spread")
     sessions = base.session_dates()
+    exit_days = s.strategies.credit_spread.exit_days_before_expiry
+    assert res["trades"]
     for t in res["trades"]:
         sig_d = datetime.fromisoformat(t["signal_time"]).astimezone(IST).date()
         ent_d = datetime.fromisoformat(t["entry_time"]).astimezone(IST).date()
@@ -886,8 +890,41 @@ def test_ACCEPTANCE_option_entry_is_the_next_session_open_never_the_signal_day(s
             slip = Decimal("0.995") if x["action"] == "SELL" else Decimal("1.005")
             assert x["entry_price"] == float(money(Decimal(str(bar.open)) * slip))      # that day's open, with slippage
         assert datetime.fromisoformat(t["exit_time"]) > datetime.fromisoformat(t["entry_time"])
-        assert date.fromisoformat(t["expiry"]) > datetime.fromisoformat(t["exit_time"]).astimezone(IST).date() or \
-            t["exit_reason"] in ("EXPIRY_EXIT",)
+        # exact exit boundary: the time exit fills at the open of the FIRST session that is within
+        # exit_days_before_expiry of the expiry; no trade exits later, and none is left to expiry
+        boundary = next(x for x in sessions if (exp - x).days <= exit_days)
+        ext = datetime.fromisoformat(t["exit_time"])
+        ext_d = ext.astimezone(IST).date()
+        assert t["exit_reason"] in ("TARGET", "STOP", "TIME", "PERIOD_END"), t["exit_reason"]
+        assert ext_d <= boundary < exp
+        if t["exit_reason"] == "PERIOD_END":                         # the tested period ended first
+            assert ext_d == max(d for d in sessions if d < s.backtest.holdout_start["1day"])
+        else:
+            assert ext.astimezone(IST).time() == time(9, 15)         # spread exits fill at an open
+        if t["exit_reason"] == "TIME":
+            assert ext_d == boundary
+
+
+def test_spread_time_exit_fills_at_the_open_of_the_exact_boundary_session():
+    """With the target and stop out of reach every spread leaves by the time rule: at the open of the
+    first session within exit_days_before_expiry of its expiry, never later and never at expiry."""
+    over = {"credit_spread": {"profit_target_pct_of_credit": 99.0, "stop_multiple_of_credit": 10.0,
+                              "min_credit_pct_of_width": 0.0}}
+    s = settings(backtest={"test_start": {"1day": date(2025, 6, 2)}, "holdout_start": {"1day": date(2025, 10, 1)}},
+                 strategies=over)
+    s, store, base, model = world(s=s)
+    res = run(s, store, base, model, "credit_spread")
+    sessions = base.session_dates()
+    exit_days = s.strategies.credit_spread.exit_days_before_expiry
+    timed = [t for t in res["trades"] if t["exit_reason"] == "TIME"]
+    assert len(timed) >= 3
+    assert {t["exit_reason"] for t in res["trades"]} <= {"TIME", "PERIOD_END", "TARGET"}    # never EXPIRY_EXIT
+    for t in timed:
+        exp = date.fromisoformat(t["expiry"])
+        boundary = next(x for x in sessions if (exp - x).days <= exit_days)
+        assert boundary == sessions[sessions.index(exp) - 1]         # here: the session before expiry day
+        ext = datetime.fromisoformat(t["exit_time"]).astimezone(IST)
+        assert (ext.date(), ext.time()) == (boundary, time(9, 15))
 
 
 def test_ACCEPTANCE_a_spread_trade_reconciles_to_the_paise(stored_world):
@@ -941,7 +978,6 @@ def test_ACCEPTANCE_a_trade_crossing_a_missing_option_bar_is_dropped_not_given_a
     store._db.execute("DELETE FROM option_bars WHERE underlying='NIFTY' AND expiry=? AND strike=? AND right='PE' AND start_utc=?",
                       (t["expiry"], hedge["strike"], daily_start(ent + timedelta(days=0)).isoformat()))
     res2 = run(s, store, base, OptionHistory(store, "sim"), "credit_spread")
-    assert res2["report"]["skipped_signals"].get("NO_SIGNAL:NO_STRIKE", 0) >= 0
     ids = {x["signal_id"] for x in res2["trades"]}
     assert t["signal_id"] not in ids                              # no entry without a bar for every leg
     assert res2["report"]["data_exclusions"]["NO_OPTION_BAR_AT_ENTRY"] >= 1
@@ -990,16 +1026,18 @@ def test_not_stored_contracts_are_counted_as_unknown_not_traded():
     assert res["trades"] == [] and res["report"]["download"]["contracts_wanted_but_not_stored"] > 0
 
 
-def test_option_backtest_is_deterministic_and_long_option_uses_the_trigger(stored_world):
-    s, store, base, model = stored_world
+def test_option_backtest_is_deterministic_and_long_option_uses_the_trigger():
+    # a rising market (the swing trigger fires) with falling VIX (IV rank low enough to buy options)
+    s, store, base, model = world(drift=15.0, vix=lambda i: 20 - i * 0.005)
     a, b = run(s, store, base, model, "long_option"), run(s, store, base, model, "long_option")
     assert a["trades"] == b["trades"] and a["report"]["overall"] == b["report"]["overall"]
+    assert [t for t in a["trades"] if t["variant"] == "strategy"]    # the trigger check below must check something
     for t in a["trades"]:
         assert t["structure"] == "LONG_OPTION" and len(t["legs"]) == 1 and t["legs"][0]["action"] == "BUY"
         if t["variant"] == "strategy":
             assert any("trigger: swing_pullback_v2" in w for w in t["why_now"])
     months = [t["signal_time"][:7] for t in a["trades"] if t["variant"] == "baseline"]
-    assert len(months) == len(set(months))                       # baseline: one at-the-money call per month
+    assert months and len(months) == len(set(months))            # baseline: one at-the-money call per month
 
 
 def test_history_quotes_have_no_bid_ask_and_no_chain_wide_oi(stored_world):

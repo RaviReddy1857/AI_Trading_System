@@ -8,7 +8,7 @@ import threading
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import Bar
+from .models import Bar, UnhedgedShort, unhedged_short_legs
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars_1m (
@@ -244,6 +244,13 @@ class Store:
     # ---------------- backtests ----------------
     def save_backtest(self, run_id: str, created: datetime, strategy_id: str, version: str,
                       params: dict, report: dict, trades: list[dict]) -> None:
+        """Nothing is saved if any option trade has a sold leg without its bought hedge (UnhedgedShort)."""
+        for n, t in enumerate(trades):
+            legs = t.get("legs") if isinstance(t, dict) else None
+            if legs and unhedged_short_legs(legs, t.get("expiry"), t.get("lots"), t.get("lot_size")):
+                raise UnhedgedShort(f"UNHEDGED_SHORT: backtest {run_id} trade {n} ({t.get('symbol')} {t.get('expiry')}) "
+                                    f"has a sold option without a bought option of the same right and expiry; "
+                                    f"nothing was saved")
         with self._lock:
             self._db.execute("INSERT OR REPLACE INTO backtest_runs VALUES (?,?,?,?,?,?)",
                              (run_id, created.isoformat(), strategy_id, version,

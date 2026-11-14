@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 410 passed
+python -m pytest -q          # should say 437 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -257,8 +257,17 @@ python -m app.options.option_history                 # what option history is st
 python -m app.options.option_history --iv-history RELIANCE TCS   # at-the-money history so a stock gets an IV rank
 ```
 Results show on http://127.0.0.1:8000/backtests with the price source, the baseline rows and a verdict: a strategy that
-does not beat its baseline per trade after costs (or loses money) is marked **"no edge vs baseline"**.
+does not beat its baseline per trade after costs (or loses money) is marked **"no edge vs baseline"**. Every option
+report is also labelled **"excludes margin and bid/ask eligibility checks"**: history has no bid/ask and past margins are
+unknown, so backtests cannot apply those two rules. Both stay mandatory for live signals.
 How these backtests work:
+- **The baseline makes one attempt per expiry (or month) on a date fixed by the calendar**: for spreads and condors the
+  first market session on which the expiry is inside the entry window, for option buying the first market session of the
+  month. If it cannot enter that day (no valid strike, no price, no fill at the next open) the attempt is recorded as
+  skipped with its reason and is never retried. Baseline positions of different expiries may overlap.
+- **After the 2026-11-13 review fixes the baselines want 31 contracts that are not stored yet.** Run
+  `python -m app.options.backtest --download` once (a few dozen requests, needs the Breeze login) and then
+  `python -m app.options.backtest`; the baseline rows will move slightly. Until then the reports say INCOMPLETE.
 - A signal comes from a day's close; every leg is entered at the **next session's open**, with 0.5% slippage per leg.
 - Spreads are judged on closing prices (cost to buy back): target at 50% of the credit kept, stop at 2x the credit, and out
   before expiry. The exit is filled at the next session's open, so a stop can fill well past 2x. Nothing is held to settlement.
@@ -271,7 +280,11 @@ How these backtests work:
   if a leg has no bar that day, if the next day is not a market session, or if the opening credit is already outside the
   stop/target band. The report counts each.
 - In backtests the highest-OI rule and the margin rule are not applied (history has open interest per contract only, and
-  past margins are unknown). The IV rank of a stock uses the stored at-the-money calls.
+  past margins are unknown). The IV rank of a stock uses the stored at-the-money calls, point in time: a call is used
+  only from the day its strike was chosen, so a day's IV never depends on a later close.
+- **A sold option without its hedge is refused everywhere**: the signal cannot be constructed, the backtest will not enter
+  it and a backtest run containing one is not saved (`UNHEDGED_SHORT`). The hedge must be a bought option of the same
+  underlying, right and expiry, further out of the money, with at least as many shares.
 - No session before 2019-01-22 is tested, and the holdout (from 2026-06-08) is not opened.
 
 **Swing backtests (issue 42).** A daily-bar trade is now dropped if the stock has no daily bar for a session the index

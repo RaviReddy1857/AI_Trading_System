@@ -171,7 +171,7 @@ function optionBlock(rep){
  const b=rep.baseline, c=rep.comparison;
  const variants=Object.entries(b.by_variant||{}).map(([k,o])=>row(esc(k),o,'')).join('');
  const unders=Object.entries(rep.by_underlying||{}).map(([k,o])=>row('strategy on '+esc(k),o,'')).join('');
- return `<div class="mute" style="margin-top:8px">Option prices: <b>${esc(rep.price_source_label)}</b>. Underlyings: ${esc((rep.underlyings||[]).join(', '))}. One lot per trade at today's lot size ${esc(JSON.stringify(rep.lot_sizes))}.</div>
+ return `<div class="mute" style="margin-top:8px">Option prices: <b>${esc(rep.price_source_label)}</b>. Underlyings: ${esc((rep.underlyings||[]).join(', '))}. One lot per trade at today's lot size ${esc(JSON.stringify(rep.lot_sizes))}.${rep.eligibility_label?` <span class="tag warn">${esc(rep.eligibility_label)}</span>`:''}</div>
  <h2 style="margin-top:12px">Strategy against its no-filter baseline (same structure on a fixed schedule, no entry rules)</h2>
  <div class="badges"><span class="badge ${c.verdict.startsWith('beats')?'TRENDING_UP':'VOLATILE'}">${esc(c.verdict.toUpperCase())}</span>
  <span class="mute">Per trade after costs: strategy Rs ${fmt(c.strategy_avg_net_per_trade_inr)}, baseline Rs ${fmt(c.baseline_avg_net_per_trade_inr)}</span></div>
