@@ -109,6 +109,7 @@ trading_system/
                 base.py  greeks.py  option_history.py        # OptionContext and strike rules; IV/delta by code; Breeze option history
                 instruments.py  margin.py  backtest.py       # lot sizes/expiries from the broker list; manual margins; option backtests
                 stock_credit_spread.py  universe.py  shortlist.py  # phase 9 (built after phase 6)
+                settlement.py                                # phase 9 M3: settlement readiness (alerts and estimates only)
     risk/       sizing.py  portfolio.py  limits.py  engine.py  # phase 5
     engine.py  scoring.py  paper.py  alerts.py  positions.py   # phase 6 (positions: exit calls, manual entry)
     switches.py                                               # phase 6: trade-type alert switches
@@ -259,7 +260,7 @@ Phase 4 adds `strategies.long_option` / `credit_spread` / `iron_condor` (with `s
 chain refresh/staleness/liquidity limits, margin file and maximum age, option backtest underlyings/start/request limit).
 Phase 9 core (2026-11-14) adds `stock_option_selling` (entry rules, `trend_block`, `campaign_limit`, `roll`, `reversal`,
 `profile`, `weights`, `backtest` with exit checks and exit policies) and `options.backtest.daily_request_budget`.
-Phase 9 M3 (2026-11-15, config only so far) adds `stock_option_selling.settlement`: alert start (E-7), URGENT from
+Phase 9 M3 (2026-11-15; read by `app/options/settlement.py`) adds `stock_option_selling.settlement`: alert start (E-7), URGENT from
 E-5 (never later than `forced_exit_trading_days_before_expiry`), near the money = 5% of spot, and `broker` - ICICI
 Direct's physical-settlement rules (`delivery_margin`, `auto_close`, `fresh_position_block`, `obligation`), each with
 its own `confirmed` flag; alert deadlines use the earliest stated auto-close time for the legs held.
@@ -293,6 +294,13 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   `Store.save_backtest()`. The system never suggests an
   unhedged position (entry or roll). A position the user already holds and enters manually may be unhedged: it is stored,
   flagged UNHEDGED on every view and alert, and still gets exit calls.
+- Settlement readiness (phase 9 M3, `app/options/settlement.py`): for every open position with a sold stock option leg
+  (from a card, manual or UNHEDGED), escalating alerts from E-7 (NOTICE near the money, WARNING in the money, URGENT from
+  E-5 or past an ICICI cut-off, URGENT "price unknown" when spot or expiry is not known; the level never drops while
+  open), a delivery and expiry-week margin estimate ("margin unknown" when a rule or the margin base is missing, never
+  zero), and a planned-exit deadline = the earliest of the forced exit (close of E-5) and ICICI's own times, with a red
+  alert on every evaluation after it until the position is marked closed. Unconfirmed ICICI rules are named "ICICI rule
+  not confirmed". Pure functions: nothing closes or changes a position. Sending and repeating is phase 6.
 - Phase 9 short strike: beyond the nearest support (puts) or resistance (calls), beyond the highest-OI strike on that side,
   and |delta| at or below `max_short_delta`; otherwise no signal. Hedge: same expiry, `hedge_strikes_out` strikes further out,
   liquid, keeping max loss within `max_loss_per_stock_spread_pct`.
@@ -327,7 +335,8 @@ Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, 
 `/api/options/{underlying}` and the page `/options` (4);
 `/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
 `/api/stock-option-selling/shortlist`, `/api/stock-option-selling/profile/{stock}`,
-`/api/stock-option-selling/reversals`, `/api/stock-option-selling/campaigns` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
+`/api/stock-option-selling/reversals`, `/api/stock-option-selling/campaigns`,
+`/api/stock-option-selling/settlement` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
 `POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
@@ -402,6 +411,15 @@ Stock option selling backtests (`app/options/stock_backtest.py`) add: target and
 `intraday_leg_max_age_minutes` old) beside the daily check; three exit policies on identical recorded entries (stop, roll
 by the rules, roll every month), reported per campaign; the effect of each rule and alert against the baseline; and the
 reversal study. Only complete (stock, year) pairs of downloaded option history are reported unless `--all-data` is given.
+
+**Event order in a portfolio run (2026-11-15, `OptionEngine.run_portfolio`).** When several stocks run under the
+portfolio limits, every stock's steps (entries, exits, rolls, pending entries, new signals) go through ONE queue in
+time order, so a decision sees the open and pending positions exactly as they stand at that moment, never another
+stock's later events of the same session. Steps at the same instant run in this order: (1) decisions on a 5-minute
+bar's close and the management of open positions at the session's close, (2) new entry signals at the session's close,
+(3) fills at a bar's open. Within one of these, truly simultaneous events of different stocks run in the order the
+stocks are given (most liquid first): that is the only place the order of the stocks matters. A roll decided inside a
+session uses correlations of completed sessions before that day only; a decision at the close may use that day.
 
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).

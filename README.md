@@ -346,6 +346,17 @@ Research only, no alerts yet. Signal cards, Telegram alerts and the manual posit
 watch list ("watch only, never a signal"), campaigns, and a per-stock profile with scenario history ("history, not a
 forecast"). Backtest results are on http://127.0.0.1:8000/backtests.
 
+**Settlement readiness (phase 9 M3).** The same page has a "Settlement readiness" card (and
+`GET /api/stock-option-selling/settlement`): ICICI's physical-settlement rules as you entered them in `config.yaml`
+(`stock_option_selling.settlement.broker`), each marked confirmed or "ICICI rule not confirmed". The rules behind it
+(`app/options/settlement.py`) give, for every open position with a sold stock option leg: NOTICE / WARNING from 7
+trading days before expiry and URGENT from 5 (or when the price is unknown), the delivery obligation and expiry-week
+margin estimate, and a red alert when the position is not marked closed by its exit deadline. They are alerts and
+estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or
+sent yet. To do: confirm the auto-close time, the fresh-position block and the 11:00 shares deadline with ICICI and set
+their `confirmed` flags. For a rupee margin figure the VaR + ELM + adhoc margin of the position must be entered (phase 6
+form); without it the estimate shows the schedule's percentage and "margin unknown".
+
 **Commands**
 ```
 python -m app.options.stock_backtest --status      # liquidity ranking, today's request budget, what is completely downloaded
@@ -432,6 +443,7 @@ Reversal candidates stay silent until you set `stock_option_selling.reversal.ale
 - `scripts/check_option_history.py` - the check of what option history Breeze provides
 - `app/options/sizing.py`, `portfolio.py`, `actionable.py`, `score.py` - phase 9 M1/M2: whole-lot sizing, portfolio and
   correlation limits, research versus actionable, the candidate score
+- `app/options/settlement.py` - phase 9 M3: settlement-readiness alerts, delivery and margin estimate, exit deadline
 - `app/options/stock_selling.py`, `stock_profile.py`, `campaign.py`, `reversal.py`, `shortlist.py`, `stock_backtest.py` -
   phase 9 core: stock option selling rules, rolls and alerts; profile, scenario history and blocks; campaign tracking;
   reversal detector and its two candidates; the shortlist and views; the download and the report

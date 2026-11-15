@@ -24,6 +24,7 @@ from .options.analytics import OptionDesk
 from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
+from .options.settlement import rules_view
 from .options.shortlist import correlation_groups, reversal_watch, stock_view
 from .page import BACKTEST_HTML, DATA_STATUS_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
@@ -371,6 +372,14 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         return {"campaigns": store.campaigns(),
                 "note": "A campaign is an original trade and every roll of it. Positions are recorded once the "
                         "journal and manual position form exist (after phase 6)."}
+
+    @app.get("/api/stock-option-selling/settlement")
+    def stock_option_selling_settlement():
+        """Settlement readiness for sold stock option legs (phase 9 M3): ICICI's rules as entered, each with
+        its confirmed flag, and the alerts of the open positions. Alerts and estimates only. Read-only."""
+        return {**rules_view(settings.stock_option_selling), "alerts": [],
+                "note": "Stock options settle physically. Alerts and estimates only: the system never closes or "
+                        "changes a position."}
 
     @app.get("/api/stock-option-selling/profile/{stock}")
     def stock_option_selling_profile(stock: str):

@@ -16,6 +16,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Backtest engine review fixes (Codex review of phase 3) | Fixed and tested; dev backtests and random baselines rerun; no conclusion changes; holdout not opened | 327 passing (whole suite) | 2026-11-13 |
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
+| - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
@@ -1681,6 +1682,63 @@ exit. NOTICE (near the money) and WARNING (in the money) cover E-7 and E-6.
 **Waiting for you:** confirm the auto-close time with ICICI (which statement holds, for long and short options), whether
 ICICI blocks fresh positions in the last days, and the 11:00 deadline for shares; then set the `confirmed` flags.
 
+## Phase 9 M3: exits, rolls, campaigns and settlement readiness (2026-11-15)
+
+M3 is the "manage an open position" part of Phase 9 (build steps 6 and 16-22 of docs/implementation.md and the
+settlement-readiness addition, tasks P9.29-P9.32). Phase 5 not started; variants A-D and every default unchanged.
+Whole suite: **638 passing**.
+
+### What M3 contains
+| Item | Code | Tests | State |
+|---|---|---|---|
+| Exit calls: target, stop, strike breached, trend flip, time exit, forced exit before expiry week | `stock_selling.exit_calls` | `test_phase9_core.py` | built earlier |
+| Campaign tracking, "recovery not possible from this position" | `campaign.py`, store `campaigns` | `test_phase9_rolls.py` | built earlier |
+| Roll rules (a)-(d), one roll, never larger; stuck position; no recovery sizing | `stock_selling.roll_choices`, `stuck_position` | `test_phase9_rolls.py` | built earlier |
+| Open-position alerts with exit and roll numbers | `stock_selling.position_alerts`, `stock_profile.alert_kinds` | `test_phase9_rules.py` | built earlier |
+| Exit-policy comparison (stop, roll by rules, roll every month) on the same entries, both executions | `stock_backtest.policy_runs`, `policy_comparison` | `test_phase9_rolls.py` | built earlier; now on the time-ordered engine |
+| **P9.29** escalating settlement alerts | `settlement.leg_level`, `escalate`, `settlement_alert` | `test_phase9_settlement.py` (14 parameter cases + 3 tests) | **new** |
+| **P9.30** delivery obligation and expiry-week margin estimate | `settlement.delivery_estimate`, `delivery_margin` | hand calculations for a short put and a short call, with and without the bought leg in the money | **new** |
+| **P9.31** planned-exit deadline and the red alert after it | `settlement.cutoffs`, `exit_deadline`, `overdue` | deadline and repeat tests | **new** |
+| **P9.32** "ICICI rule not confirmed" on every alert that uses an unconfirmed rule, and on the page | `settlement.not_confirmed`, `rules_view`; route `/api/stock-option-selling/settlement`; "Settlement readiness" card | flag tests, route and page test | **new** (config was built before) |
+
+### Settlement readiness as built (`app/options/settlement.py`; pure functions, nothing is stored or sent)
+- **Applies to** every open position with a sold stock option leg (from a card, manual, UNHEDGED), as `HeldPosition`.
+- **Levels** per sold leg, by trading days to expiry: nothing before E-7 and never for a leg more than 5% of spot out of
+  the money; NOTICE (near the money) and WARNING (in the money) on E-7 and E-6; URGENT from E-5, or once an ICICI cut-off
+  has passed; URGENT "price unknown" when the stock's price or the expiry is not known. The position's level is the
+  highest of its legs and never drops while it is open (the caller passes the previous level).
+- **Each alert** names the leg, spot, strike, moneyness in % of spot and in rupees, trading days left, the estimate, the
+  deadline and the action ("Exit the spread by 22-Dec-2026 15:30").
+- **Delivery estimate**, whole position and one lot: what the sold leg obliges if assigned (a put: shares to buy and the
+  cash, strike x shares; a call: shares to deliver), and what settling at the last price would mean, netted with a
+  bought leg of the same right only when that leg would settle in the money too. Rupee figures also as % of capital.
+- **Expiry-week margin**: ICICI's schedule (10, 25, 45, 70, 100% of VaR + ELM + adhoc margin on E-4 to E) for a leg in the
+  money or within 5% of spot. The rupee amount needs that margin base for the position, which the system does not have
+  (it is ICICI's figure): without it the percentage is shown and the amount is "margin unknown" in red. An empty rule,
+  an unknown price or an unknown expiry is "margin unknown" too. Never zero.
+- **Deadline**: the earliest of the forced exit (the close, 15:30, of E-5), the start of ICICI's delivery margin (E-4,
+  15:15), ICICI's auto close on expiry day (12:00 for a spread, 13:30 short only) and, for a sold call, the 11:00 shares
+  deadline. With the shipped config it is always the forced exit. After it, every evaluation of a position that is not
+  marked closed returns a red `EXIT_OVERDUE` alert, whatever its moneyness.
+- **No code path closes or changes a position**: positions are frozen objects, the module imports no store, feed or SDK
+  (tested), and tests/test_safety.py passes.
+
+### Tested
+P9.29-P9.32 acceptance checks of docs/implementation.md, each with a test: every level on its days and none for a far
+out-of-the-money leg; the level only rises; unknown price and unknown expiry are URGENT; the two hand calculations;
+"margin unknown" for an empty rule; the red alert on every call after the deadline until closed; the unconfirmed label
+appearing and disappearing with a rule's flag; positions unchanged. The app was started in simulated mode (port 8011):
+`/api/stock-option-selling/settlement` returns the rules and the page shows the "Settlement readiness" card.
+
+### Not tested / not built here
+- **Sending and repeating the alerts** (Telegram, repeat interval per level) and **marking a position closed**: phase 6.
+  No position is recorded before phase 6, so the route returns no alert and nothing is shown at the top of the dashboard yet.
+- **The holiday calendar in the day count**: the functions take the calendar's `is_trading_day`; the tests use weekdays.
+  Phase 6 must pass the calendar (a missing holiday would make every level one day late).
+- **ICICI's rules themselves** are as you entered them; none was checked from here (issue 85).
+- The backtest still exits at the time exit (10 calendar days), which is always before the 5-trading-day forced-exit
+  window, so the forced exit never fires in a backtest.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1759,6 +1817,8 @@ ICICI blocks fresh positions in the last days, and the 11:00 deadline for shares
 | 83 | review | Git history (private repo) holds external-repo prices in older commits of docs/STATUS.md | Open: clean the history before the repo is ever made public |
 | 84 | review | KOTAKBANK 2025 and ETERNAL 2020 no longer complete after the per-block recheck | Open: the next `--download` fetches what they want |
 | 85 | 9 M3 | ICICI auto-close time (two differing statements), fresh-position block and the 11:00 shares deadline are unconfirmed | Waiting for user: confirm with ICICI, then set `confirmed: true` |
+| 86 | 9 M3 | The rupee amount of the expiry-week margin needs ICICI's VaR + ELM + adhoc margin for the position; the system does not have it | Open: shown as "margin unknown" with the schedule's percentage until the phase 6 position form takes the figure |
+| 87 | 9 M3 | Settlement day counts use weekdays in the tests; phase 6 must pass the holiday calendar | Open (phase 6) |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
@@ -1860,3 +1920,6 @@ ICICI blocks fresh positions in the last days, and the 11:00 deadline for shares
 | 2026-11-15 | Tracked files never carry values of the external repo's rows (factors, methods, aggregates only); history is not rewritten while the repo is private, but must be cleaned before it is ever made public (review fix 5) |
 | 2026-11-15 | Rows dated after today are a data error on the Data status page and never count as fresh (review fix 6) |
 | 2026-11-15 | Settlement alerts: URGENT from E-5 (same day as the forced exit) for a short stock option ITM or within 5% of spot; ICICI rules stored with per-rule `confirmed` flags; alert deadlines use the earliest stated auto-close time for the legs held |
+| 2026-11-15 | Settlement readiness: near the money = strike within 5% of spot and not in the money; a leg further out never alerts. Before E-7 nothing is raised, even with an unknown price; from E-7 an unknown price is URGENT; an unknown expiry is always URGENT |
+| 2026-11-15 | Settlement deadline = the earliest of the close (15:30) of the forced-exit day (E-5) and ICICI's times (delivery margin start, auto close, call shares deadline); after it a position not marked closed is alerted in red on every evaluation, whatever its moneyness |
+| 2026-11-15 | Delivery estimate nets a sold leg only with a bought leg of the same right that is in the money at the last price too; the expiry-week margin is the schedule's percentage of a margin base entered by the user, never computed or assumed by the system |
