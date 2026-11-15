@@ -1234,6 +1234,39 @@ unknown 8 (-265; IV history missing). Score was not used to select anything; not
   its decision day's cross-section of candidates (every block applied except the campaign limit and the portfolio
   limits, which depend on results and positions). Ties: by stock, then expiry, then side.
 
+## Phase 9 download of 2026-11-15 and rerun on what is stored
+
+Download (fresh Breeze login): the slow offline `--recheck` was stopped by the user's instruction after ~55 minutes
+(it had confirmed 6 stock-years); then `--download`. Today's budget was raised **for this day only** to 4,500 requests
+(user: not a trading day, live app not running; hard stop 4,800) through a one-off run setting, not in config.yaml, which
+keeps 3,500. Two runs: 3,500 + 1,000 = 4,500 requests, both stopped on the budget; no authentication or memory error (one
+DNS failure on a single request at 08:37 IST, recovered). 41 stock-years completed.
+
+Complete now (plan version 6): **2026 for all 30 priority stocks; 2025 for 16** (HDFCBANK, RELIANCE, ICICIBANK, SBIN,
+BHARTIARTL, INFY, BSE, LT, M&M, ETERNAL, TCS, AXISBANK, BAJFINANCE, KOTAKBANK, INDIGO, SHRIRAMFIN). MARUTI 2025 was cut
+off by the budget. Still to do: 2025 for 14 stocks, then 2024 and 2023.
+
+Rerun (offline, every block applied, Rs 10,00,000, whole lots). Both reports still list contracts not stored (46 and 20):
+the download pass replays the main, rule-effect, roll-policy and reversal streams, but not the portfolio-gated runs,
+score scans or exit-on-alert rows, which can want other strikes. Low sample throughout; nothing tuned.
+
+| Report | Execution | Strategy trades | Strategy net (Rs) | Baseline trades | Baseline net (Rs) | Verdict |
+|---|---|---|---|---|---|---|
+| 16 stocks, 2025-01-01..2026-06-05 (351 sessions) | synchronized 5-minute | 19 | -16,085 (PF 0.48) | 91 | +2,382 (PF 1.03) | no edge vs baseline |
+| same | daily close | 19 | -20,933 | 88 (+4 open at cutoff) | -16,107 | - |
+| 30 stocks, 2026-01-01..2026-06-05 (103 sessions) | synchronized 5-minute | 12 | -7,779 (PF 0.53) | 50 | -15,951 (PF 0.71) | no edge vs baseline |
+| same | daily close | 12 | -14,309 | 41 (+9 open at cutoff) | -79,291 | - |
+
+CORRELATED_LIMIT: **refused no strategy entry** in either report (22 and 16 entries checked; one position at a time in a
+group of 1 or 2). It blocked 1 entry in "strategy without the trend block" (16 stocks) and 1 in "strategy without the market
+block" (30 stocks). On the no-filter baseline with the portfolio limits added it blocked 39 entries (16 stocks: 57 trades,
++12,830) and 30 (30 stocks: 21 trades, +3,457). Correlated groups on 2026-06-05: 12, 2, 1, 1 (16 stocks); 19, 3, 3, 1, 1, 1,
+1, 1 (30 stocks).
+
+Monthly candidates: 16 stocks 22 candidates / 21 trades in 18 months (16 short); 30 stocks 16 / 14 in 6 months (5 short).
+Score bands: still almost all "small cross-section" (1 candidate on 38 of 42 and 29 of 34 decision days).
+Reports: `data/diagnostics/stock_report_2026-11-15_16stocks_2025-2026.txt`, `..._30stocks_2026.txt`.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1300,7 +1333,7 @@ unknown 8 (-265; IV history missing). Score was not used to select anything; not
 | 70 | 9 | The research pages still use `account.capital_inr` Rs 2,00,000; only the Phase 9 backtests use Rs 10,00,000 | Closed 2026-11-14: research pages use Rs 10,00,000 |
 | 71 | 9 | MARKET_WEAK is applied to put selling only (a weak market is not held against a bear call spread); unknown market data gives MARKET_UNKNOWN | Closed 2026-11-14: confirmed by the user |
 | 72 | 9 | Open interest minimum of 200 lots skips 159 of 250 baseline attempts in the stored period | Reported; no default changed |
-| 73 | 9 | After the M1 rule changes the report wants 430 contracts that are not stored | Open: next `--download` (plan version raised, every stock-year is checked again) |
+| 73 | 9 | After the M1 rule changes the report wants 430 contracts that are not stored | 2026-11-15: 2026 complete for 30 stocks, 2025 for 16; reports still miss 46 / 20 contracts from runs the download pass does not replay (portfolio-gated, score scans, alert exits) |
 | 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
 | 75 | 9 | Score bands need several candidates a day; the stored months give 1 on 20 of 22 days | Open: needs more stocks and years downloaded |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
