@@ -381,7 +381,7 @@ def scan_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev:
             d = bar_date(bar)
             if d not in allowed:
                 continue
-            ctx = eng.context(scan, sym, d, bar.close, "strategy", None, tuple(bars[max(start, i - 1299):i + 1]), ())
+            ctx = eng.context(scan, sym, d, bar.close, "strategy", None, eng.daily_window(sym, i, start), ())
             for sig in scan.evaluate(ctx):
                 sc = sig.details.get("score") or {}
                 out.append({"stock": sym, "date": d, "expiry": sig.details["expiry"], "side": sig.details["side"],
@@ -534,7 +534,7 @@ def credit_ratio_distribution(settings: Settings, eng: OptionEngine, syms: list[
                         want = eng.baseline_schedule(st, sym).get(d)
                         if not want:
                             continue
-                    ctx = eng.context(st, sym, d, bar.close, name, None, tuple(bars[max(start, i - 1299):i + 1]), ())
+                    ctx = eng.context(st, sym, d, bar.close, name, None, eng.daily_window(sym, i, start), ())
                     for sig in st.evaluate(ctx):
                         key = (sym, sig.details["expiry"], sig.details["side"], name)
                         if key in seen:

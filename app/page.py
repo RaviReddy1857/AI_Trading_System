@@ -31,6 +31,7 @@ PAGE_HTML = """<!doctype html>
  <a class="tag" href="/options">Options view</a>
  <a class="tag" href="/stock-option-selling">Stock option selling</a>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
+<a href="/data-status" id="dstrip" style="display:block;padding:8px 20px;border-bottom:1px solid var(--line);color:var(--ink);text-decoration:none;font-size:14px">Data status: loading...</a>
 <main>
  <div class="card" id="regime-card"><h2>Today's market type</h2>
   <div class="badges"><span class="badge UNKNOWN" id="regime">UNKNOWN</span>
@@ -101,7 +102,83 @@ document.getElementById("ibtn").onclick=async()=>{
   out.className=x.ok?"up":"down";if(x.ok)regime();
  }catch(e){out.textContent="Import failed";out.className="down"}
 };
-cfg();tick();regime();setInterval(tick,2000);setInterval(regime,15000);
+async function dstatus(){
+ const el=document.getElementById("dstrip");
+ try{const s=await j("/api/data-status");const c=s.counts;
+  const bad=s.rows.filter(r=>r.colour==="red"||r.colour==="amber").map(r=>r.source);
+  el.innerHTML=`Data status: <b class="up">${c.green} OK</b> &middot; <b style="color:var(--warn)">${c.amber} need attention</b> &middot; <b class="down">${c.red} missing or blocking</b>`+(bad.length?` <span class="mute">(${esc(bad.join(", "))})</span>`:"")+` <span class="mute">&rarr; details</span>`;
+ }catch(e){el.textContent="Data status: not available"}
+}
+cfg();tick();regime();dstatus();setInterval(tick,2000);setInterval(regime,15000);setInterval(dstatus,60000);
+</script></body></html>
+"""
+
+DATA_STATUS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data status</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#16202a;--mute:#5b6875;--line:#dde2e8;--ok:#0a7a45;--bad:#b3261e;--warn:#9a6200}
+ @media (prefers-color-scheme:dark){:root{--bg:#11161c;--card:#1a212a;--ink:#e8edf2;--mute:#9aa7b4;--line:#2c3743;--ok:#4cc38a;--bad:#ff8a80;--warn:#f0b849}}
+ body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+ h1{font-size:18px;margin:0} h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600}
+ .tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:2px 8px;color:var(--mute)}
+ main{padding:16px 20px;display:grid;gap:16px;max-width:1200px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+ table{border-collapse:collapse;width:100%} th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+ th{font-size:12px;color:var(--mute);font-weight:600}
+ .green{color:var(--ok);font-weight:700} .amber{color:var(--warn);font-weight:700} .red{color:var(--bad);font-weight:700} .grey{color:var(--mute)}
+ .mute{color:var(--mute);font-size:13px} ul{margin:4px 0 0;padding-left:20px} li{margin:3px 0}
+ input,button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+</style></head><body>
+<header><h1>Data status</h1><span class="tag">RESEARCH ONLY: this app cannot place orders</span>
+ <a class="tag" href="/">Back to prices</a> <span class="tag" id="asof"></span></header>
+<main>
+ <div class="card"><h2 id="summary">Loading...</h2>
+  <table><thead><tr><th>Source</th><th>Last updated</th><th>Coverage</th><th>Status</th><th>Blocks</th><th>What you need to do</th></tr></thead>
+  <tbody id="rows"></tbody></table>
+  <div class="mute" id="note"></div></div>
+ <div class="card"><h2>Import</h2>
+  <p class="mute">Put the files you downloaded in <code>data/inbox/</code> and press the button (or run <code>python -m app.inbox</code>).
+  Processed files move to <code>data/inbox/done/</code>; rejected ones to <code>data/inbox/rejected/</code> with a reason file.</p>
+  <label class="mute">Board meetings cover through (optional, YYYY-MM-DD): <input id="through" size="11"></label>
+  <button id="inbox" type="button">Import inbox files</button> <span class="mute" id="inboxres"></span>
+  <h2 style="margin-top:14px">RBI decision</h2>
+  <label class="mute">Date <input id="rdate" size="11" placeholder="YYYY-MM-DD"></label>
+  <label class="mute">Decision <input id="rdec" size="40" placeholder="repo unchanged at 5.25%  (or: scheduled)"></label>
+  <button id="rbtn" type="button">Save</button> <span class="mute" id="rres"></span></div>
+ <div class="card"><h2>How to update</h2><div id="how"></div></div>
+</main>
+<script>
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const label={green:"OK",amber:"needs attention",red:"missing / blocking",grey:"info"};
+async function load(){
+ const s=await (await fetch("/api/data-status")).json();
+ document.getElementById("asof").textContent="As of "+new Date(s.as_of_utc).toLocaleString();
+ const c=s.counts;
+ document.getElementById("summary").innerHTML=`<span class="green">${c.green} OK</span> &middot; <span class="amber">${c.amber} need attention</span> &middot; <span class="red">${c.red} missing or blocking</span> <span class="mute">(last completed session ${esc(s.last_session)})</span>`;
+ document.getElementById("rows").innerHTML=s.rows.map(r=>{
+  const d=r.detail||{};const extra=[];
+  if(d.stocks_without_coverage&&d.stocks_without_coverage.length)extra.push("No coverage through the next expiry: "+d.stocks_without_coverage.join(", "));
+  if(d.coverage_older_than_limit&&d.coverage_older_than_limit.length)extra.push("Coverage older than the limit: "+d.coverage_older_than_limit.join(", "));
+  if(d.behind&&d.behind.length)extra.push("Behind: "+d.behind.map(x=>x+" ("+(d.last_date_per_stock[x]||"none")+")").join(", "));
+  if(d.commit)extra.push("Commit "+d.commit);
+  return `<tr><td>${esc(r.source)}</td><td>${esc(r.last_updated||"never")}</td><td>${esc(r.coverage)}${extra.map(x=>`<div class="mute">${esc(x)}</div>`).join("")}</td>
+  <td class="${r.colour}">${esc(r.status)}<div class="mute">${label[r.colour]}</div></td><td>${esc(r.blocks)}</td><td>${esc(r.what_to_do)}</td></tr>`}).join("");
+ document.getElementById("note").textContent=s.note;
+ document.getElementById("how").innerHTML=Object.entries(s.how_to_update).map(([k,v])=>`<b>${esc(k[0].toUpperCase()+k.slice(1))}</b><ul>${v.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`).join("");
+}
+async function post(u,b){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});return r.json()}
+document.getElementById("inbox").onclick=async()=>{const o=document.getElementById("inboxres");o.textContent="importing...";
+ try{const x=await post("/data/import/inbox",{covered_through:document.getElementById("through").value});
+  o.textContent=x.files&&x.files.length?x.files.map(f=>f.file+": "+(f.ok===false?"REJECTED - "+f.errors.join("; "):(f.kind+", "+(f.added||0)+" added, "+(f.duplicates||0)+" duplicates"))).join(" | "):"No files in data/inbox/";load()}
+ catch(e){o.textContent="Import failed"}};
+document.getElementById("rbtn").onclick=async()=>{const o=document.getElementById("rres");
+ try{const x=await post("/data/import/rbi-decision",{date:document.getElementById("rdate").value,decision:document.getElementById("rdec").value});
+  o.textContent=x.ok?(x.added?"Saved":"Already there"):"Not saved: "+(x.errors||[x.detail]).join("; ");load()}
+ catch(e){o.textContent="Save failed"}};
+load();setInterval(load,60000);
 </script></body></html>
 """
 

@@ -97,6 +97,29 @@ CREATE TABLE IF NOT EXISTS shortlist (
 CREATE TABLE IF NOT EXISTS campaigns (
     campaign_id TEXT PRIMARY KEY, stock TEXT NOT NULL, updated_utc TEXT NOT NULL, summary_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    symbol TEXT NOT NULL, ex_date TEXT NOT NULL, action_type TEXT NOT NULL, purpose TEXT NOT NULL,
+    record_date TEXT, announced_on TEXT, ratio TEXT, price_factor REAL, factor_basis TEXT,
+    source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL,
+    PRIMARY KEY (symbol, ex_date, action_type, purpose)
+);
+CREATE TABLE IF NOT EXISTS positioning_daily (
+    date TEXT PRIMARY KEY, data_json TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS external_bars_1d (
+    symbol TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL, volume REAL,
+    source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL, price_basis TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+CREATE TABLE IF NOT EXISTS price_crosscheck (
+    symbol TEXT NOT NULL, date TEXT NOT NULL, breeze_close REAL NOT NULL, external_close REAL NOT NULL,
+    diff_pct REAL NOT NULL, explained_by TEXT, source_ref TEXT, checked_utc TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+CREATE TABLE IF NOT EXISTS data_imports (
+    dataset TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL,
+    rows INTEGER NOT NULL, note TEXT
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -353,6 +376,101 @@ class Store:
         with self._lock:
             rows = self._db.execute("SELECT date,fii_net_cr,dii_net_cr FROM fii_dii ORDER BY date").fetchall()
         return [{"date": date.fromisoformat(r[0]), "fii_net_cr": r[1], "dii_net_cr": r[2]} for r in rows]
+
+    def all_events(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT date,type,symbol,note FROM events ORDER BY date,type,symbol,note").fetchall()
+        return [{"date": date.fromisoformat(r[0]), "type": r[1], "symbol": r[2], "note": r[3]} for r in rows]
+
+    # ---------------- imported reference data (external repo, inbox files) ----------------
+    CA_COLS = ("symbol", "ex_date", "action_type", "purpose", "record_date", "announced_on", "ratio", "price_factor",
+               "factor_basis", "source", "source_ref", "imported_utc")
+
+    def save_corporate_actions(self, rows: list[dict], replace_source: bool = True) -> int:
+        """Insert actions. A row already stored from another source for the same (symbol, ex_date, type,
+        purpose) is kept (first source wins); `replace_source`: a row of the same source is refreshed."""
+        added = 0
+        with self._lock:
+            for r in rows:
+                key = (r["symbol"], r["ex_date"], r["action_type"], r["purpose"])
+                old = self._db.execute("SELECT source FROM corporate_actions WHERE symbol=? AND ex_date=? AND "
+                                       "action_type=? AND purpose=?", key).fetchone()
+                if old is not None and (old[0] != r["source"] or not replace_source):
+                    continue
+                self._db.execute(f"INSERT OR REPLACE INTO corporate_actions VALUES ({','.join('?' * len(self.CA_COLS))})",
+                                 tuple(r.get(c) for c in self.CA_COLS))
+                added += old is None
+            self._db.commit()
+        return added
+
+    def corporate_actions(self, symbol: str | None = None, types: tuple[str, ...] | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM corporate_actions WHERE 1=1", []
+        if symbol is not None:
+            sql += " AND symbol=?"
+            args.append(symbol)
+        if types:
+            sql += f" AND action_type IN ({','.join('?' * len(types))})"
+            args += list(types)
+        with self._lock:
+            rows = self._db.execute(sql + " ORDER BY symbol, ex_date", args).fetchall()
+        return [dict(zip(self.CA_COLS, r)) for r in rows]
+
+    def save_positioning(self, rows: list[tuple[str, str, str, str, str]]) -> int:
+        """(date, data_json, source, source_ref, imported_utc)."""
+        with self._lock:
+            self._db.executemany("INSERT OR REPLACE INTO positioning_daily VALUES (?,?,?,?,?)", rows)
+            self._db.commit()
+        return len(rows)
+
+    def positioning_dates(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._db.execute("SELECT date FROM positioning_daily ORDER BY date")]
+
+    def save_external_bars(self, rows: list[tuple]) -> int:
+        """(symbol, date, open, high, low, close, volume, source, source_ref, imported_utc, price_basis)."""
+        with self._lock:
+            self._db.executemany("INSERT OR REPLACE INTO external_bars_1d VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self._db.commit()
+        return len(rows)
+
+    def external_bars(self, symbol: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT date,open,high,low,close,volume,source,price_basis FROM external_bars_1d "
+                                    "WHERE symbol=? ORDER BY date", (symbol,)).fetchall()
+        return [dict(zip(("date", "open", "high", "low", "close", "volume", "source", "price_basis"), r)) for r in rows]
+
+    def external_bar_summary(self) -> dict[str, tuple[str, str, int]]:
+        with self._lock:
+            return {s: (a, b, n) for s, a, b, n in self._db.execute(
+                "SELECT symbol, MIN(date), MAX(date), COUNT(*) FROM external_bars_1d GROUP BY symbol")}
+
+    def save_crosscheck(self, rows: list[tuple]) -> int:
+        """(symbol, date, breeze_close, external_close, diff_pct, explained_by, source_ref, checked_utc)."""
+        with self._lock:
+            self._db.executemany("INSERT OR REPLACE INTO price_crosscheck VALUES (?,?,?,?,?,?,?,?)", rows)
+            self._db.commit()
+        return len(rows)
+
+    def crosscheck_rows(self) -> list[dict]:
+        cols = ("symbol", "date", "breeze_close", "external_close", "diff_pct", "explained_by", "source_ref", "checked_utc")
+        with self._lock:
+            return [dict(zip(cols, r)) for r in self._db.execute("SELECT * FROM price_crosscheck ORDER BY symbol, date")]
+
+    def log_import(self, dataset: str, source: str, source_ref: str | None, at: datetime, rows: int, note: str = "") -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO data_imports VALUES (?,?,?,?,?,?)",
+                             (dataset, source, source_ref, at.isoformat(), rows, note))
+            self._db.commit()
+
+    def last_imports(self) -> dict[str, dict]:
+        """The newest import of each dataset."""
+        with self._lock:
+            rows = self._db.execute("SELECT dataset, source, source_ref, imported_utc, rows, note FROM data_imports "
+                                    "ORDER BY imported_utc").fetchall()
+        out = {}
+        for d, s, ref, at, n, note in rows:
+            out[d] = {"source": s, "source_ref": ref, "imported_utc": at, "rows": n, "note": note}
+        return out
 
     # ---------------- regime log ----------------
     def save_regime(self, at: datetime, session_date: date, regime: str, bias: str,

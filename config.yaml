@@ -119,6 +119,22 @@ calendar:                        # CSV files you maintain (see README)
   events_csv: data/events.csv
   holidays_csv: data/holidays.csv
   fii_dii_csv: data/fii_dii.csv
+  # rows imported from the external repo (personal use only, no redistribution) live in data/external/
+  # events_external.csv and fii_dii_external.csv (gitignored), merged on load; your own files win on the same date
+
+external_data:                   # one-time import (python -m app.external_data); data files only, no script is run
+  repo_path: ../external_data/indian-market-historical-data
+  history_since: 2019-01-22
+  corporate_actions_since: 2019-01-01
+  positioning_since: 2024-01-01
+  crosscheck_mismatch_pct: 0.5   # daily close vs Breeze: stored and reported above this
+
+data_status:                     # the Data status page (/data-status): when a source counts as STALE
+  fii_dii_max_trading_days: 1
+  coverage_max_age_days: 7
+  corporate_actions_max_age_days: 7
+  rbi_decision_grace_days: 3     # a scheduled RBI meeting with no decision row this many days later: amber
+  inbox_dir: data/inbox          # files you download by hand; processed -> done/, rejected -> rejected/
 
 server:
   host: 127.0.0.1              # local only; do not change to 0.0.0.0

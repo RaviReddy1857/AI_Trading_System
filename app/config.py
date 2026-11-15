@@ -145,6 +145,38 @@ class Calendar(StrictModel):
     events_csv: str = "data/events.csv"
     holidays_csv: str = "data/holidays.csv"
     fii_dii_csv: str = "data/fii_dii.csv"
+    # rows imported from the external repo (licence: personal use only, no redistribution): gitignored overlays,
+    # merged on load; the user's own files win on the same date. Blank: external/<name> next to the user's file
+    events_external_csv: str = ""
+    fii_dii_external_csv: str = ""
+
+    def overlay(self, kind: str) -> str:
+        own, set_ = {"events": (self.events_csv, self.events_external_csv),
+                     "fii_dii": (self.fii_dii_csv, self.fii_dii_external_csv)}[kind]
+        if set_:
+            return set_
+        p = own.replace("\\", "/")
+        folder, _, name = p.rpartition("/")
+        return f"{folder + '/' if folder else ''}external/{name.removesuffix('.csv')}_external.csv"
+
+
+class ExternalData(StrictModel):
+    """One-time import from the external GitHub repo aswinv90/indian-market-historical-data (a local clone
+    outside app/; only its data files are read, none of its scripts is run)."""
+    repo_path: str = "../external_data/indian-market-historical-data"
+    history_since: _date = _date(2019, 1, 22)           # daily OHLCV and RBI dates from here on
+    corporate_actions_since: _date = _date(2019, 1, 1)
+    positioning_since: _date = _date(2024, 1, 1)
+    crosscheck_mismatch_pct: float = Field(0.5, gt=0, le=50)   # daily close vs Breeze: report above this
+
+
+class DataStatusLimits(StrictModel):
+    """When a data source counts as STALE on the Data status page."""
+    fii_dii_max_trading_days: int = Field(1, ge=0, le=30)
+    coverage_max_age_days: int = Field(7, ge=1, le=60)
+    corporate_actions_max_age_days: int = Field(7, ge=1, le=60)
+    rbi_decision_grace_days: int = Field(3, ge=0, le=30)      # a scheduled meeting without a decision row after this
+    inbox_dir: str = "data/inbox"
 
 
 # ---------------- phase 3: costs, strategies, backtest ----------------
@@ -746,6 +778,8 @@ class Settings(StrictModel):
     backtest: Backtest = Backtest()
     options: Options = Options()             # phase 4
     stock_option_selling: StockOptionSelling = StockOptionSelling()   # phase 9
+    external_data: ExternalData = ExternalData()
+    data_status: DataStatusLimits = DataStatusLimits()
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":

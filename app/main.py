@@ -25,7 +25,7 @@ from .options.chain import BreezeChainSource, ChainLoader, SimChainSource
 from .options.instruments import InstrumentBook, refresh_from_broker, sim_specs
 from .options.margin import import_margins, load_margin_file
 from .options.shortlist import correlation_groups, reversal_watch, stock_view
-from .page import BACKTEST_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
+from .page import BACKTEST_HTML, DATA_STATUS_HTML, OPTIONS_HTML, PAGE_HTML, SHORTLIST_HTML
 from .quality import IST
 from .regime import RegimeService
 from .store import Store
@@ -234,6 +234,60 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     def regime_now():
         return {**regime.evaluate(), "history": store.regime_history(20),
                 "history_bars": store.history_counts(feed.name)}
+
+    # ---- data status and the inbox importers (write routes under /data/import/, same local-only checks) ----
+    async def _json_body(request: Request) -> dict:
+        body = await request.body()
+        if len(body) > 10_000:
+            raise HTTPException(413, "request body is too large")
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, ValueError):
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        return payload
+
+    def _status() -> dict:
+        from .data_status import data_status
+        live = any(r.get("status") == "LIVE" for r in hub.snapshot())
+        return data_status(settings, store, calendar, feed.name, live_ticks_today=live, manual=manual)
+
+    @app.get("/api/data-status")
+    def api_data_status():
+        return _status()
+
+    @app.get("/data-status", response_class=HTMLResponse)
+    def data_status_page():
+        return DATA_STATUS_HTML
+
+    @app.post("/data/import/inbox")
+    async def data_import_inbox(request: Request):
+        """Import every file in data/inbox/ (NSE board meetings, corporate actions, FII/DII, RBI decisions)."""
+        from .inbox import run_inbox
+        from .manual_data import parse_date
+        payload = await _json_body(request)
+        through = payload.get("covered_through")
+        try:
+            through_d = parse_date(through) if isinstance(through, str) and through.strip() else None
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        results = run_inbox(settings, store, manual, covered_through=through_d)
+        return {"ok": all(r.get("ok", True) for r in results), "files": results,
+                "note": "no files in the inbox" if not results else ""}
+
+    @app.post("/data/import/rbi-decision")
+    async def data_import_rbi(request: Request):
+        """One RBI decision (or a scheduled meeting date) into data/events.csv: {"date": "...", "decision": "..."}."""
+        from .inbox import rbi_event
+        from .manual_data import merge_into_file, parse_date
+        payload = await _json_body(request)
+        try:
+            ev = rbi_event(parse_date(str(payload.get("date", ""))), str(payload.get("decision", ""))[:200], "form", utcnow())
+        except ValueError as e:
+            return JSONResponse({"ok": False, "errors": [str(e)]}, status_code=400)
+        res = merge_into_file(manual, "events", [ev])
+        return JSONResponse(res, status_code=200 if res["ok"] else 400)
 
     @app.post("/data/import/{kind}")
     async def data_import(kind: str, request: Request):

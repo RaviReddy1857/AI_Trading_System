@@ -58,6 +58,16 @@ def session_date(settings: Settings, store: Store, source: str) -> date | None:
     return bar_date(bars[-1]) if bars else None
 
 
+def live_daily(settings: Settings, store: Store, bars: list, sym: str) -> tuple:
+    """The daily history a research candidate sees: adjusted for the splits, bonuses and demergers known
+    at the last bar (app/corporate_actions.py), raw prices after the last break when none is stored."""
+    from ..corporate_actions import PRICE_ACTIONS, AdjustedHistory
+    acts = store.corporate_actions(sym, PRICE_ACTIONS)
+    if not acts:
+        return tuple(after_last_break(bars, settings.history.max_overnight_gap_pct))
+    return AdjustedHistory(bars, acts, settings.history.max_overnight_gap_pct).window(len(bars) - 1, len(bars))
+
+
 def stock_context(settings: Settings, store: Store, source: str, book: InstrumentBook, desk: OptionDesk,
                   costs: CostModel, margins: MarginBook, sym: str, session: date, now: datetime,
                   regime: str = "UNKNOWN") -> tuple[OptionContext | None, str | None]:
@@ -95,7 +105,7 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
         allowed_kinds=("monthly",), margin=lambda structure, width: margins.lookup(sym, structure, width, session),
         require_margin=True, historical=False, max_spread_pct=sos.max_bid_ask_pct_of_mid,
         min_oi_lots=sos.min_open_interest_lots, search_steps=o.backtest.strike_search_steps, events=events,
-        daily=tuple(after_last_break(bars, settings.history.max_overnight_gap_pct)),
+        daily=live_daily(settings, store, bars, sym),
         index_daily=tuple(store.history_bars("bars_1d", settings.regime.index_symbol, source, limit=400)),
         market={"reversal": reversal_scanner(settings, store, source, sym).info_on(session),
                 "breadth_pct": breadth_on(settings, store, source, session), "chain_as_of": chain_as_of,

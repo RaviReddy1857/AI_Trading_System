@@ -38,6 +38,7 @@ class FiiDii:
     date: date
     fii_net_cr: float
     dii_net_cr: float | None
+    source: str = ""          # blank = entered by the user; otherwise where the row came from
 
 
 # ---------------- parsing helpers ----------------
@@ -189,6 +190,7 @@ def parse_fii_dii(text: str) -> tuple[dict[date, FiiDii], list[str]]:
     ci = _find(head, "category")
     if ci is None:
         di, fi, dii = _find(head, "date"), _find(head, "fiinet", "fii"), _find(head, "diinet", "dii")
+        si = _find(head, "source")
         if di is None or fi is None:
             return {}, ["fii_dii header must be 'date,fii_net_cr,dii_net_cr' or the NSE "
                         "'Category,Date,Buy Value,Sell Value,Net Value' layout"]
@@ -197,7 +199,7 @@ def parse_fii_dii(text: str) -> tuple[dict[date, FiiDii], list[str]]:
             try:
                 d = parse_date(_cell(r, di))
                 dv = _cell(r, dii).strip()
-                out[d] = FiiDii(d, parse_amount(_cell(r, fi)), parse_amount(dv) if dv else None)
+                out[d] = FiiDii(d, parse_amount(_cell(r, fi)), parse_amount(dv) if dv else None, _cell(r, si))
             except ValueError as e:
                 errors.append(f"line {n}: {e}")
         return dict(sorted(out.items())), errors
@@ -229,10 +231,11 @@ def parse_fii_dii(text: str) -> tuple[dict[date, FiiDii], list[str]]:
 def fii_dii_to_csv(rows: dict[date, FiiDii]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["date", "fii_net_cr", "dii_net_cr"])
+    tagged = any(r.source for r in rows.values())
+    w.writerow(["date", "fii_net_cr", "dii_net_cr"] + (["source"] if tagged else []))
     for d in sorted(rows):
         r = rows[d]
-        w.writerow([d.isoformat(), r.fii_net_cr, "" if r.dii_net_cr is None else r.dii_net_cr])
+        w.writerow([d.isoformat(), r.fii_net_cr, "" if r.dii_net_cr is None else r.dii_net_cr] + ([r.source] if tagged else []))
     return buf.getvalue()
 
 
@@ -246,6 +249,7 @@ class ManualData:
         self.calendar = calendar
         self._lock = threading.Lock()
         self.errors: dict[str, list[str]] = {k: [] for k in KINDS}
+        self.overlay_errors: dict[str, list[str]] = {}
 
     def _path(self, kind: str) -> Path:
         c = self.settings.calendar
@@ -294,21 +298,50 @@ class ManualData:
             shown = "; ".join(errs[:3]) + (f"; and {len(errs) - 3} more" if len(errs) > 3 else "")
             out.append(f"{self.display_path(kind)} could not be loaded ({shown}); "
                        f"the last good copy is in use until it is fixed or re-imported")
+        for kind, errs in dict(self.overlay_errors).items():
+            out.append(f"{self.overlay_path(kind)} (imported rows) could not be read ({'; '.join(errs[:3])}); "
+                       f"those rows are not used")
         return out
 
     @staticmethod
     def _parse(kind: str, text: str):
         return {"events": parse_events, "holidays": parse_holidays, "fii_dii": parse_fii_dii}[kind](text)
 
+    def overlay_path(self, kind: str) -> Path | None:
+        if kind not in ("events", "fii_dii"):
+            return None
+        return self.settings.path(self.settings.calendar.overlay(kind))
+
+    def _overlay(self, kind: str):
+        """Rows imported from the external repo (a gitignored file next to the user's own). Unreadable or
+        invalid: not used at all, and reported by problems(); the user's own file is never affected."""
+        p = self.overlay_path(kind)
+        self.overlay_errors.pop(kind, None)
+        if p is None or not p.exists():
+            return [] if kind == "events" else {}
+        try:
+            parsed, errors = self._parse(kind, p.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError) as e:
+            parsed, errors = None, [f"cannot read file: {type(e).__name__}"]
+        if errors:
+            self.overlay_errors[kind] = errors
+            log.error("%s: %d invalid row(s); the imported rows are NOT used: %s", p.name, len(errors), errors[:5])
+            return [] if kind == "events" else {}
+        return parsed
+
     def _apply(self, kind: str, parsed) -> None:
         if kind == "events":
-            self.store.replace_events([(e.date.isoformat(), e.type, e.symbol, e.note) for e in parsed])
+            own = list(parsed)
+            mine = {(e.date, e.type, e.symbol) for e in own}
+            extra = [e for e in self._overlay("events") if (e.date, e.type, e.symbol) not in mine]   # the user's row wins
+            self.store.replace_events([(e.date.isoformat(), e.type, e.symbol, e.note) for e in own + extra])
         elif kind == "holidays":
             self.store.replace_holidays([(d.isoformat(), n) for d, n in parsed.items()])
             self.calendar.set_holidays(parsed)
         else:
+            merged = {**self._overlay("fii_dii"), **parsed}            # a day the user entered is never replaced
             self.store.replace_fii_dii([(d.isoformat(), r.fii_net_cr, r.dii_net_cr)
-                                        for d, r in parsed.items()])
+                                        for d, r in sorted(merged.items())])
 
     def import_text(self, kind: str, text: str) -> dict:
         """events and holidays: the pasted list REPLACES the file.
@@ -344,6 +377,45 @@ class ManualData:
             self.errors[kind] = []
         self._apply(kind, final)
         return {"ok": True, "errors": [], "rows_saved": len(parsed), "rows_total": len(final)}
+
+
+def event_key(e: Event) -> tuple:
+    """What makes two events the same, whatever file they came from: date, type and symbol; for a
+    COVERAGE row also its covered_through."""
+    through = coverage_fields(e.note)[1] if e.type == "COVERAGE" and coverage_fields(e.note) else None
+    return (e.date, e.type, e.symbol, through)
+
+
+def merge_into_file(manual: "ManualData", kind: str, new) -> dict:
+    """Add rows to the user's own file WITHOUT replacing any row already there (inbox imports).
+    events: a row with the same event_key as one in the file is a duplicate; fii_dii: a date already in
+    the file is kept as it is. The comment lines at the top of the file are kept."""
+    path = manual._path(kind)
+    with manual._lock:
+        text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+        old, errors = manual._parse(kind, text) if _rows(text) else (([] if kind == "events" else {}), [])
+        if errors:
+            return {"ok": False, "added": 0, "duplicates": 0,
+                    "errors": [f"{path.name} is invalid, fix it first"] + errors[:5]}
+        if kind == "events":
+            have = {event_key(e) for e in old}
+            add = []
+            for e in new:
+                if event_key(e) not in have:
+                    have.add(event_key(e))
+                    add.append(e)
+            final = sorted(set(old) | set(add), key=lambda e: (e.date, e.type, e.symbol, e.note))
+            body = events_to_csv(final)
+        else:
+            add = [r for d, r in new.items() if d not in old]
+            final = {**{r.date: r for r in add}, **old}
+            body = fii_dii_to_csv(final)
+        head = "".join(ln + "\n" for ln in text.splitlines() if ln.lstrip().startswith("#"))
+        if add:
+            _atomic_write(path, head + body)
+        manual.errors[kind] = []
+    manual._apply(kind, final)
+    return {"ok": True, "added": len(add), "duplicates": len(new) - len(add), "errors": []}
 
 
 def _atomic_write(path: Path, text: str) -> None:

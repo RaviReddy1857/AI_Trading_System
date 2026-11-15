@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 567 passed
+python -m pytest -q          # should say 576 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -60,6 +60,36 @@ Paste data on the dashboard ("Paste FII/DII figures, events or holidays"), or ed
   the last good copy stays in use, the page shows a red warning, and the regime is UNKNOWN with the file and row named
   until you fix it. If `fii_dii.csv` itself is broken, fix it in a text editor and restart, because new days cannot be merged into it.
 - The import route only accepts JSON (`{"text": "<csv>"}`) sent from this machine (127.0.0.1 or localhost), so other websites cannot post to it.
+
+### Data status page, inbox importers and the one-time external import
+**Data status** (`/data-status`, and a green / amber / red strip at the top of the main page): one row per data source
+with when it was last updated, its coverage, its status (OK, STALE, MISSING, PARTIAL or INFO), what it blocks, and exactly
+what to do. A STALE, MISSING or PARTIAL source is never shown as OK. The page ends with the daily and weekly routine.
+The Breeze session is confirmed only by data that arrived today (live prices or a download); the token in `.env` is
+never read.
+
+**Inbox** (`data/inbox/`, gitignored): put the files you download by hand there and press **Import inbox files** on the
+Data status page (or run `python -m app.inbox`). Processed files move to `data/inbox/done/`, rejected ones to
+`data/inbox/rejected/` with a `.reason.txt`. Duplicates are skipped and no row you entered is ever replaced.
+| File | Where | Columns read | What it adds |
+|---|---|---|---|
+| NSE board meetings | nseindia.com > Companies listing > Corporate filings > Board meetings, Download (.csv) | `SYMBOL`, `PURPOSE`, a meeting-date column (`MEETING DATE` / `BOARD MEETING DATE`), optional `DETAILS` | RESULTS events (purpose mentions results); a COVERAGE row for every watchlist stock through the latest meeting date (or `--covered-through`) |
+| NSE corporate actions | nseindia.com > Companies listing > Corporate filings > Corporate actions (Equity), Download (.csv) | `SYMBOL`, `PURPOSE`, `EX-DATE`, optional `SERIES`, `RECORD DATE` | splits, bonuses, demergers, rights, dividends (table `corporate_actions`, source `nse_inbox`) |
+| NSE FII/DII activity | nseindia.com > Reports > FII/DII trading activity, Download (.csv) | `Category`, `Date`, `Buy Value`, `Sell Value`, `Net Value` (or `date,fii_net_cr,dii_net_cr`) | new days in `fii_dii.csv` |
+| RBI decisions | rbi.org.in (monetary policy statements) | `date`, `decision` (`scheduled` for a planned meeting) | RBI_POLICY rows in `events.csv` (or use the RBI form on the page) |
+
+**Corporate-action adjustment:** splits, bonuses and demergers adjust the daily history used for the trend, 52-week low,
+range and profile (`app/corporate_actions.py`), point in time (an action counts from its announcement date if known,
+else its ex-date) and only where the raw Breeze prices show the gap. Raw prices are never changed; option strikes and
+option prices are never adjusted.
+
+**One-time import** from `aswinv90/indian-market-historical-data` (`python -m app.external_data`): **licence: personal,
+non-commercial research use only, no redistribution - never use this data in anything published.** Clone it outside
+the project (`../external_data/`; a sparse clone of `data/CORPORATE_ACTIONS`, `data/FLOWS`,
+`data/MACRO/rbi_policy_rates.*` and the F&O stocks' `data/NSE/*_NS.parquet` is enough); only its data files are read,
+none of its scripts is run. Imported rows are tagged `external_repo` with the commit and import date, kept in the SQLite
+store and in the gitignored overlays `data/external/events_external.csv` and `fii_dii_external.csv` (merged on load; your
+own rows win). Breeze data always comes first. Needs `pyarrow` (in requirements.txt).
 
 **FII bias:** BEARISH after 3 straight sessions of FII net selling, BULLISH after 3 of net buying, otherwise
 NEUTRAL. It is UNKNOWN if any of the last 3 sessions' figures are missing.
@@ -362,6 +392,8 @@ Reversal candidates stay silent until you set `stock_option_selling.reversal.ale
 - `app/quality.py` - quality rules and market hours
 - `app/hub.py` - tick -> quality gate -> bars -> price table
 - `app/calendar.py` - trading days and holidays
+- `app/data_status.py`, `app/inbox.py`, `app/external_data.py`, `app/corporate_actions.py` - the Data status page, the
+  inbox importers, the one-time external-repo import, and the point-in-time corporate-action adjustment of daily history
 - `app/history.py` - daily and 5-minute history download (Breeze or sim), paced, retries empty replies, skips stored data
 - `app/models.py` - Tick, Bar, and the Signal contract with its schema check
 - `app/strategies/` - `base.py` (Strategy, MarketContext) and the five strategies

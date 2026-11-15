@@ -357,12 +357,34 @@ class OptionEngine:
         self._vix_spike: dict | None = None
         self._stock_closes: dict | None = None
         self._reversal: dict[str, object] = {}
+        self._adjusted: dict[str, object] = {}
+        self.adjust_for_actions = True          # False: raw daily history only (to measure what the adjustment changes)
         self._trigger = None
         self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
         # Last session a run tests. A stock's IV history then leaves out the at-the-money calls of
         # expiries more than IV_EXPIRY_REACH_DAYS after it: they cannot matter, and they would be
         # option prices of the holdout period.
         self.last_session: date | None = None
+
+    def adjusted_history(self, sym: str):
+        """The stock's point-in-time adjusted daily history (corporate actions in the store), or None when
+        the store has no price action for it (then the raw bars after the last break are used)."""
+        if self.adjust_for_actions is False or self.kinds.get(sym) != "stock":
+            return None
+        if sym not in self._adjusted:
+            from ..corporate_actions import PRICE_ACTIONS, AdjustedHistory
+            acts = self.store.corporate_actions(sym, PRICE_ACTIONS)
+            self._adjusted[sym] = (AdjustedHistory(self.base.daily(sym), acts, self.s.history.max_overnight_gap_pct)
+                                   if acts else None)
+        return self._adjusted[sym]
+
+    def daily_window(self, sym: str, i: int, start: int, max_len: int = 1300) -> tuple:
+        """The daily bars a decision at bar i sees (see adjusted_history)."""
+        adj = self.adjusted_history(sym)
+        if adj is not None:
+            return adj.window(i, max_len)
+        bars = self.base.daily(sym)
+        return tuple(bars[max(start, i - max_len + 1):i + 1])
 
     def set_expiry_floor(self, floor: date | None) -> None:
         """Limit the expiries the engine looks at (used while downloading history block by block, so a
@@ -1112,7 +1134,12 @@ class OptionEngine:
         prev_snap = None
 
         def recent(i: int) -> tuple:
-            return tuple(bars[max(start, i - 1299):i + 1]) if needs_daily else ()
+            # the strategy's daily history: adjusted for splits, bonuses and demergers known that day (raw
+            # prices otherwise); a break an applied action explains no longer cuts it (app/corporate_actions.py)
+            if not needs_daily:
+                return ()
+            adj = self.adjusted_history(sym)
+            return adj.window(i, 1300) if adj is not None else tuple(bars[max(start, i - 1299):i + 1])
 
         def closed() -> tuple:
             if not needs_daily:

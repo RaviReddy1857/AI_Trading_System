@@ -1351,6 +1351,88 @@ so the campaign is now left out of the primary results and counted.
 - Strategy without the market block: 16 stocks 19 trades -25,189; 30 stocks 14 trades +260.
 - Reports: `data/diagnostics/stock_report_2026-11-15_review_fixes_fix_2025_2026.txt`, `..._fix_2026.txt`.
 
+## Data import, inbox importers and the Data status page (2026-11-15)
+
+### Licence of the external repo (aswinv90/indian-market-historical-data)
+**Personal, non-commercial research use only; no redistribution.** This data is never used in anything published. It is
+never committed: imported rows live in the SQLite store (gitignored) and in the gitignored overlays
+`data/external/events_external.csv` and `data/external/fii_dii_external.csv` (decision of the user, 2026-11-15:
+`events.csv` and `fii_dii.csv` are tracked in git and the repo has a GitHub remote, so the imported rows do not go into
+them). The clone is outside the project (`../external_data/indian-market-historical-data`, a sparse clone of only the
+needed data files); none of its scripts was run. Commit imported: `1f4aff7c3e53a9f2bfb6a167b0d80f4d0c8f8bf9`
+(2026-11-12T22:29:14Z). Every row is tagged source `external_repo`, the commit and the import time.
+
+### What was imported (one run, 2026-11-15)
+| Dataset | Rows | Where | Notes |
+|---|---|---|---|
+| Corporate actions since 2019-01-01 | 11,967 (dividends 10,991, bonuses 321, splits 309, rights 250, demergers 96) | table `corporate_actions` | 8 split/bonus ratios unreadable (no factor); bonus of preference shares (e.g. TVSMOTOR NCRPS) kept without a price factor |
+| RBI policy dates since 2019-01-22 | 22 (2019-02-07 .. 2026-08-05) | `data/external/events_external.csv` (RBI_POLICY) | the source's dates are policy EFFECTIVE dates and include some holds, not every MPC meeting |
+| FII/DII daily cash | 190 days (2026-01-14 .. 2026-11-12) | `data/external/fii_dii_external.csv` | the repo has nothing before 2026-01-14; none of your days was replaced (your file had none) |
+| Positioning (participant OI, FII index options, FII long ratio) | 705 days (2024-01-01 .. 2026-11-12) | table `positioning_daily` | no rule uses it yet |
+| Daily OHLCV since 2019-01-22, F&O stocks without Breeze bars | 167 stocks, 296,106 rows | table `external_bars_1d` | F&O list: 218 stocks in ICICI's public F&O file today (current list only: survivorship); 50 already have Breeze bars; ICICILIFE not in the repo. Price basis: the source's Close, adjusted by the source for splits and bonuses (not raw). Rows with a missing price are left out. No rule reads these bars yet |
+| Cross-check of daily closes, 30 priority stocks | 13,578 days over 0.5% | table `price_crosscheck` | see below |
+
+**Cross-check (Breeze vs the repo, 30 priority stocks, about 1,923 days each):** 13,578 day-stock pairs differ by more
+than 0.5%. 8,087 are explained by a later split, bonus or demerger that the Breeze prices show (the source publishes
+adjusted closes); 3,635 are possibly explained by a later demerger or rights issue (the source's own adjustment, factor
+not known here: ITC 1,467, RELIANCE 1,108, BHARTIARTL 658, SHRIRAMFIN 355, ADANIENT 47); **1,856 are unexplained**.
+Most unexplained: BSE 673 (up to 89%; its 2022 bonus is not seen in the Breeze prices), TATASTEEL 638 (up to 90%; Breeze
+already adjusted for the 2022 split, and has one-day price breaks on 2021-08-02, 2022-03-29/30 and 2022-06-14/15),
+ETERNAL 114 (up to 6.6%), M&M 72 (up to 3.8%), SHRIRAMFIN 45, INDIGO 35, ADANIPORTS 32; the other stocks 4 to 22 days
+each, mostly 1-3%. Breeze data is not changed by any of this.
+
+**INSUFFICIENT_HISTORY resolved by the adjustment** (trend block needs 252 sessions; decision sessions 2019-01-22 to
+today on the 30 priority stocks): **1,709 sessions in 7 stocks** - RELIANCE 251 (demerger 2023-07-20, bonus 2024-10-28),
+BAJFINANCE 251 (bonus + split 2025-06-16, applied together), SHRIRAMFIN 251 (split 2025-01-10), BEL 251 (bonus
+2022-09-15), KOTAKBANK 203 (split 2026-01-14), HDFCBANK 251 (bonus 2025-08-26), BSE 251 (bonus 2025-05-23). Not
+resolved: the first 251 sessions of each stock's history (start of the data, not a break; HDFCBANK, BSE, ETERNAL,
+HCLTECH); TATASTEEL 718 (its breaks are one-day bad bars, not an action). Not applied because the Breeze prices do not
+show them (the history is already adjusted there): HDFCBANK split 2019-09-19, BSE bonus 2022-03-21, TATASTEEL split
+2022-07-28, HCLTECH bonus 2019-12-05.
+
+**Effect on backtests:** the trend, 52-week low, range and profile now read the adjusted history for these 7 stocks (and
+any stock with a confirmed action), so backtest results on them change. The backtest was not rerun in this task.
+
+### Built
+- `app/corporate_actions.py`: factors from the stated ratios (split old:new face value; bonus new:held; preference-share
+  bonuses excluded), same-day actions as one price change, a factor applied only when the raw opening gap shows it
+  (within 25%), demerger factor = ex-date open / previous close, point in time (announcement date if known, else
+  ex-date), an explained break no longer cuts the history. Raw prices, option strikes and option prices are never adjusted.
+  Used by the backtest engine (`OptionEngine.daily_window`, `stock_backtest` scans) and the live shortlist (`live_daily`).
+- `app/external_data.py`: the one-time import and the INSUFFICIENT_HISTORY report (`--history-report`); results in
+  `data/diagnostics/external_import.json` and `insufficient_history_report.json`.
+- `app/inbox.py`: inbox importers (board meetings -> RESULTS + COVERAGE; corporate actions; FII/DII; RBI decisions),
+  `data/inbox/` -> `done/` or `rejected/` + `.reason.txt`; duplicates skipped (`event_key`); your rows never replaced.
+- `app/manual_data.py`: overlays merged on load (your row wins on the same date / type / symbol); `merge_into_file`;
+  FII/DII rows keep an optional `source` column.
+- `app/data_status.py`, `/data-status`, `/api/data-status`, the strip on the main page; write routes
+  `/data/import/inbox` and `/data/import/rbi-decision` (JSON only, 127.0.0.1/localhost only, as the other write routes).
+- Store tables: `corporate_actions`, `positioning_daily`, `external_bars_1d`, `price_crosscheck`, `data_imports`.
+- Config: `external_data`, `data_status` (limits), calendar overlay paths. Dependency: `pyarrow`.
+- Tests: `tests/test_data_import.py` (9). Whole suite **576 passing**.
+
+### Decisions recorded
+- Overlays instead of the tracked CSV files (user, 2026-11-15).
+- The repo has no announcement dates: every action counts from its ex-date.
+- An action the Breeze prices do not show is not applied (adjusting already adjusted history would create a false break).
+- Board meetings: COVERAGE rows for every watchlist stock through the latest meeting date in the file (the NSE list
+  covers every company for its period), or the date you give (`--covered-through` / the field on the page).
+- RBI: a decision row "scheduled" marks a planned meeting; amber when a scheduled meeting is 3 days past without a decision,
+  and also when no coming meeting is entered (a missed decision could not be noticed otherwise).
+- Breeze session: OK only when live prices or a download with data arrived today; the token is never read.
+
+### Not tested here
+- The live NSE download files: their column names were not checked against today's NSE pages (no NSE access from here);
+  the importers match the columns listed in README and reject a file whose columns differ, naming the columns found.
+- The Data status page in a browser (the API and the HTML are tested).
+
+### Still MISSING after the import
+- Results dates and event coverage (no board-meetings file imported yet): every priority stock is without coverage, so
+  actionable stock option signals stay blocked (EVENT_COVERAGE_UNKNOWN).
+- FII/DII before 2026-01-14 (the repo has none): the FII scenarios before that date show "no data".
+- RBI: no coming meeting entered as "scheduled".
+- Daily bars of ICICILIFE (not in the repo).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1421,6 +1503,10 @@ so the campaign is now left out of the primary results and counted.
 | 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
 | 75 | 9 | Score bands need several candidates a day; the stored months give 1 on 20 of 22 days | Open: needs more stocks and years downloaded |
 | 76 | 9 | Pre-registered comparison of variants A-D on 2023-2024 (2026-11-15) | Open: waits for 2023-2024 to be completely downloaded for the 30 priority stocks; B and C rows to be built first |
+| 77 | data | 1,856 unexplained daily-close mismatches Breeze vs the external repo (BSE 673, TATASTEEL 638, ...) | Open: check by hand; Breeze stays the source |
+| 78 | data | TATASTEEL Breeze history has one-day price breaks (2021-08-02, 2022-03-29/30, 2022-06-14/15): 718 decision sessions short of history | Open |
+| 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Open: rerun when the backtest is next run |
+| 80 | data | NSE board-meetings and corporate-actions CSV columns not verified against the live pages | Open: first real download will confirm or be rejected with the columns named |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
