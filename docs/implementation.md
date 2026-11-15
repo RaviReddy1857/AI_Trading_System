@@ -247,6 +247,39 @@ Live signals in paper mode.
 10. Heartbeat: a small watchdog that sends a Telegram alert if the feed is STALE or the engine has not processed a bar for two minutes during market hours.
 11. **Trade-type selector.** Six switches: intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling. Each switch controls alerts (dashboard highlight and Telegram) for that type only; every strategy keeps paper-trading whatever its switch says. Beside each switch show the type's track record (paper and backtest trades, win rate, net result after costs, with the number of trades; "low sample" under 30) and its label: **UNPROVEN** (no track record yet), **"negative in backtests"** (from `strategies.status`, phase 3b), or the strategy's other status label. An alert is sent only when the type's switch is on **and** the strategy's `strategies.status` entry allows alerts, so a strategy labelled "negative in backtests" stays silent until its status is changed in config.yaml. The switch positions are stored in the database (table `alert_switches`), changed only through `POST /journal/alert-switches` (JSON body: type, on/off; local Host/Origin rules apply) and default to off. Each change is logged with time and old/new value. Exit calls for positions I hold are always sent, whatever the switch.
 12. **Manual position entry** under /journal/ (`POST /journal/positions`, `POST /journal/positions/{id}/close`): positions I opened outside a signal (instrument or option legs, quantity or lots, entry price, date, optional stop and target). They get the same exit calls as positions taken from cards. Phase 9 extends this to stock option spreads and unhedged positions.
+13. **Execution realism (added 2026-11-15).** For every signal, live or paper, store an execution record per leg (table
+    `execution_snapshots`; signal_id, leg, moment, source, time):
+    - at signal time and again at the planned fill (the next bar's open): the live bid, ask, last price and market depth
+      (best five bids and asks with quantities, if the feed sends them) of each leg, with the quote's own timestamp and
+      price status. A quote that is missing, stale or crossed is recorded as such: never as zero and never filled in;
+    - the paper fill (phase 6 step 4) and the price it was taken from;
+    - later my actual fill and fill time for each leg (from the "I took this trade" entry, step 5, or a manual position,
+      step 12; phase 7 adds the contract-note price).
+    Slippage report (dashboard and CSV): for each leg, paper fill and my fill against the mid and against the touch
+    (bid for a sale, ask for a purchase) at the planned fill, in rupees and as % of the premium; grouped by stock and by
+    strike distance from spot (bands in `execution.strike_distance_bands_pct` in config.yaml), with the spread width and
+    depth at the touch beside each group, the trade count, and "low sample" under 30. The figures are computed by code
+    from the stored records; nothing is estimated where a record is missing (counted as "no quote").
+14. **Failure recovery (added 2026-11-15).** Each failure below ends in a safe, visible state: never a signal on stale or
+    missing data, open positions still monitored, and an alert that could not be delivered sent again.
+    - **App restart mid-session:** open positions, alert switches, unexpired signals and unconfirmed alerts are reloaded
+      from the database; exit calls resume within one closed bar; signals are not issued twice (deterministic signal_id)
+      and expired ones are not revived; the dashboard shows "restarted at hh:mm, data from hh:mm".
+    - **Stale or dropped feed:** prices turn STALE, every new signal is NO_TRADE (DATA_STALE), the kill switch and the
+      heartbeat alert fire, and open positions show "price stale: exit calls paused since hh:mm" (a stale price never
+      triggers or silences an exit call); the feed reconnects by itself and signals resume only on fresh LIVE prices.
+    - **Expired Breeze login:** detected from the broker's error, shown red on the dashboard and the Data status page, one
+      Telegram alert with the re-login steps, no signals until fresh data arrives; the session token is never read or
+      logged.
+    - **Partial or failed import:** all-or-nothing as today; the last good data stays in use, the file is rejected with a
+      reason, and the Data status row turns amber or red.
+    - **Missed or duplicated alert:** every alert has a stable key (signal_id or position + exit-call kind + repeat
+      number) and a delivery log (`alert_log`: key, channel, attempts, sent_at, error); a failed send is retried with
+      back-off until delivered or until the alert has expired, then shown as "not delivered" on the dashboard; the same
+      key is never sent twice.
+    - **Laptop sleep:** on wake the gap is detected (wall clock against the last processed bar); every price is STALE
+      until fresh ticks arrive; exit calls due during the gap are re-evaluated on fresh prices and sent; one alert says
+      "system was asleep from hh:mm to hh:mm"; signals whose valid-until passed are not sent.
 
 ### Acceptance checks
 
@@ -256,6 +289,14 @@ Live signals in paper mode.
 - With a type's switch off, its signals are paper-traded and no alert is sent; with it on, alerts follow `strategies.status` (a strategy with `alerts: false` sends none)
 - Switch positions survive a restart (database) and each change is logged
 - For each trade type, a fixture open position produces each exit call (target, stop, breakeven, trail, partial, time, entry invalidated, regime flip, kill switch) with an action and a reason, and the call repeats until the position is marked closed
+- Execution records: a fixture signal stores bid, ask and depth of every leg at signal time and at the planned fill, the
+  paper fill and a later actual fill; a missing or stale quote is stored as such (never zero); the slippage report
+  groups by stock and strike-distance band and reconciles to the stored records
+- Failure-recovery tests, one per case, each ending in the safe, visible state of step 14: restart mid-session (open
+  positions monitored again within one bar, no duplicate or revived signal); stale and dropped feed (no signal, banner,
+  heartbeat alert); expired Breeze login (red state, one alert, no signal); partial and failed import (last good data in
+  use, file rejected); missed alert (re-sent until delivered) and duplicated alert (sent once); laptop sleep (simulated
+  clock jump: prices STALE until fresh ticks, due exit calls re-sent, expired signals not sent)
 
 ### Tracker tasks
 
@@ -277,6 +318,13 @@ Live signals in paper mode.
 | P6.14 | Track record and label beside each switch (UNPROVEN, "negative in backtests") | Shown with trade count; "low sample" under 30 |
 | P6.15 | Switch choices stored in the database, changed through POST /journal/alert-switches, changes logged | Survives restart; safety test passes |
 | P6.16 | Manual position entry under /journal/ for any trade type | Manually entered position receives exit calls |
+| P6.17 | Execution records: bid, ask and depth of every leg at signal time and at the planned fill, paper fill, my actual fill | Stored for every signal, live and paper; missing quotes recorded as "no quote", never zero (test) |
+| P6.18 | Slippage report by stock and strike-distance band, against mid and touch | Report matches the stored records; spread and depth shown; "low sample" under 30 |
+| P6.19 | Recovery: app restart mid-session | Open positions monitored again within one bar; no duplicate or revived signal (test) |
+| P6.20 | Recovery: stale or dropped feed, and expired Breeze login | No signal on stale data; visible banner and one alert; signals resume only on fresh LIVE prices (tests) |
+| P6.21 | Recovery: partial or failed import | Last good data in use; file rejected with a reason; Data status row not green (test) |
+| P6.22 | Recovery: missed or duplicated alert (alert key and delivery log) | Failed alert re-sent until delivered or expired; same key never sent twice (tests) |
+| P6.23 | Recovery: laptop sleep | After a simulated clock jump: prices STALE until fresh ticks, due exit calls re-sent, expired signals not sent, "asleep from-to" alert (test) |
 
 ---
 
@@ -301,6 +349,20 @@ Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5
    TRENDING_DOWN, RANGING), IV rank band and FII bias at the signal. Each table compares the signals I took with the ones I
    skipped (paper result of both, my real result for the ones taken), so it shows whether my choosing adds or loses money.
    The entry conditions are already stored on every stock option selling signal (`details.entry_conditions`, phase 9).
+8. **Reconciliation with ICICI (added 2026-11-15).** For one calendar month, import my ICICI Direct contract notes and
+   ledger (files I download, put in `data/inbox/`; gitignored, never committed, never used in tests - tests use
+   invented fixtures) and compare them with the journal:
+   - every contract-note trade matched to a journal entry (date, instrument, strike, right, expiry, buy/sell, quantity,
+     price), listing unmatched trades on either side;
+   - per trade: realised payoff and each charge (brokerage, STT, exchange transaction charge, SEBI fee, stamp duty, GST)
+     from the cost model against the contract note, **to the paise**; any difference is listed with its component (a
+     difference is a finding, never rounded away);
+   - the ledger: the month's movement against the sum of contract-note net amounts, deposits and withdrawals (step 6),
+     with every unexplained entry listed;
+   - the month's fills feed the execution records (phase 6 step 13) as the confirmed actual fill.
+   Spot check: for at least 5 positions of the month (at least 2 stock option spreads), I enter ICICI's margin
+   calculator result and the payoff it shows; the report compares them with the system's margin, max loss, max profit
+   and breakevens and lists every difference. The check is manual entry; nothing logs in to ICICI.
 
 ### Acceptance checks
 
@@ -309,6 +371,11 @@ Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5
 - Tests for each cut-back rule
 - A test that no automatic rule can increase size
 - Scorecard marks any figure based on fewer than 30 trades as 'low sample'
+- Reconciliation on invented fixture contract notes and a ledger: matched trades agree to the paise; a one-paisa
+  difference in a single charge component, an unmatched trade on either side and an unexplained ledger entry are each
+  reported (tests)
+- One real month reconciled by the user: every trade matched, charges and payoffs equal to the paise or each difference
+  explained and recorded in docs/STATUS.md; margin-calculator spot check of at least 5 positions recorded
 
 ### Tracker tasks
 
@@ -321,6 +388,9 @@ Journal, scorecard and automatic cut-back. Built after phase 9 (build order 4, 5
 | P7.5 | Capital ladder check: conditions for step-up shown | Step-up eligible / not eligible |
 | P7.6 | Deposits tracked separately from profits | Return on deposited money shown |
 | P7.7 | Scorecard by stock and by entry conditions (trend state, IV rank, FII bias), signals taken vs skipped | Tables add up to the strategy totals; low sample marked |
+| P7.8 | Contract-note and ledger import (inbox, gitignored) | Fixture files import; a file with unknown columns is rejected with the columns named (test) |
+| P7.9 | Reconciliation of one month: trades matched, payoff and each charge to the paise, ledger movement explained | Fixture differences of one paisa, unmatched trades and unexplained ledger entries all reported (tests); one real month reconciled and recorded in STATUS.md |
+| P7.10 | Spot check of payoff and margin against ICICI's margin calculator (manual entry) | At least 5 positions (2 stock option spreads) compared; every difference listed |
 
 ---
 
@@ -504,6 +574,34 @@ in lots / minimum) x 100. **Score bands:** each day's candidates ranked by score
 = 3 x position < n, bottom third = 3 x position >= 2n, else middle; fewer than 3 candidates that day = "small
 cross-section"; trades used are the strategy's without the portfolio limits.
 
+### M3 addition: stock-option settlement readiness (added 2026-11-15)
+
+Stock options are physically settled, so a short leg left in or near the money at expiry can become a delivery
+obligation. These are alerts and estimates only: the system never squares off, closes or changes a position (the
+safety rules are unchanged). They apply to every open position with a short stock option leg: positions taken from a
+card, manual positions and UNHEDGED ones. Sending the alerts (Telegram, repeats) uses phase 6; the rules, estimates and
+their tests are built in M3. New settings in `stock_option_selling.settlement` (config.yaml, each with a validated field):
+
+1. **Escalating alerts** from `alert_from_trading_days` (7) trading days before expiry, for any short leg in the money
+   or within `near_money_pct` of spot (5%, set by the user 2026-11-15). Three levels, each with its repeat
+   interval in config: NOTICE (near the money, 7 to 5 trading days left), WARNING (in the money, or 4 to 3 days left),
+   URGENT (in the money with 2 days or fewer left, or past ICICI's own cut-off below). Each alert names the leg, spot,
+   strike, moneyness in % and rupees, days left, the estimate below and the action ("Exit the spread by <deadline>").
+   A level only goes up while the position is open; an unknown spot or expiry gives URGENT "price unknown", never silence.
+2. **Delivery and margin estimate** (computed by code, one lot and the whole position): the delivery value if the leg
+   settled at the last price (short put: shares to buy = lots x lot size x strike; short call: shares to deliver, and the
+   cost to buy them at spot if not held), netted with the bought leg only when that leg would also settle in the money;
+   and the expiry-week margin from the rules in `settlement.broker` below. A rule not filled in gives "margin unknown"
+   in red, never zero. Rupee figures are also shown as % of capital.
+3. **Planned-exit deadline.** Every such position gets a planned exit by `exit_days_before_expiry` (already in config)
+   and a deadline time. If the position is not marked closed in the journal by the deadline, a red alert repeats until
+   it is; the dashboard shows it at the top in red.
+4. **ICICI Direct's own rules** in `settlement.broker`: whether and when ICICI squares off in-the-money stock option
+   positions itself (day and time before expiry), its expiry-week margin rule for physically settled contracts (the
+   schedule as published, with source and effective date), and whether it blocks new positions in expiry week. Every
+   field starts empty with `confirmed: false`; the user fills it in from ICICI. Until then cards and alerts say
+   "ICICI rule not confirmed" and the deadline uses the stricter of `exit_days_before_expiry` and any entered value.
+
 ### Acceptance checks
 
 - Tests that a valid setup produces a signal at Rs 2,00,000 capital labelled NEEDS MORE CAPITAL with the correct shortfall, and FITS at Rs 10,00,000
@@ -514,6 +612,12 @@ cross-section"; trades used are the strategy's without the portfolio limits.
 - Profit-target, stop, threat (exit and roll with numbers) and forced-exit alerts fire in tests and repeat until the position is closed
 - The shortlist excludes illiquid stocks and stocks with events before expiry, and shows a reason per candidate
 - Safety tests still pass (new writes only under /journal/)
+- Settlement readiness (M3 addition): on fixture positions, each alert level fires from 7 trading days before expiry
+  for an in- or near-the-money short leg (none for a far out-of-the-money leg), the level only rises, and an unknown
+  price gives URGENT; the delivery estimate matches a hand calculation for a short put and a short call, with and
+  without the bought leg in the money; an empty broker rule gives "margin unknown" (never zero); a position not
+  closed by its deadline gives a repeating red alert; with `settlement.broker.confirmed: false` every card and alert
+  says "ICICI rule not confirmed"; no code path closes or changes a position
 
 ### Tracker tasks
 
@@ -547,3 +651,7 @@ cross-section"; trades used are the strategy's without the portfolio limits.
 | P9.26 | Reversal backtest: 10/20/40-session outcomes, new-low share, both candidates vs baseline | Reported with LOW SAMPLE where it applies (built) |
 | P9.27 | M1: whole-lot sizing and ZERO_SIZE; confirmed 5-bar pivots; portfolio and correlation limits; research versus actionable; open positions at the cutoff; spec names; monthly counts; section 2 vix_spike and expected_move | Built and tested (2026-11-15) |
 | P9.28 | M2: 0-100 score, six equal-weight factors with contributions; score bands by each day's candidates; each factor against the baseline | Built and tested (2026-11-15) |
+| P9.29 | M3: escalating settlement alerts (NOTICE, WARNING, URGENT) for short stock option legs in or near the money from 7 trading days before expiry | Each level fires in a test; never for a far OTM leg; level never drops while open; unknown price = URGENT |
+| P9.30 | M3: delivery-obligation and expiry-week margin estimate | Matches a hand calculation for a short put and a short call (test); empty broker rule = "margin unknown", never zero |
+| P9.31 | M3: red alert when a planned exit is not confirmed by its deadline | Repeats until the position is marked closed (test) |
+| P9.32 | M3: `settlement.broker` config for ICICI's square-off and margin rules | Validated fields; "ICICI rule not confirmed" shown until the user confirms them from ICICI |
