@@ -367,6 +367,41 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
   stop_spread_value_multiple: 2.0   # exit when buying the spread back costs 2x the entry credit
   time_exit_dte: 10             # out at the open of the first session within 10 calendar days of expiry
   forced_exit_trading_days_before_expiry: 5   # no position inside the last 5 trading days, whatever else
+  settlement:                   # phase 9 M3: settlement-readiness alerts for short stock option legs (alerts only)
+    alert_from_trading_days: 7  # alerts start 7 trading days before expiry (E-7)
+    urgent_from_trading_days: 5 # URGENT from E-5 for a short leg ITM or near the money (= the forced exit above)
+    near_money_pct: 5           # near the money: strike within 5% of spot (set by you 2026-11-15)
+    broker:                     # ICICI Direct's physical-settlement rules (entered by you 2026-11-15; sources in docs/STATUS.md)
+      delivery_margin:
+        confirmed: true
+        source: "ICICI Direct articles on physical delivery of stock options (found by you, 2026-11-15)"
+        near_month_only: true
+        ctm_within_pct_of_spot: 5   # CTM (close to the money): strikes within 5% of spot; applies to ITM and CTM
+        base: "VaR + ELM + adhoc margin"
+        schedule_pct: {4: 10, 3: 25, 2: 45, 1: 70, 0: 100}   # trading days before expiry (0 = expiry day) -> % of base
+        collected_daily_at: "15:15"     # collected at 15:15 on E-4 to E-2 ...
+        collected_daily_on_days: [4, 3, 2]
+        collected_hourly_on_days: [1, 0]   # ... and hourly on E-1 and E
+      auto_close:               # ICICI's own square-off on expiry day; deadlines use the EARLIEST time for the legs held
+        confirmed: false        # the two statements differ: not confirmed until you confirm with ICICI
+        sources:
+          - source: "ICICI Direct article (found by you, 2026-11-15)"
+            long_options: "13:30"
+            short_options: "13:30"
+            futures: "14:30"
+            note: "options 13:30, futures 14:30, best effort"
+          - source: "another ICICI note (found by you, 2026-11-15)"
+            long_options: "12:00"
+            short_options: "14:30"
+      fresh_position_block:     # does ICICI block new positions in the last days before expiry? not known
+        confirmed: false
+        rule: ""
+        source: ""
+      obligation:               # short put: strike x lot size per lot in cash; short call: the shares in demat
+        confirmed: true
+        source: "ICICI Direct articles on physical delivery of stock options (found by you, 2026-11-15)"
+        call_shares_in_demat_by: "11:00"   # expiry day, IST
+        call_shares_deadline_confirmed: false
   event_coverage_max_age_days: 7   # EVENT_COVERAGE_UNKNOWN unless events.csv has a COVERAGE row for the stock, retrieved within 7 days, covering expiry
   sma_short: 20                 # swing trend rule: close above sma_mid and sma_short above sma_mid = up trend
   sma_mid: 50                   # also the breadth average of the market block

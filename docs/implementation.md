@@ -583,9 +583,11 @@ card, manual positions and UNHEDGED ones. Sending the alerts (Telegram, repeats)
 their tests are built in M3. New settings in `stock_option_selling.settlement` (config.yaml, each with a validated field):
 
 1. **Escalating alerts** from `alert_from_trading_days` (7) trading days before expiry, for any short leg in the money
-   or within `near_money_pct` of spot (5%, set by the user 2026-11-15). Three levels, each with its repeat
-   interval in config: NOTICE (near the money, 7 to 5 trading days left), WARNING (in the money, or 4 to 3 days left),
-   URGENT (in the money with 2 days or fewer left, or past ICICI's own cut-off below). Each alert names the leg, spot,
+   or within `near_money_pct` of spot (5%, set by the user 2026-11-15). Three levels (revised 2026-11-15 by the
+   user): NOTICE (near the money, E-7 and E-6), WARNING (in the money, E-7 and E-6), and URGENT from
+   `urgent_from_trading_days` (E-5, the same day as `forced_exit_trading_days_before_expiry`; config refuses a later
+   URGENT) for any short leg in the money or within 5% of spot, and past any ICICI cut-off below. The repeat interval
+   of each level is set in config when the sending is built (phase 6). Each alert names the leg, spot,
    strike, moneyness in % and rupees, days left, the estimate below and the action ("Exit the spread by <deadline>").
    A level only goes up while the position is open; an unknown spot or expiry gives URGENT "price unknown", never silence.
 2. **Delivery and margin estimate** (computed by code, one lot and the whole position): the delivery value if the leg
@@ -596,11 +598,20 @@ their tests are built in M3. New settings in `stock_option_selling.settlement` (
 3. **Planned-exit deadline.** Every such position gets a planned exit by `exit_days_before_expiry` (already in config)
    and a deadline time. If the position is not marked closed in the journal by the deadline, a red alert repeats until
    it is; the dashboard shows it at the top in red.
-4. **ICICI Direct's own rules** in `settlement.broker`: whether and when ICICI squares off in-the-money stock option
-   positions itself (day and time before expiry), its expiry-week margin rule for physically settled contracts (the
-   schedule as published, with source and effective date), and whether it blocks new positions in expiry week. Every
-   field starts empty with `confirmed: false`; the user fills it in from ICICI. Until then cards and alerts say
-   "ICICI rule not confirmed" and the deadline uses the stricter of `exit_days_before_expiry` and any entered value.
+4. **ICICI Direct's own rules** in `settlement.broker` (filled in by the user 2026-11-15; sources in docs/STATUS.md).
+   Each rule has its own `confirmed` flag; an unconfirmed rule is shown as "ICICI rule not confirmed" on every card
+   and alert that uses it:
+   - `delivery_margin` (confirmed): near-month ITM and CTM (strikes within 5% of spot) stock options, from E-4:
+     10%, 25%, 45%, 70%, 100% of VaR + ELM + adhoc margin on E-4 to E; collected at 15:15 on E-4 to E-2 and hourly on
+     E-1 and E. The estimate of item 2 uses this schedule.
+   - `auto_close` (NOT confirmed): ICICI's own square-off on expiry day. Two statements are stored (an article:
+     options 13:30, futures 14:30, best effort; a note: long options 12:00, short options 14:30). Alert deadlines use
+     the EARLIEST stated time for any leg the position holds (`AutoClose.deadline`): 12:00 for a spread, whose bought
+     leg could be closed first and leave the sold leg unhedged; 13:30 for a short-only position.
+   - `fresh_position_block` (NOT confirmed): whether ICICI blocks new positions in the last days; not known.
+   - `obligation` (confirmed): a short put needs strike x lot size per lot in cash; a short call needs the shares in
+     demat; the 11:00 expiry-day deadline for the shares is NOT confirmed (`call_shares_deadline_confirmed: false`).
+   The deadline of item 3 is the stricter of the forced exit and these times.
 
 ### Acceptance checks
 
@@ -616,7 +627,7 @@ their tests are built in M3. New settings in `stock_option_selling.settlement` (
   for an in- or near-the-money short leg (none for a far out-of-the-money leg), the level only rises, and an unknown
   price gives URGENT; the delivery estimate matches a hand calculation for a short put and a short call, with and
   without the bought leg in the money; an empty broker rule gives "margin unknown" (never zero); a position not
-  closed by its deadline gives a repeating red alert; with `settlement.broker.confirmed: false` every card and alert
+  closed by its deadline gives a repeating red alert; with a rule's `confirmed: false` every card and alert using it
   says "ICICI rule not confirmed"; no code path closes or changes a position
 
 ### Tracker tasks
@@ -651,7 +662,7 @@ their tests are built in M3. New settings in `stock_option_selling.settlement` (
 | P9.26 | Reversal backtest: 10/20/40-session outcomes, new-low share, both candidates vs baseline | Reported with LOW SAMPLE where it applies (built) |
 | P9.27 | M1: whole-lot sizing and ZERO_SIZE; confirmed 5-bar pivots; portfolio and correlation limits; research versus actionable; open positions at the cutoff; spec names; monthly counts; section 2 vix_spike and expected_move | Built and tested (2026-11-15) |
 | P9.28 | M2: 0-100 score, six equal-weight factors with contributions; score bands by each day's candidates; each factor against the baseline | Built and tested (2026-11-15) |
-| P9.29 | M3: escalating settlement alerts (NOTICE, WARNING, URGENT) for short stock option legs in or near the money from 7 trading days before expiry | Each level fires in a test; never for a far OTM leg; level never drops while open; unknown price = URGENT |
+| P9.29 | M3: escalating settlement alerts (NOTICE, WARNING from E-7; URGENT from E-5) for short stock option legs in the money or within 5% of spot | Each level fires in a test; never for a far OTM leg; level never drops while open; unknown price = URGENT |
 | P9.30 | M3: delivery-obligation and expiry-week margin estimate | Matches a hand calculation for a short put and a short call (test); empty broker rule = "margin unknown", never zero |
 | P9.31 | M3: red alert when a planned exit is not confirmed by its deadline | Repeats until the position is marked closed (test) |
-| P9.32 | M3: `settlement.broker` config for ICICI's square-off and margin rules | Validated fields; "ICICI rule not confirmed" shown until the user confirms them from ICICI |
+| P9.32 | M3: `settlement.broker` config for ICICI's auto-close and margin rules | Config filled in and validated, per-rule `confirmed` flags, deadline = earliest stated time (built 2026-11-15, `tests/test_settlement_config.py`); "ICICI rule not confirmed" shown on cards when the alerts are built |

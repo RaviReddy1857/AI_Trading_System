@@ -10,6 +10,9 @@ and a test fails the build if such code is ever added. You trade manually in ICI
 - 1-minute bars and history saved to SQLite: `data/market_sim.db` in sim mode, `data/market_live.db` in breeze mode
   (chosen from `feed.mode`; the live file refuses simulated rows). The old `data/market.db` held only sim data and is no longer used.
 - `config.yaml`: capital and every risk limit as a % of capital
+- `config.yaml` -> `stock_option_selling.settlement.broker`: ICICI Direct's physical-settlement rules (delivery margin,
+  auto close, fresh-position block, obligation), each with `confirmed`; set a flag to `true` only after confirming the
+  rule with ICICI (sources in docs/STATUS.md)
 - **Phase 2:** a "Today's market type" badge at the top of the page: `TRENDING_UP`, `TRENDING_DOWN`,
   `RANGE`, `VOLATILE`, `EVENT` or `UNKNOWN`, with the reasons in plain words, the FII next-day bias
   (`BULLISH` / `BEARISH` / `NEUTRAL` / `UNKNOWN`) and a history of changes. It refreshes every 15 seconds.

@@ -696,6 +696,106 @@ class StockProfile(StrictModel):
         return self
 
 
+# ---------------- phase 9 M3: physical settlement of stock options ----------------
+class DeliveryMargin(StrictModel):
+    """The broker's expiry-week delivery margin on near-month in-the-money (ITM) and close-to-the-money (CTM)
+    stock options: a share of (VaR + ELM + adhoc margin), rising each trading day to expiry. Empty schedule =
+    margin unknown (never zero)."""
+    confirmed: bool = False
+    source: str = ""
+    near_month_only: bool = True
+    ctm_within_pct_of_spot: float | None = Field(None, gt=0, le=50)   # CTM: strikes within this % of spot
+    base: str = ""                                                   # what the % is of, as published
+    # trading days before expiry (0 = expiry day) -> % of the base; e.g. {4: 10, 3: 25, 2: 45, 1: 70, 0: 100}
+    schedule_pct: dict[int, float] = {}
+    collected_daily_at: HHMM | None = None                           # on these days, collected at this IST time ...
+    collected_daily_on_days: list[int] = []
+    collected_hourly_on_days: list[int] = []                         # ... and hourly on these
+
+    @model_validator(mode="after")
+    def check(self) -> "DeliveryMargin":
+        s = self.schedule_pct
+        if s:
+            days = sorted(s, reverse=True)
+            if days != list(range(days[0], -1, -1)):
+                raise ValueError("delivery_margin.schedule_pct: one entry per trading day down to 0 (expiry day)")
+            vals = [s[d] for d in days]
+            if any(not 0 < v <= 100 for v in vals) or vals != sorted(vals):
+                raise ValueError("delivery_margin.schedule_pct: percentages in (0, 100], rising towards expiry")
+        for d in self.collected_daily_on_days + self.collected_hourly_on_days:
+            if d not in s:
+                raise ValueError(f"delivery_margin: collection day {d} is not in schedule_pct")
+        if set(self.collected_daily_on_days) & set(self.collected_hourly_on_days):
+            raise ValueError("delivery_margin: a day is either daily or hourly collection, not both")
+        if self.collected_daily_on_days and self.collected_daily_at is None:
+            raise ValueError("delivery_margin: collected_daily_on_days needs collected_daily_at")
+        if self.confirmed and (not s or self.ctm_within_pct_of_spot is None or not self.source):
+            raise ValueError("delivery_margin: confirmed needs schedule_pct, ctm_within_pct_of_spot and source")
+        return self
+
+
+class AutoCloseSource(StrictModel):
+    """One published statement of when the broker closes open option positions itself on expiry day."""
+    source: str
+    long_options: HHMM | None = None
+    short_options: HHMM | None = None
+    futures: HHMM | None = None
+    note: str = ""
+
+
+class AutoClose(StrictModel):
+    """The broker's own closing of positions on expiry day. Every statement is kept; alert deadlines use the
+    EARLIEST time any statement gives for any leg the position holds (a spread's bought leg closed early
+    leaves its sold leg unhedged)."""
+    confirmed: bool = False
+    sources: list[AutoCloseSource] = []
+
+    def deadline(self, has_long: bool, has_short: bool) -> _dtime | None:
+        """Earliest stated time for the position's option legs; None when no statement gives one."""
+        times = [hhmm(t) for s in self.sources
+                 for t, held in ((s.long_options, has_long), (s.short_options, has_short)) if held and t]
+        return min(times, default=None)
+
+
+class FreshPositionBlock(StrictModel):
+    """Whether the broker blocks new positions in the last days before expiry. Empty rule = not known."""
+    confirmed: bool = False
+    rule: str = ""
+    source: str = ""
+
+
+class SettlementObligation(StrictModel):
+    """What settlement needs: a short put assigned = buy strike x lot size per lot in cash; a short call
+    assigned = deliver the shares from demat, by the deadline below on expiry day."""
+    confirmed: bool = False                        # the obligation itself
+    source: str = ""
+    call_shares_in_demat_by: HHMM | None = None    # IST, expiry day
+    call_shares_deadline_confirmed: bool = False
+
+
+class BrokerSettlement(StrictModel):
+    """ICICI Direct's physical-settlement rules, entered by the user from ICICI; each rule carries its own
+    `confirmed` flag. Unconfirmed rules are shown as "ICICI rule not confirmed"."""
+    delivery_margin: DeliveryMargin = DeliveryMargin()
+    auto_close: AutoClose = AutoClose()
+    fresh_position_block: FreshPositionBlock = FreshPositionBlock()
+    obligation: SettlementObligation = SettlementObligation()
+
+
+class Settlement(StrictModel):
+    """Settlement-readiness alerts for short stock option legs (alerts and estimates only)."""
+    alert_from_trading_days: int = Field(7, ge=1, le=20)      # alerts start this many trading days before expiry
+    urgent_from_trading_days: int = Field(5, ge=0, le=20)     # URGENT from here for an ITM or near-the-money short leg
+    near_money_pct: float = Field(5.0, gt=0, le=50)           # near the money: strike within this % of spot
+    broker: BrokerSettlement = BrokerSettlement()
+
+    @model_validator(mode="after")
+    def check(self) -> "Settlement":
+        if self.urgent_from_trading_days > self.alert_from_trading_days:
+            raise ValueError("settlement.urgent_from_trading_days cannot exceed alert_from_trading_days")
+        return self
+
+
 class StockOptionSelling(StrictModel):
     """Phase 9: monthly hedged credit spreads on F&O stocks (bull put in an up trend, bear call in a down
     trend). Every sold option is paired with a bought option of the same expiry. Stock options settle
@@ -740,9 +840,13 @@ class StockOptionSelling(StrictModel):
     reversal: Reversal = Reversal()
     profile: StockProfile = StockProfile()
     backtest: StockSellingBacktest = StockSellingBacktest()
+    settlement: Settlement = Settlement()
 
     @model_validator(mode="after")
     def consistent(self) -> "StockOptionSelling":
+        if self.settlement.urgent_from_trading_days < self.forced_exit_trading_days_before_expiry:
+            raise ValueError("stock_option_selling.settlement.urgent_from_trading_days must be at least "
+                             "forced_exit_trading_days_before_expiry (URGENT no later than the forced exit)")
         if self.entry_dte_min > self.entry_dte_max:
             raise ValueError("stock_option_selling.entry_dte_min cannot exceed entry_dte_max")
         if self.time_exit_dte >= self.entry_dte_min:

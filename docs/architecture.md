@@ -259,6 +259,10 @@ Phase 4 adds `strategies.long_option` / `credit_spread` / `iron_condor` (with `s
 chain refresh/staleness/liquidity limits, margin file and maximum age, option backtest underlyings/start/request limit).
 Phase 9 core (2026-11-14) adds `stock_option_selling` (entry rules, `trend_block`, `campaign_limit`, `roll`, `reversal`,
 `profile`, `weights`, `backtest` with exit checks and exit policies) and `options.backtest.daily_request_budget`.
+Phase 9 M3 (2026-11-15, config only so far) adds `stock_option_selling.settlement`: alert start (E-7), URGENT from
+E-5 (never later than `forced_exit_trading_days_before_expiry`), near the money = 5% of spot, and `broker` - ICICI
+Direct's physical-settlement rules (`delivery_margin`, `auto_close`, `fresh_position_block`, `obligation`), each with
+its own `confirmed` flag; alert deadlines use the earliest stated auto-close time for the legs held.
 Later phases add: `position_cap_pct` (default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9 remainder: universe filters
 min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
 max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,

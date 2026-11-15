@@ -1659,6 +1659,28 @@ and run `python -m app.external_data --check-docs` on every commit that stays.**
 - The future-dated download-progress time (it is read from `data/option_download_status.json`; the code path is
   small and untested).
 
+## ICICI Direct physical-settlement rules entered (Phase 9 M3 config), 2026-11-15
+
+Config and validation only (`stock_option_selling.settlement` in config.yaml; `Settlement`, `BrokerSettlement` and
+their parts in `app/config.py`); the alerts and estimates that read it are not built (M3, needs phase 6 to send).
+Tests: `tests/test_settlement_config.py` (12). Whole suite: **607 passing**.
+
+**Sources (as given by you; not checked from here: no access to ICICI's pages):**
+| Rule | Value | Source | Confirmed |
+|---|---|---|---|
+| Delivery margin | Near-month ITM and CTM stock options (CTM = strikes within 5% of spot), from E-4: 10% (E-4), 25% (E-3), 45% (E-2), 70% (E-1), 100% (E) of VaR + ELM + adhoc margin; collected at 15:15 on E-4 to E-2, hourly on E-1 and E | ICICI Direct articles on physical delivery of stock options | yes |
+| Auto close on expiry day (ICICI's own square-off) | Statement 1: options 13:30, futures 14:30 (best effort). Statement 2: long options 12:00, short options 14:30. Both stored; alert deadlines use the earliest time for the legs held: 12:00 for a spread, 13:30 for a short-only position | Statement 1: an ICICI Direct article; statement 2: another ICICI note you found | **no** (the statements differ) |
+| Fresh-position block in the last days | not known | - | **no** |
+| Settlement obligation | Short put: strike x lot size per lot in cash; short call: the shares in demat | ICICI Direct articles on physical delivery of stock options | yes |
+| Short call shares deadline | in demat before 11:00 on expiry day | as above | **no** |
+
+**Alert levels (your decision):** URGENT from E-5 for any short stock option ITM or within 5% of spot, the same day as
+the forced exit (`forced_exit_trading_days_before_expiry: 5`); config refuses an URGENT start later than the forced
+exit. NOTICE (near the money) and WARNING (in the money) cover E-7 and E-6.
+
+**Waiting for you:** confirm the auto-close time with ICICI (which statement holds, for long and short options), whether
+ICICI blocks fresh positions in the last days, and the 11:00 deadline for shares; then set the `confirmed` flags.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1736,6 +1758,7 @@ and run `python -m app.external_data --check-docs` on every commit that stays.**
 | 82 | review | Correlation unknown through unheld stocks; board-meetings blanket coverage; daily-close marks in five-minute runs; shared-set completion; repo prices in STATUS.md; future-dated rows judged fresh | Fixed 2026-11-15 (Review fixes, Codex review of 782e870..2e3e2c4) |
 | 83 | review | Git history (private repo) holds external-repo prices in older commits of docs/STATUS.md | Open: clean the history before the repo is ever made public |
 | 84 | review | KOTAKBANK 2025 and ETERNAL 2020 no longer complete after the per-block recheck | Open: the next `--download` fetches what they want |
+| 85 | 9 M3 | ICICI auto-close time (two differing statements), fresh-position block and the 11:00 shares deadline are unconfirmed | Waiting for user: confirm with ICICI, then set `confirmed: true` |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
@@ -1836,3 +1859,4 @@ and run `python -m app.external_data --check-docs` on every commit that stays.**
 | 2026-11-15 | Five-minute runs: marks at the last synchronized 5-minute bar of each session; none that day = the previous mark carried with its age (review fix 3) |
 | 2026-11-15 | Tracked files never carry values of the external repo's rows (factors, methods, aggregates only); history is not rewritten while the repo is private, but must be cleaned before it is ever made public (review fix 5) |
 | 2026-11-15 | Rows dated after today are a data error on the Data status page and never count as fresh (review fix 6) |
+| 2026-11-15 | Settlement alerts: URGENT from E-5 (same day as the forced exit) for a short stock option ITM or within 5% of spot; ICICI rules stored with per-rule `confirmed` flags; alert deadlines use the earliest stated auto-close time for the legs held |
