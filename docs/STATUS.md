@@ -1267,6 +1267,46 @@ Monthly candidates: 16 stocks 22 candidates / 21 trades in 18 months (16 short);
 Score bands: still almost all "small cross-section" (1 candidate on 38 of 42 and 29 of 34 decision days).
 Reports: `data/diagnostics/stock_report_2026-11-15_16stocks_2025-2026.txt`, `..._30stocks_2026.txt`.
 
+## Phase 9 PRE-REGISTRATION of four variants and the decision rule (2026-11-15)
+
+Recorded by the user's instruction on 2026-11-15, **before any 2023 or 2024 option data is downloaded** (stored and
+complete at this date: 2026 for 30 stocks, 2025 for 16; nothing of 2023-2024 has been backtested). No variant, default or
+rule below may be changed until the comparison has been run and reported. The two readings marked (user) were confirmed by
+the user on 2026-11-15 before this commit.
+
+### The four variants (all with the defaults in config.yaml at commit time; capital Rs 10,00,000; whole lots)
+| Variant | Entries | Rules applied |
+|---|---|---|
+| A | the strategy's signals | the full strategy as currently specified: every entry rule and block (trend, IV rank, falling-stock and rising-stock blocks, market block, per-stock campaign limit, minimum credit 0.10, hedge, sizing, liquidity) and the portfolio limits |
+| B | the no-filter baseline's fixed schedule, both sides (put and call spreads) | the baseline + the trend block in **both directions** (DOWNTREND_BLOCK on puts, UPTREND_BLOCK on calls) (user) + the essentials: hedge (`hedge_strikes_out`, max loss within the limit), events, minimum credit (`min_credit_to_max_loss` 0.10), whole-lot sizing within `max_risk_per_position_pct` 2.5% (ZERO_SIZE) |
+| C | as B | B + the portfolio limits: CORRELATED_LIMIT (max 6 open spreads, total risk 10% of capital, groups of same sector or correlation >= 0.7: at most 2 positions and 5% risk), CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN; all stocks side by side |
+| D | the strategy's signals | A without MARKET_WEAK (the market block off; everything else as A, portfolio limits included) |
+
+- Events: the event check is not available historically (BYPASSED_CHECKS), so in this backtest it applies to no variant;
+  this is the same for all four and for the baseline.
+- Hedge, liquidity, strike selection and sizing are already part of the no-filter baseline; B adds the trend block and the
+  minimum credit to it. B and C as combined rows are not yet in the report; they will be built with existing switches
+  (`baseline_rules = trend_block, min_credit`, plus the portfolio gate for C) before the comparison, without looking at any
+  2023-2024 result and without changing any default.
+
+### The comparison and the decision rule
+- **When:** once 2023 and 2024 are completely downloaded for the 30 priority stocks (a stock without option history in a
+  year contributes nothing and is listed).
+- **Data:** 2023-2024 only (signals from the first 2023 session to the last 2024 session). Positions open at the last 2024
+  session are marked there after estimated closing costs (OPEN_AT_CUTOFF); nothing of 2025 or later is used.
+- **Execution:** synchronized five-minute bars, after brokerage, taxes and slippage; exit policy "stop" (the main result).
+- **Baseline:** the no-filter baseline (both sides, no portfolio limits), same stocks, period and execution.
+- **Measures (user):** net result and max drawdown INCLUDING positions open at the cutoff, marked as above (the equity figures
+  `net_incl_open_inr`, `max_drawdown_incl_open_inr`); the trade count is closed trades.
+- **A variant qualifies** when all three hold: net result above the baseline's; max drawdown below the baseline's; at least
+  50 closed trades.
+- **Preference:** the simplest qualifying variant, simplest first: **B, then C, then D, then A**. If none qualifies, no
+  variant is preferred and nothing is changed.
+- **Reporting:** all four variants and the baseline are reported whatever the outcome (trades, win rate, net, max drawdown,
+  profit factor, per trade, open at the cutoff, data-incomplete campaigns). If more than 30% of a variant's campaigns are
+  data-incomplete, the sensitivity run is reported too; the decision uses the main run.
+- Adopting the preferred variant as the strategy is a change of the specification and needs the user's approval.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1336,6 +1376,7 @@ Reports: `data/diagnostics/stock_report_2026-11-15_16stocks_2025-2026.txt`, `...
 | 73 | 9 | After the M1 rule changes the report wants 430 contracts that are not stored | 2026-11-15: 2026 complete for 30 stocks, 2025 for 16; reports still miss 46 / 20 contracts from runs the download pass does not replay (portfolio-gated, score scans, alert exits) |
 | 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
 | 75 | 9 | Score bands need several candidates a day; the stored months give 1 on 20 of 22 days | Open: needs more stocks and years downloaded |
+| 76 | 9 | Pre-registered comparison of variants A-D on 2023-2024 (2026-11-15) | Open: waits for 2023-2024 to be completely downloaded for the 30 priority stocks; B and C rows to be built first |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
