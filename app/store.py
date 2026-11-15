@@ -600,6 +600,19 @@ class Store:
                                  (day.isoformat(), kind)).fetchone()
         return r[0] if r else 0
 
+    def set_day_budget(self, day: date, n: int, kind: str = "option_history") -> None:
+        """Record a request budget raised (or lowered) for one IST day only; config.yaml keeps its default."""
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO request_budget VALUES (?,?,?)", (day.isoformat(), kind + ":budget", int(n)))
+            self._db.commit()
+
+    def day_budget(self, day: date, kind: str = "option_history") -> int | None:
+        """The budget recorded for that day, or None (then the config default applies)."""
+        with self._lock:
+            r = self._db.execute("SELECT requests FROM request_budget WHERE day=? AND kind=?",
+                                 (day.isoformat(), kind + ":budget")).fetchone()
+        return r[0] if r else None
+
     def add_requests(self, day: date, n: int = 1, kind: str = "option_history") -> None:
         with self._lock:
             self._db.execute("INSERT INTO request_budget VALUES (?,?,?) ON CONFLICT(day, kind)"

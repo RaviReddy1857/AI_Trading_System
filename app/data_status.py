@@ -52,6 +52,23 @@ HOW_TO_UPDATE = {
 }
 
 
+def fmt_ist(value) -> str | None:
+    """A time in IST as "15 Nov 2026, 10:30 AM"; a date alone as "15 Nov 2026". ISO text, datetime or date;
+    None stays None. A time without a zone is taken as UTC (the store keeps UTC)."""
+    if value is None or value == "":
+        return None
+    v = value
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v) if ("T" in v or " " in v.strip()) else date.fromisoformat(v)
+        except ValueError:
+            return value
+    if isinstance(v, datetime):
+        t = (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).astimezone(IST)
+        return f"{t.day} {t:%b %Y}, {t.hour % 12 or 12}:{t:%M} {'AM' if t.hour < 12 else 'PM'}"
+    return f"{v.day} {v:%b %Y}"
+
+
 def _age_days(when: datetime | date | None, today: date) -> int | None:
     if when is None:
         return None
@@ -60,7 +77,9 @@ def _age_days(when: datetime | date | None, today: date) -> int | None:
 
 
 def _row(source, last, coverage, status, blocks, todo, detail=None) -> dict:
-    return {"source": source, "last_updated": last, "coverage": coverage, "status": status, "colour": COLOUR[status],
+    raw = last.isoformat() if isinstance(last, (date, datetime)) else last
+    return {"source": source, "last_updated": fmt_ist(raw), "last_updated_iso": raw, "coverage": coverage,
+            "status": status, "colour": COLOUR[status],
             "blocks": blocks, "what_to_do": todo, "detail": detail or {}}
 
 
@@ -112,20 +131,21 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     done = {s: set(v) for s, v in (dl.get("complete") or {}).items()}
     pri_done = sum(1 for s in priority for y in planned_years if y in done.get(s, set()))
     all_done = sum(1 for s in priority for y in all_years if y in done.get(s, set()))
-    with store._lock:
-        used = store._db.execute("SELECT COALESCE(SUM(requests),0) FROM request_budget WHERE day=?",
-                                 (today.isoformat(),)).fetchone()[0]
-    budget = settings.options.backtest.daily_request_budget
+    from .options.option_history import todays_budget
+    used = store.requests_used(today)
+    budget = todays_budget(settings, store, today)
+    default = settings.options.backtest.daily_request_budget
+    budget_text = f"{budget:,}" + ("" if budget == default else f" (set for today only; default {default:,})")
     need_pri = len(priority) * len(planned_years)
     st = MISSING if not done else (OK if pri_done == need_pri and all_done == len(priority) * len(all_years) else PARTIAL)
     rows.append(_row("Breeze option history (stock options)", dl.get("updated"),
                      f"{pri_done} of {need_pri} stock-years {planned_years[0]}-{planned_years[-1]} complete; "
                      f"{all_done} of {len(priority) * len(all_years)} for {all_years[0]}-{all_years[-1]}; "
-                     f"{used} of {budget} requests used today",
+                     f"{used:,} of {budget_text} requests used today",
                      st, "backtests on the stocks and years not complete (they are left out of the result)",
                      "-" if st == OK else "After a fresh Breeze login run: python -m app.options.stock_backtest --download "
                                           "(stops at the daily budget and resumes the next day)",
-                     {"requests_today": used, "budget": budget}))
+                     {"requests_today": used, "budget": budget, "budget_default": default}))
 
     # 3. FII/DII
     fd = store.fii_dii_all()
@@ -177,8 +197,6 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "-" if st == OK else f"Open {NSE_BOARD}, choose dates through the next monthly expiry, Download (.csv), "
                                           f"put it in data/inbox/ and press Import inbox files",
                      {"stocks_without_coverage": missing_cov, "coverage_older_than_limit": old_cov}))
-    if rows[-1]["last_updated"] is not None:
-        rows[-1]["last_updated"] = rows[-1]["last_updated"].isoformat()
 
     # 5. corporate actions
     ca_last = [v for k, v in imports.items() if k == "corporate_actions"]
@@ -251,6 +269,7 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
             rows.append(_row("Your data files", None, p, STALE, "the regime and scenarios that read the file",
                              "Fix the file named (or re-import it); the last good copy is in use"))
     counts = {c: sum(1 for r in rows if r["colour"] == c) for c in ("green", "amber", "red")}
-    return {"as_of_utc": now.isoformat(), "today": today.isoformat(), "last_session": last_session.isoformat(),
+    return {"as_of_utc": now.isoformat(), "as_of_ist": fmt_ist(now), "today": today.isoformat(),
+            "last_session": last_session.isoformat(), "last_session_ist": fmt_ist(last_session),
             "counts": counts, "rows": rows, "how_to_update": HOW_TO_UPDATE,
             "note": "A STALE, MISSING or PARTIAL source is never treated as OK; what it blocks is named in its row."}

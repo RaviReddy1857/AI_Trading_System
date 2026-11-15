@@ -1522,6 +1522,17 @@ enough history, and the trend, 52-week, range and profile read adjusted prices).
   from 2019 including non-priority stocks (e.g. BAJAJFINSV 2020).
 - Reports: `data/diagnostics/stock_report_2026-11-15_dataquality_dq_2025_2026.txt`, `..._dq_2026.txt`.
 
+## Data status page: IST times and today's actual request budget (2026-11-15)
+- Every time on the Data status page is shown in IST as "15 Nov 2026, 10:30 AM" (a date alone as "13 Nov 2026");
+  the API keeps the ISO value in `last_updated_iso` (`app/data_status.py: fmt_ist`).
+- The option-history row shows today's actual request budget. A budget raised for one day is now recorded in the store
+  (`request_budget`, kind `option_history:budget`; `Store.set_day_budget` / `day_budget`) and used by every download that
+  day (`option_history.todays_budget`); `python -m app.options.stock_backtest --download --day-budget N` sets it.
+  config.yaml keeps its default (3,500). Today's raise to 4,500 (the user's instruction earlier today) was made with a
+  one-off run setting and not stored at the time; it is now recorded for 2026-11-15, so the row reads
+  "4,500 of 4,500 (set for today only; default 3,500)".
+- Test: `test_times_are_shown_in_ist_and_the_days_actual_budget_is_used`. Whole suite 580 passing.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |

@@ -20,7 +20,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 576 passed
+python -m pytest -q          # should say 580 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -66,7 +66,9 @@ Paste data on the dashboard ("Paste FII/DII figures, events or holidays"), or ed
 with when it was last updated, its coverage, its status (OK, STALE, MISSING, PARTIAL or INFO), what it blocks, and exactly
 what to do. A STALE, MISSING or PARTIAL source is never shown as OK. The page ends with the daily and weekly routine.
 The Breeze session is confirmed only by data that arrived today (live prices or a download); the token in `.env` is
-never read.
+never read. Times are shown in IST ("15 Nov 2026, 10:30 AM"). The option-history row shows today's actual
+request budget: `python -m app.options.stock_backtest --download --day-budget 4500` raises it for today only
+(recorded in the store; `config.yaml` keeps its default).
 
 **Inbox** (`data/inbox/`, gitignored): put the files you download by hand there and press **Import inbox files** on the
 Data status page (or run `python -m app.inbox`). Processed files move to `data/inbox/done/`, rejected ones to

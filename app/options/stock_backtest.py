@@ -817,9 +817,14 @@ def main(argv: list[str] | None = None) -> int:
                          "(no outcomes are looked at)")
     ap.add_argument("--all-data", action="store_true", help="report on every priority stock and the whole period, "
                                                             "also where contracts are missing (marked INCOMPLETE)")
+    ap.add_argument("--day-budget", type=int, help="raise (or lower) TODAY's request budget only, e.g. 4500 on a day "
+                                                   "the market is shut and the live app is not running; recorded in the "
+                                                   "store and shown on the Data status page; config.yaml is not changed")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = phase9_settings(load_settings())
+    if args.day_budget is not None and not 0 <= args.day_budget <= 20000:
+        ap.error("--day-budget must be between 0 and 20000")
     print(f"capital for the Phase 9 backtests: Rs {settings.account.capital_inr:,.0f} "
           f"(stock_option_selling.backtest.capital_inr)")
     store = Store(settings.path(settings.storage.db_path_live), live=True)
@@ -827,7 +832,12 @@ def main(argv: list[str] | None = None) -> int:
     strategy = build_stock_selling(settings)
     bt = settings.stock_option_selling.backtest
     today = utcnow().astimezone(IST).date()
-    budget = settings.options.backtest.daily_request_budget
+    if args.day_budget is not None:
+        store.set_day_budget(today, args.day_budget)
+        print(f"today's request budget set to {args.day_budget} (today only; config default "
+              f"{settings.options.backtest.daily_request_budget})")
+    from .option_history import todays_budget
+    budget = todays_budget(settings, store, today)
     status = read_status(settings)
 
     fetcher = None

@@ -155,9 +155,9 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",
 const label={green:"OK",amber:"needs attention",red:"missing / blocking",grey:"info"};
 async function load(){
  const s=await (await fetch("/api/data-status")).json();
- document.getElementById("asof").textContent="As of "+new Date(s.as_of_utc).toLocaleString();
+ document.getElementById("asof").textContent="As of "+s.as_of_ist+" IST";
  const c=s.counts;
- document.getElementById("summary").innerHTML=`<span class="green">${c.green} OK</span> &middot; <span class="amber">${c.amber} need attention</span> &middot; <span class="red">${c.red} missing or blocking</span> <span class="mute">(last completed session ${esc(s.last_session)})</span>`;
+ document.getElementById("summary").innerHTML=`<span class="green">${c.green} OK</span> &middot; <span class="amber">${c.amber} need attention</span> &middot; <span class="red">${c.red} missing or blocking</span> <span class="mute">(last completed session ${esc(s.last_session_ist)}; times in IST)</span>`;
  document.getElementById("rows").innerHTML=s.rows.map(r=>{
   const d=r.detail||{};const extra=[];
   if(d.stocks_without_coverage&&d.stocks_without_coverage.length)extra.push("No coverage through the next expiry: "+d.stocks_without_coverage.join(", "));

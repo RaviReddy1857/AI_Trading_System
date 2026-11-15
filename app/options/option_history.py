@@ -213,13 +213,20 @@ class BreezeOptionFetcher:
         return [out[k] for k in sorted(out)]
 
 
+def todays_budget(settings, store: Store, day) -> int:
+    """The day's option-history request budget: one raised for that day only (store.set_day_budget, e.g.
+    `--day-budget` on a non-trading day), else options.backtest.daily_request_budget."""
+    raised = store.day_budget(day)
+    return raised if raised is not None else settings.options.backtest.daily_request_budget
+
+
 def budgeted_fetcher(settings, store: Store, feed, run_limit: int | None = None,
                      now: datetime | None = None, sleep: Callable[[float], None] = _time.sleep) -> BreezeOptionFetcher:
     """A fetcher that may send at most what is left of today's option-history request budget
     (options.backtest.daily_request_budget, counted in the store per IST day across runs), and at most
     `run_limit` in this run. Every request sent is added to the day's count as it is sent."""
     day = (now or utcnow()).astimezone(IST).date()
-    left = max(0, settings.options.backtest.daily_request_budget - store.requests_used(day))
+    left = max(0, todays_budget(settings, store, day) - store.requests_used(day))
     limit = left if run_limit is None else min(left, run_limit)
     h = settings.history
     return BreezeOptionFetcher(feed, {i.symbol: i.breeze_code for i in settings.watchlist}, h.request_pause_seconds,

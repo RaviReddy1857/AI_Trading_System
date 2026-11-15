@@ -311,6 +311,32 @@ def test_ACCEPTANCE_data_status_never_shows_missing_or_stale_as_ok(tmp_path):
     assert r["status"] == "STALE" and "2026-11-01" in r["coverage"]
 
 
+def test_times_are_shown_in_ist_and_the_days_actual_budget_is_used(tmp_path):
+    from app.data_status import data_status, fmt_ist
+    from app.options.option_history import budgeted_fetcher, todays_budget
+    assert fmt_ist("2026-11-15T05:00:17.848403+00:00") == "15 Nov 2026, 10:30 AM"
+    assert fmt_ist("2026-11-15T09:05:00+00:00") == "15 Nov 2026, 2:35 PM"
+    assert fmt_ist("2026-11-14T18:30:00+00:00") == "15 Nov 2026, 12:00 AM"       # midnight IST
+    assert fmt_ist("2026-11-12") == "12 Nov 2026" and fmt_ist(None) is None and fmt_ist("live prices today") == "live prices today"
+    s, store, m = manual_in(tmp_path)
+    m.load_all()
+    day = NOW.astimezone(__import__("app.quality", fromlist=["IST"]).IST).date()
+    default = s.options.backtest.daily_request_budget
+    assert todays_budget(s, store, day) == default
+    row = lambda: {r["source"]: r for r in data_status(s, store, MarketCalendar(), "sim", manual=m, now=NOW)["rows"]}[
+        "Breeze option history (stock options)"]
+    assert f"of {default:,} requests used today" in row()["coverage"]
+    store.set_day_budget(day, 4500)
+    store.add_requests(day, 3500)
+    assert todays_budget(s, store, day) == 4500 and store.day_budget(day + timedelta(days=1)) is None
+    r = row()
+    assert "3,500 of 4,500 (set for today only; default 3,500) requests used today" in r["coverage"]
+    assert r["detail"]["budget"] == 4500 and store.requests_used(day) == 3500       # the budget is not counted as requests
+    assert budgeted_fetcher(s, store, object(), now=NOW).max_requests == 1000        # the raised budget is what a run may use
+    st = data_status(s, store, MarketCalendar(), "sim", manual=m, now=NOW)
+    assert st["as_of_ist"] == "15 Nov 2026, 1:30 PM" and st["last_session_ist"] == "13 Nov 2026"
+
+
 def test_data_status_routes_and_import_routes_follow_the_write_checks():
     from fastapi.testclient import TestClient
     from app.main import create_app
