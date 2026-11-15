@@ -703,8 +703,46 @@ def waiting_for_priority_years(priority_years: list[int], stocks: list[str], don
     return [s for s in stocks if not set(priority_years) <= set(done.get(s, ()))]
 
 
+def changed_stock_years(engine: OptionEngine, complete: dict[str, list[int]], dev: list[date]) -> dict[str, list[int]]:
+    """Version 7 (corporate-action adjustment and exact corrections of the daily history): the complete
+    (stock, year) marks whose decisions now see a different daily history. Found offline, in one pass over
+    the stored daily bars: a year changes when, on any of its decision sessions, the adjusted / corrected
+    window differs from the raw window the old mark was made with. Only those can want other contracts;
+    every other input (option prices, the index, breadth, the score's raw-close inputs) is unchanged, and
+    the data-quality exclusion only removes entries."""
+    dev_set = set(dev)
+    out: dict[str, list[int]] = {}
+    for sym, years in complete.items():
+        adj = engine.adjusted_history(sym)
+        if adj is None:
+            continue
+        want = set(years)
+        hit = set()
+        for i, d in enumerate(adj.dates):
+            if d.year in want and d.year not in hit and d in dev_set and adj.differs_from_raw(i, 1300):
+                hit.add(d.year)
+        if hit:
+            out[sym] = sorted(hit)
+    return out
+
+
+def migrate_to_7(engine: OptionEngine, status: dict, dev: list[date], progress=print) -> dict[str, list[int]]:
+    """Plan 6 -> 7: drop only the complete marks changed_stock_years finds; keep every other mark."""
+    complete = {s: list(v) for s, v in (status.get("complete") or {}).items()}
+    changed = changed_stock_years(engine, complete, dev)
+    for sym, ys in changed.items():
+        complete[sym] = [y for y in complete[sym] if y not in ys]
+    status["complete"] = {s: v for s, v in complete.items() if v}
+    status["plan"] = 7
+    status["plan7_rechecked"] = {s: ys for s, ys in sorted(changed.items())}
+    progress(f"plan 6 -> 7: {sum(len(v) for v in changed.values())} stock-year mark(s) to check again "
+             f"({', '.join(f'{s} {y}' for s, ys in sorted(changed.items()) for y in ys) or 'none'}); every other mark kept")
+    return changed
+
+
 def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOptionSelling, stocks: list[str],
-                    dev: list[date], status: dict, progress=print, offline: bool = False, checkpoint=None) -> dict:
+                    dev: list[date], status: dict, progress=print, offline: bool = False, checkpoint=None,
+                    only: set[tuple[str, int]] | None = None) -> dict:
     """Fetch what the backtest needs, newest year first, most liquid stock first, until the request
     budget is used or Breeze returns an error. Marks a (stock, year) complete when its streams ran
     without wanting anything that is not stored. Returns a summary of this run.
@@ -714,6 +752,8 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
     hist: OptionHistory = engine.prices
     intr = engine.intraday
     years = sorted({d.year for d in dev}, reverse=True)
+    if status.get("plan") == 6 and PLAN_VERSION == 7:        # only the stock-years whose daily history changed
+        migrate_to_7(engine, status, dev, progress)
     if status.get("plan") != PLAN_VERSION:                   # the backtest wants more than the old marks covered
         status["complete"], status["plan"] = {}, PLAN_VERSION
     done = {s: set(v) for s, v in status.get("complete", {}).items()}
@@ -736,7 +776,7 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
         block = [d for d in dev if d.year >= year]           # to the end: a rolled campaign can run past the year
         engine.set_expiry_floor(date(year - 1, 1, 1))        # a year of earlier months for the IV rank
         for sym in stocks:
-            if year in done.get(sym, set()):
+            if year in done.get(sym, set()) or (only is not None and (sym, year) not in only):
                 continue
             if not engine.base.daily(sym):
                 progress(f"  {year} {sym:12s} no daily bars stored: skipped (run python -m app.history)")
@@ -811,6 +851,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--recheck", action="store_true", help="ask Breeze for nothing: mark the stocks and years whose option "
                                                            "history is already completely stored (after an interrupted run)")
     ap.add_argument("--years", nargs="*", type=int, help="with --recheck: only these years")
+    ap.add_argument("--changed-only", action="store_true", help="with --recheck: only the stock-years whose daily "
+                                                                "history the plan-7 change altered (found offline in one "
+                                                                "pass); every other mark is kept")
     ap.add_argument("--no-report", action="store_true", help="download or recheck only; do not run the reports")
     ap.add_argument("--credit-distribution", action="store_true",
                     help="only show the distribution of net credit / max loss of the spreads that pass every other rule "
@@ -909,9 +952,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.recheck:
         want = [d for d in dev if not args.years or d.year in args.years]
-        print(f"recheck (no requests): {len(stocks)} stocks")
+        only = None
+        if args.changed_only:
+            import time as _t
+            t0 = _t.monotonic()
+            if status.get("plan") == 6 and PLAN_VERSION == 7:
+                migrate_to_7(eng, status, dev)
+            only = {(s, y) for s, ys in (status.get("plan7_rechecked") or {}).items() for y in ys}
+            print(f"finding the changed stock-years took {_t.monotonic() - t0:.1f} s")
+        print(f"recheck (no requests): {len(stocks)} stocks" + (f", only {len(only)} changed stock-year(s)" if only is not None else ""))
+        import time as _t
+        t1 = _t.monotonic()
         download_blocks(settings, eng, strategy, stocks, want, status, offline=True,
-                        checkpoint=lambda st: write_status(settings, st))
+                        checkpoint=lambda st: write_status(settings, st), only=only)
+        print(f"recheck took {_t.monotonic() - t1:.1f} s")
         print(f"progress written to {write_status(settings, status)}")
         hist.not_stored.clear()
         eng.intraday.not_stored.clear()
@@ -933,11 +987,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nreport covers {len(covered)} stocks, {years[0]}..{years[-1]} (completely downloaded); "
               f"use --all-data for everything stored")
     # pre-registered data-quality exclusion (app/data_quality.py), the same for the strategy, every variant and the baseline
-    from ..data_quality import assess, excluded_list, excluded_sessions
-    dq = assess(settings, store, sorted(set(stocks) | {r["stock"] for r in ranked}))
-    eng.no_entry = excluded_sessions(dq, sessions)
-    dq_rows = [r for r in excluded_list(dq) if r["year"] >= (dev[0].year if dev else 0)]
-    print(f"\ndata-quality exclusions (no entries; strategy, variants and baseline alike): "
+    from ..data_quality import RULE, excluded_sessions
+    verdicts = store.quality_years()
+    if not verdicts or any(v["rule"] != RULE for v in verdicts):
+        print("\nNO DATA-QUALITY VERDICTS for the current rule: run python -m app.data_quality first. Stopped.")
+        return 1
+    eng.no_entry = excluded_sessions(verdicts, sessions)
+    dq_rows = [{"stock": v["symbol"], "year": v["year"], "reasons": v["detail"]["reasons"]} for v in verdicts
+               if v["excluded"] and v["year"] >= (dev[0].year if dev else 0)]
+    print(f"\ndata-quality exclusions ({RULE}; no entries; strategy, variants and baseline alike): "
           f"{len(dq_rows)} stock-year(s) in the tested years: "
           + (", ".join(f"{r['stock']} {r['year']}" for r in dq_rows) or "none"))
     if args.credit_distribution:

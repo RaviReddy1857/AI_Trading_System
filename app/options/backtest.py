@@ -375,8 +375,9 @@ class OptionEngine:
         if sym not in self._adjusted:
             from ..corporate_actions import PRICE_ACTIONS, AdjustedHistory
             acts = self.store.corporate_actions(sym, PRICE_ACTIONS)
-            self._adjusted[sym] = (AdjustedHistory(self.base.daily(sym), acts, self.s.history.max_overnight_gap_pct)
-                                   if acts else None)
+            fixes = self.store.price_corrections(sym)          # exact corrections of Breeze errors (app/data_quality.py)
+            self._adjusted[sym] = (AdjustedHistory(self.base.daily(sym), acts, self.s.history.max_overnight_gap_pct, fixes)
+                                   if acts or fixes else None)
         return self._adjusted[sym]
 
     def daily_window(self, sym: str, i: int, start: int, max_len: int = 1300) -> tuple:

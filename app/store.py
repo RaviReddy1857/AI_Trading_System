@@ -116,6 +116,14 @@ CREATE TABLE IF NOT EXISTS price_crosscheck (
     diff_pct REAL NOT NULL, explained_by TEXT, source_ref TEXT, checked_utc TEXT NOT NULL,
     PRIMARY KEY (symbol, date)
 );
+CREATE TABLE IF NOT EXISTS price_corrections (
+    symbol TEXT NOT NULL, date TEXT NOT NULL, multiplier REAL NOT NULL, reason TEXT NOT NULL,
+    rule TEXT NOT NULL, computed_utc TEXT NOT NULL, PRIMARY KEY (symbol, date)
+);
+CREATE TABLE IF NOT EXISTS data_quality_years (
+    symbol TEXT NOT NULL, year INTEGER NOT NULL, excluded INTEGER NOT NULL, detail_json TEXT NOT NULL,
+    rule TEXT NOT NULL, computed_utc TEXT NOT NULL, PRIMARY KEY (symbol, year)
+);
 CREATE TABLE IF NOT EXISTS data_imports (
     dataset TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL,
     rows INTEGER NOT NULL, note TEXT
@@ -455,6 +463,35 @@ class Store:
         cols = ("symbol", "date", "breeze_close", "external_close", "diff_pct", "explained_by", "source_ref", "checked_utc")
         with self._lock:
             return [dict(zip(cols, r)) for r in self._db.execute("SELECT * FROM price_crosscheck ORDER BY symbol, date")]
+
+    def replace_price_corrections(self, symbol: str, rows: list[tuple[str, float, str]], rule: str, at: datetime) -> None:
+        """(date, multiplier, reason) for one stock; replaces that stock's corrections."""
+        with self._lock:
+            self._db.execute("DELETE FROM price_corrections WHERE symbol=?", (symbol,))
+            self._db.executemany("INSERT INTO price_corrections VALUES (?,?,?,?,?,?)",
+                                 [(symbol, d, m, why, rule, at.isoformat()) for d, m, why in rows])
+            self._db.commit()
+
+    def price_corrections(self, symbol: str) -> dict[date, float]:
+        with self._lock:
+            rows = self._db.execute("SELECT date, multiplier FROM price_corrections WHERE symbol=?", (symbol,)).fetchall()
+        return {date.fromisoformat(d): m for d, m in rows}
+
+    def replace_quality_years(self, rows: list[tuple[str, int, bool, str]], rule: str, at: datetime) -> None:
+        """(symbol, year, excluded, detail_json); replaces every verdict."""
+        with self._lock:
+            self._db.execute("DELETE FROM data_quality_years")
+            self._db.executemany("INSERT INTO data_quality_years VALUES (?,?,?,?,?,?)",
+                                 [(s, y, int(e), j, rule, at.isoformat()) for s, y, e, j in rows])
+            self._db.commit()
+
+    def quality_years(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT symbol, year, excluded, detail_json, rule, computed_utc FROM data_quality_years "
+                                    "ORDER BY symbol, year").fetchall()
+        import json as _json
+        return [{"symbol": s, "year": y, "excluded": bool(e), "detail": _json.loads(j), "rule": r, "computed_utc": c}
+                for s, y, e, j, r, c in rows]
 
     def log_import(self, dataset: str, source: str, source_ref: str | None, at: datetime, rows: int, note: str = "") -> None:
         with self._lock:

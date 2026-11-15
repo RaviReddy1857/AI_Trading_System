@@ -1533,6 +1533,89 @@ enough history, and the trend, 52-week, range and profile read adjusted prices).
   "4,500 of 4,500 (set for today only; default 3,500)".
 - Test: `test_times_are_shown_in_ist_and_the_days_actual_budget_is_used`. Whole suite 580 passing.
 
+## AMENDED data-quality rule (2026-11-15, before any 2023-2024 option data is downloaded)
+
+This replaces the exclusion rule pre-registered earlier today (section "Data quality: BSE and TATASTEEL investigated").
+Decided by the user in three steps today, on price data only (no option result was looked at): rule
+`dq-2026-11-15-amended`, `app/data_quality.py`, run with `python -m app.data_quality` (verdicts and corrections stored in
+the tables `data_quality_years` and `price_corrections`). The same verdicts apply to the strategy, every variant (A-D)
+and the baseline; an excluded stock-year gets no entry in it or in the 45 calendar days before it.
+
+1. **Exact corrections.** A Breeze bar whose close, against the repo's, is off by exactly the factor of a later split or
+   bonus that the rest of the Breeze history already reflects (the action shows no gap in Breeze) is a Breeze error and
+   is corrected in the adjusted series by that factor (tolerance 2%); the stock-year is kept. A bar with no repo bar
+   (a repo filler day) between two bars corrected by the same factor gets the same factor. The raw store is not changed.
+2. **One-day jumps.** A (corrected) Breeze close move over 20% on a session with no split, bonus or demerger is a real
+   market move when the repo confirms it (same date, same direction, within 5 percentage points): the stock-year is
+   NOT excluded. An unconfirmed jump excludes it.
+3. **Unexplained mismatches** (over 0.5% after the later applied factors; before a later demerger or rights issue a
+   mismatch counts as possibly explained, not unexplained): the stock-year is tested for a smooth adjustment. The
+   ratio Breeze / repo may step on an ex-date of any corporate action or dividend. A step **over 2%** on a day with no
+   corporate action or dividend is **erratic**, unless the stock moved **more than 8%** that day in either source
+   (closing-price definition noise on a volatile day). Any erratic day excludes the stock-year; otherwise it is kept as
+   the repo's own adjustment. (The literal 0.2% day-to-day test would have excluded 115 of the 131 stock-years with
+   unexplained mismatches: in 2021-2024 the two sources' closes differ by 0.1-0.15% on a typical day, a closing-price
+   definition difference, e.g. ICICIBANK 2022-06-08 Breeze 727.05, repo 729.50.)
+4. **Repo filler bars** (open = high = low = close = the previous close; 213 since 2019 on the 30 priority stocks, e.g.
+   2025-03-18 for every stock) are repo errors and are left out of every comparison.
+
+### BSE factor check (why 1/3 now and 1/9 earlier)
+BSE bonuses: 2:1 with ex-date 2022-03-21 and 2:1 with ex-date 2025-05-23, each a price factor of 1/3.
+| Day | Breeze close | Repo close | Repo / Breeze | What it means |
+|---|---|---|---|---|
+| 2021-07-29 | 1,240.10 | 137.79 | 0.1111 = 1/9 | Breeze raw for BOTH bonuses; the repo adjusted for both |
+| 2021-07-30 | 1,248.80 | 138.76 | 0.1111 = 1/9 | same |
+| 2021-08-02 | 425.80 | 141.93 | 0.3333 = 1/3 | Breeze already adjusted for the 2022 bonus (no action that day), raw for the 2025 one |
+| 2021-08-03 | 421.45 | 140.48 | 0.3333 = 1/3 | same |
+The 1/9 in the earlier cross-check was the product of both bonuses (1/3 x 1/3). In the Breeze history the 2022 bonus
+shows no gap on its ex-date (2022-03-17 937.00, 2022-03-21 939.90), because Breeze already applied it from 2021-08-02;
+the 2025 bonus shows its gap (2025-05-22 6,996.50, 2025-05-23 2,448.00) and is applied as usual. So the Breeze bars
+before 2021-08-02 are not adjusted for the 2022 bonus only: correction x1/3 (2021-07-30: 1,248.80 x 1/3 = 416.27,
+repo / corrected = 0.3333 = the 2025 bonus, consistent with every later bar). Corrected: 244 bars in 2019, 250 in 2020,
+143 in 2021 (to 2021-07-30); BSE 2019-2023 are kept.
+
+### Other corrections (exact factor)
+- TATASTEEL: 250 bars in 2020 and 143 in 2021 (before 2021-08-02) and 2 bars in 2022 (2022-03-29 1,334.65 and
+  2022-06-14 996.15) x 1/10 for the split of 2022-07-28 (e.g. 2022-03-29: 133.47 against repo 133.46).
+- HCLTECH 2019-01-21: Breeze 965.75 (twice its neighbours 483.15 and 470.38) x 0.5 for the bonus of 2019-12-05 =
+  482.88 against repo 482.875: **confirmed corrected; HCLTECH 2019 kept**.
+- HDFCBANK 2019-01-21 x 0.5 (split 2019-09-19); EICHERMOT 2019-01-21 x 0.1 (split 2020-08-24); POWERGRID 2019-01-21 and
+  2021-04-23 x 0.75 (bonus 2021-07-29). (Older bars, 2015-2017, on the same dates are corrected too; they are before the
+  Phase 9 floor.)
+- Not correctable: TATASTEEL 2019-01-21 Breeze 36.85 between corrected neighbours 47.06 and 45.66 (repo 47.17): no
+  factor explains it, so the move to 2019-01-22 (+23.9%, repo -3.2%) is an unconfirmed jump.
+
+### Stock-years under the amended rule (from 2019)
+**30 priority stocks - excluded (8):** ETERNAL 2021, 2022, 2023, INDIGO 2021, M&M 2020, SHRIRAMFIN 2022, TITAN 2022
+(erratic ratio days, as reported to the user before applying), and TATASTEEL 2019 (the uncorrectable 2019-01-21 bar).
+Kept with an explanation: BSE 2019-2023 and TATASTEEL 2020-2022 (exact corrections), HCLTECH 2019 and HDFCBANK 2019
+(one bar corrected), ADANIENT 2019, 2020, 2023, 2024, ADANIPORTS 2024, AXISBANK, BAJFINANCE, SHRIRAMFIN 2020 (jumps
+confirmed by the repo), ADANIPORTS 2023 (its one 2% step is on a -8.9% day), RELIANCE, ITC, BHARTIARTL and the rest
+(no unexplained mismatch, or a ratio that steps only on ex-dates).
+**Other watchlist stocks - excluded (10):** DRREDDY 2021, JIOFIN 2023, MAXHEALTH 2020, 2022, 2023, SBILIFE 2021, 2022,
+TRENT 2019, 2020, 2023 (erratic ratio days; they matter for the reversal study, which uses every ranked stock).
+**In 2023-2024:** ETERNAL 2023 (priority) and JIOFIN 2023, MAXHEALTH 2023, TRENT 2023. **In 2025-2026: none.**
+No stock-year is resolved by hand (`data_quality.resolved_stock_years` is empty).
+
+### The fast version-7 recheck
+`python -m app.options.stock_backtest --recheck --changed-only`: the plan-7 change only alters the daily history, so a
+complete mark can only become wrong where a decision's adjusted or corrected window differs from the raw window it was
+made with. That is found offline in one pass over the stored daily bars (`changed_stock_years`): **0.2 s**, 14 of the 46
+complete marks (BAJFINANCE 2025-2026, BEL 2026, BSE 2025-2026, HDFCBANK 2025-2026, ITC 2026, KOTAKBANK 2026, RELIANCE
+2025-2026, SHRIRAMFIN 2025-2026, TATASTEEL 2026); every other mark is kept. Rechecking only those 14 took **98 s** (100 s
+wall time in all; the earlier full recheck of every stock-year was stopped after about 55 minutes). Result: RELIANCE 2026,
+SHRIRAMFIN 2026, BEL 2026, TATASTEEL 2026, ITC 2026 complete again; HDFCBANK, BSE, BAJFINANCE, KOTAKBANK 2026 and
+HDFCBANK, RELIANCE, BSE, BAJFINANCE, SHRIRAMFIN 2025 incomplete (they want contracts that are not stored; the next
+`--download` fetches them). Complete now: 2026 for 26 of 30 priority stocks, 2025 for 11.
+
+### Rerun on stored data (same stocks and years as the previous runs; INCOMPLETE where contracts are missing)
+**Unchanged, figure for figure,** from the rerun before (commit bc9490b): 16 stocks 2025-2026 synchronized strategy 18
+trades -17,490, baseline 79 trades -19,916; 30 stocks 2026 strategy 12 trades -3,688, baseline 56 trades -21,983; daily,
+rule-effect, CORRELATED_LIMIT (3 and 5 strategy refusals) and data-incomplete figures identical; contracts not stored
+874 and 133. Why: the amended rule excludes nothing in 2025-2026, and the corrections only change bars of 2021 and
+earlier, which do not change any 2025-2026 decision (the windows differ, the outcomes of the rules do not). Reports:
+`data/diagnostics/stock_report_2026-11-15_amended_am_16.txt`, `..._am_30.txt`.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1607,7 +1690,7 @@ enough history, and the trend, 52-week, range and profile read adjusted prices).
 | 78 | data | TATASTEEL Breeze history has one-day price breaks (2021-08-02, 2022-03-29/30, 2022-06-14/15): 718 decision sessions short of history | Open |
 | 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Rerun 2026-11-15 (see Data quality, section 3); 874 / 133 contracts now wanted, plan version 7 |
 | 80 | data | NSE board-meetings and corporate-actions CSV columns not verified against the live pages | Open: first real download will confirm or be rejected with the columns named |
-| 81 | data | Pre-registered stock-year exclusion (2026-11-15): 27 stock-years from 2019 excluded, 7 of them in 2023-2024 | Applied; 8 jump-only years await your decision on resolution |
+| 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |

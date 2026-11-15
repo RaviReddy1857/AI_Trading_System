@@ -142,11 +142,18 @@ def adjusted(bars, factors: list[dict]):
 class AdjustedHistory:
     """Point-in-time adjusted daily history of one stock (cached per set of known actions)."""
 
-    def __init__(self, bars, actions: list[dict], max_gap_pct: float):
-        self.bars = list(bars)
+    def __init__(self, bars, actions: list[dict], max_gap_pct: float, corrections: dict | None = None):
+        """`corrections`: {date: multiplier} - Breeze bars off by exactly a corporate-action factor
+        (app/data_quality.py), corrected before anything else; the raw store is not changed."""
+        self.corrections = dict(corrections or {})
+        self.raw = list(bars)
+        self.bars = [replace(b, open=b.open * m, high=b.high * m, low=b.low * m, close=b.close * m,
+                             volume=None if b.volume is None else b.volume / m)
+                     if (m := self.corrections.get(bar_date(b), 1.0)) != 1.0 else b for b in self.raw]
         self.dates = [bar_date(b) for b in self.bars]
         self.factors = applied_factors(self.bars, actions)
         self.raw_breaks = gap_breaks([b.open for b in self.bars], [b.close for b in self.bars], max_gap_pct)
+        self.raw_breaks_raw = gap_breaks([b.open for b in self.raw], [b.close for b in self.raw], max_gap_pct)
         self._cache: dict[int, tuple[list, list[int]]] = {}
 
     def _known(self, d: date) -> list[dict]:
@@ -168,6 +175,15 @@ class AdjustedHistory:
         k = bisect.bisect_right(breaks, i)
         start = breaks[k - 1] if k else 0
         return tuple(bars[max(start, i - max_len + 1):i + 1])
+
+    def differs_from_raw(self, i: int, max_len: int) -> bool:
+        """Whether the window a decision at bar i sees differs from the raw bars after the last raw
+        break (the history before any adjustment or correction)."""
+        k = bisect.bisect_right(self.raw_breaks_raw, i)
+        raw_start = self.raw_breaks_raw[k - 1] if k else 0
+        w = self.window(i, max_len)
+        raw = self.raw[max(raw_start, i - max_len + 1):i + 1]
+        return len(w) != len(raw) or any(a is not b for a, b in zip(w, raw))
 
     def last_unexplained_break(self, i: int) -> int:
         _, breaks = self._view(self.dates[i])

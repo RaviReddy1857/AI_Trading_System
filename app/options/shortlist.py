@@ -63,9 +63,10 @@ def live_daily(settings: Settings, store: Store, bars: list, sym: str) -> tuple:
     at the last bar (app/corporate_actions.py), raw prices after the last break when none is stored."""
     from ..corporate_actions import PRICE_ACTIONS, AdjustedHistory
     acts = store.corporate_actions(sym, PRICE_ACTIONS)
-    if not acts:
+    fixes = store.price_corrections(sym)
+    if not acts and not fixes:
         return tuple(after_last_break(bars, settings.history.max_overnight_gap_pct))
-    return AdjustedHistory(bars, acts, settings.history.max_overnight_gap_pct).window(len(bars) - 1, len(bars))
+    return AdjustedHistory(bars, acts, settings.history.max_overnight_gap_pct, fixes).window(len(bars) - 1, len(bars))
 
 
 def stock_context(settings: Settings, store: Store, source: str, book: InstrumentBook, desk: OptionDesk,
