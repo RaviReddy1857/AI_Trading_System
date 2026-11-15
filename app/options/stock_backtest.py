@@ -54,7 +54,7 @@ log = logging.getLogger("stock_backtest")
 STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
-PLAN_VERSION = 6        # 6: M1 rules (pivots, sizing, portfolio limits, open at cutoff): other strikes are wanted
+PLAN_VERSION = 7        # 7: corporate-action adjustment of daily history: more decision days, other contracts are wanted
 POLICY_LABEL = {"stop": "stop at the stop (no roll)", "roll_rules": "roll by the roll rules, else exit",
                 "roll_always": "never stop; roll a losing spread every month, without limit"}
 

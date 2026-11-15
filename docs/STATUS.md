@@ -1496,6 +1496,32 @@ real); the rule excludes these too, unless you resolve them.
 - Earlier years (2014-2017) have many more bad Breeze bars (pairs of +100% / -50% days on the same dates across stocks,
   e.g. 2015-10-01/06, 2016-01-19/20); they are before the Phase 9 floor and not used.
 
+### 3. Rerun on stored data after the corporate-action adjustment and the exclusion rule (open issue 79), 2026-11-15
+Same two runs as before (Rs 10,00,000, whole lots, every block, nothing tuned; low sample). The exclusion rule removes no
+stock-year in 2025-2026, so every change below comes from the adjustment of the daily history (more decision days have
+enough history, and the trend, 52-week, range and profile read adjusted prices).
+
+| Run | Execution | Strategy before -> after | Baseline before -> after |
+|---|---|---|---|
+| 16 stocks, 2025-01..2026-06 | synchronized | 17 trades -19,050 -> **18 trades -17,490** (PF 0.44) | 73 trades -11,283 -> **79 trades -19,916** (PF 0.74) |
+| same | daily | 19 trades -20,933 -> 21 trades -22,026 | 88 trades -13,152 -> 94 trades -25,050 |
+| 30 stocks, 2026-01..2026-06 | synchronized | 11 trades -9,145 -> **12 trades -3,688** (PF 0.73) | 50 trades -13,350 -> **56 trades -21,983** (PF 0.65) |
+| same | daily | 12 trades -14,309 -> 15 trades -8,947 | 41 trades -76,118 -> 47 trades -88,016 |
+
+- Verdicts: no edge versus the baseline in the 16-stock run; in the 30-stock run the strategy loses less per trade than the
+  baseline (-307 against -393) but loses money: no evidence of an edge (low sample).
+- **The reports are now much more INCOMPLETE: 874 contracts (16-stock run) and 133 (30-stock run) are wanted but not
+  stored** (before: 46 and 20). The new decision days want contracts the download never fetched (the "complete" marks were
+  made before the adjustment). The download plan version is raised to 7, so the next `--download` checks every stock-year
+  again and fetches what is now wanted. Until then these results understate the trades the rules would take.
+- CORRELATED_LIMIT now refuses strategy entries for the first time: 3 of 28 checks (16 stocks) and 5 of 24 (30 stocks), as
+  more stocks are tradable at the same time. Baseline with the portfolio limits: 46 and 37 blocked.
+- Data-incomplete campaigns: strategy 3 of 23 (13.0%) and 3 of 17 (17.6%); baseline 19 of 98 (19.4%) and 0 of 56.
+- Strategy without the market block: 20 trades -23,629 (16 stocks); 14 trades +459 (30 stocks).
+- The exclusion list printed by the run covers every ranked watchlist stock (the reversal study uses them), 33 stock-years
+  from 2019 including non-priority stocks (e.g. BAJAJFINSV 2020).
+- Reports: `data/diagnostics/stock_report_2026-11-15_dataquality_dq_2025_2026.txt`, `..._dq_2026.txt`.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1568,7 +1594,7 @@ real); the rule excludes these too, unless you resolve them.
 | 76 | 9 | Pre-registered comparison of variants A-D on 2023-2024 (2026-11-15) | Open: waits for 2023-2024 to be completely downloaded for the 30 priority stocks; B and C rows to be built first |
 | 77 | data | 1,856 unexplained daily-close mismatches Breeze vs the external repo (BSE 673, TATASTEEL 638, ...) | BSE, TATASTEEL investigated 2026-11-15: Breeze errors (adjustment boundary 2021-08-02, bad bars); the stock-years are excluded by the pre-registered rule |
 | 78 | data | TATASTEEL Breeze history has one-day price breaks (2021-08-02, 2022-03-29/30, 2022-06-14/15): 718 decision sessions short of history | Open |
-| 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Open: rerun when the backtest is next run |
+| 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Rerun 2026-11-15 (see Data quality, section 3); 874 / 133 contracts now wanted, plan version 7 |
 | 80 | data | NSE board-meetings and corporate-actions CSV columns not verified against the live pages | Open: first real download will confirm or be rejected with the columns named |
 | 81 | data | Pre-registered stock-year exclusion (2026-11-15): 27 stock-years from 2019 excluded, 7 of them in 2023-2024 | Applied; 8 jump-only years await your decision on resolution |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
