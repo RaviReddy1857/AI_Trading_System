@@ -16,6 +16,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Backtest engine review fixes (Codex review of phase 3) | Fixed and tested; dev backtests and random baselines rerun; no conclusion changes; holdout not opened | 327 passing (whole suite) | 2026-11-13 |
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
+| - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -1682,6 +1683,67 @@ exit. NOTICE (near the money) and WARNING (in the money) cover E-7 and E-6.
 **Waiting for you:** confirm the auto-close time with ICICI (which statement holds, for long and short options), whether
 ICICI blocks fresh positions in the last days, and the 11:00 deadline for shares; then set the `confirmed` flags.
 
+## Phase 9 time-ordering fixes and the rerun on stored data (2026-11-15)
+
+Two HIGH findings, fixed before M3. Correctness fixes, not tuning: no rule, default or variant (A-D, pre-registered)
+changed. Tests: `tests/test_phase9_time_order.py` (6) with a two-stock fixture (`tests/two_stock_world.py`).
+
+| # | Fix | Code | Test |
+|---|---|---|---|
+| 1 (HIGH) | The portfolio backtest ran each stock's whole session before the next stock's same session, so a decision could see another stock's LATER fills, exits and signals of that session, or miss its earlier ones. Every stock's steps (entries, exits, rolls, pending entries, new signals) now go through one queue in time order. At one instant: decisions on a bar's close and position management at the session's close, then new signals, then fills at a bar's open. Only truly simultaneous events of different stocks follow the order of the stocks (most liquid first) | `OptionEngine.run_portfolio`, `iter_stream`, `_manage_sync`, `_sync_exit`, `_sync_entry` (generators that announce the moment of each step before taking it) | `test_ACCEPTANCE_reversing_the_stock_order_does_not_change_a_synchronized_portfolio_run`, `..._a_daily_portfolio_run`, `..._a_roll_decided_inside_the_session_sees_the_portfolio_as_it_stands_then`, `..._truly_simultaneous_signals_follow_the_documented_priority` |
+| 2 (HIGH) | The portfolio gate of a roll decided inside a session read daily returns through that same day, whose close had not happened. An intraday decision now uses correlations of completed sessions before that day; a decision at the close (a new signal, a roll by a rule at the close) may use the day | `Correlations.at(include_day=)`, `PortfolioGate.__call__(intraday=)`, `OptionEngine._roll_gate`, `_sync_roll_decision` | `test_ACCEPTANCE_changing_only_that_days_closing_prices_does_not_change_an_intraday_roll_decision` (with a control: the same change one session earlier does refuse the roll), `test_correlation_inside_a_session_equals_the_previous_sessions_and_the_gate_asks_for_it` |
+
+**Fail before, pass after:** run against the engine of commit ce61be5, the three reversal tests fail because the trades
+differ when the stock order is reversed, and the closing-price test fails because the roll is refused
+(`CORRELATED_LIMIT`) once that day's closes are changed. Those runs used a small import shim, because the tests use
+names the old engine lacks (`trace`, the phase constants, `include_day`); the unit test of the new argument fails there
+only for that reason. The priority test passes on both engines: it documents the one order-dependent case. The reversal
+tests stop before 22 July 2025 of the fixture, the next close at which both stocks signal together.
+
+**Test fixtures:** in the roll tests the roll rules themselves are replaced (every stopped spread is offered a
+replacement with enough credit), so that the decision is left to the portfolio gate; on real data no roll by the rules
+has passed so far.
+
+### Rerun on stored data (offline; the same two runs as before; low sample; nothing tuned)
+Method: the strategy's portfolio run on the old engine (ce61be5) and on the new one, same data, compared trade by
+trade; then the two full reports on the new engine. The old engine reproduced the stored figures exactly, so the review
+fix of the correlation groups (review 6, fix 1), which had not been rerun, changed nothing in these runs.
+
+| Run | Execution | Strategy before -> after | Baseline before -> after |
+|---|---|---|---|
+| 16 stocks, 2025-01..2026-06 | synchronized | 18 trades -17,490 -> 18 trades -17,490 (identical trades) | 79 trades -19,916 -> unchanged |
+| same | daily | 21 trades -22,026 -> identical | 94 trades -25,050 -> unchanged |
+| 30 stocks, 2026-01..2026-06 | synchronized | 12 trades -3,688 (PF 0.73) -> **12 trades -7,584** (PF 0.54) | 56 trades -21,983 -> unchanged |
+| same | daily | 15 trades -8,947 -> identical | 47 trades -88,016 -> unchanged |
+
+- **One trade changed, in one run.** 30 stocks, synchronized: BHARTIARTL's signal of 24 April 2026 was refused by
+  CORRELATED_LIMIT on the old engine (it judged that close before another stock's exit of the same session had been
+  run) and the stock entered four days later, on the 28 April signal, reaching its target (+1,015). In time order the
+  slot was free on 24 April: the spread was entered on 27 April and stopped on 29 April (-2,882). Net effect -3,897.
+  CORRELATED_LIMIT refusals 5 -> 4 of 24 -> 23 checks. Net including the open positions -2,813 -> -6,710; drawdown of the
+  marked equity 8,209 -> 10,139.
+- With that trade the strategy under the portfolio limits now equals the strategy without them in the 30-stock run
+  (12 trades, -7,584 both): the limits changed which day was traded before, not whether.
+- The baselines do not run under the portfolio limits, so they cannot change; "baseline + portfolio limits" is unchanged
+  too (43 trades -12,447 and 20 trades -8,761).
+- Rule-effect rows that run under the limits moved with the same cause: 30 stocks, strategy without the minimum credit
+  -2,874 -> -6,770; without the trend block 15 trades -11,486 -> 16 trades -17,919; without the market block 14 trades
+  +459 -> 15 trades -2,077; roll every month (research only) +10,313 -> +9,911. 16 stocks: only "without the trend block"
+  22 trades -32,097 -> 23 trades -34,634.
+- No roll by the rules was made before or after (every stopped strategy spread refused by a roll rule), so fix 2 changed
+  no trade in these runs.
+- Verdicts unchanged: no edge versus the baseline (low sample). Contracts wanted but not stored: 874 -> 891 and
+  133 -> 142 (the changed decisions want other contracts); the reports stay INCOMPLETE.
+- Reports: `data/diagnostics/stock_report_2026-11-15_timeorder_16.txt`, `..._timeorder_30.txt` (stocks and first
+  session given explicitly, because the "complete" marks changed after the per-block recheck; the reversal study, which
+  uses single streams, was not rerun).
+
+### Not tested here
+- A roll by the rules actually passing on real data (none has), so the intraday correlation rule has only been
+  exercised on fixtures.
+- Baseline streams of one stock still run one after another when they are run without the portfolio limits: they share
+  no state, so their order cannot matter.
+
 ## Phase 9 M3: exits, rolls, campaigns and settlement readiness (2026-11-15)
 
 M3 is the "manage an open position" part of Phase 9 (build steps 6 and 16-22 of docs/implementation.md and the
@@ -1817,6 +1879,7 @@ appearing and disappearing with a rule's flag; positions unchanged. The app was 
 | 83 | review | Git history (private repo) holds external-repo prices in older commits of docs/STATUS.md | Open: clean the history before the repo is ever made public |
 | 84 | review | KOTAKBANK 2025 and ETERNAL 2020 no longer complete after the per-block recheck | Open: the next `--download` fetches what they want |
 | 85 | 9 M3 | ICICI auto-close time (two differing statements), fresh-position block and the 11:00 shares deadline are unconfirmed | Waiting for user: confirm with ICICI, then set `confirmed: true` |
+| 88 | review | Backtest ran each stock's whole session before the next stock's; intraday roll gate read that day's close | Fixed 2026-11-15 (time-ordering fixes); rerun: one trade changed |
 | 86 | 9 M3 | The rupee amount of the expiry-week margin needs ICICI's VaR + ELM + adhoc margin for the position; the system does not have it | Open: shown as "margin unknown" with the schedule's percentage until the phase 6 position form takes the figure |
 | 87 | 9 M3 | Settlement day counts use weekdays in the tests; phase 6 must pass the holiday calendar | Open (phase 6) |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
@@ -1923,3 +1986,5 @@ appearing and disappearing with a rule's flag; positions unchanged. The app was 
 | 2026-11-15 | Settlement readiness: near the money = strike within 5% of spot and not in the money; a leg further out never alerts. Before E-7 nothing is raised, even with an unknown price; from E-7 an unknown price is URGENT; an unknown expiry is always URGENT |
 | 2026-11-15 | Settlement deadline = the earliest of the close (15:30) of the forced-exit day (E-5) and ICICI's times (delivery margin start, auto close, call shares deadline); after it a position not marked closed is alerted in red on every evaluation, whatever its moneyness |
 | 2026-11-15 | Delivery estimate nets a sold leg only with a bought leg of the same right that is in the money at the last price too; the expiry-week margin is the schedule's percentage of a margin base entered by the user, never computed or assumed by the system |
+| 2026-11-15 | Portfolio backtest: one queue of every stock's events in time order; at one instant decisions, then new signals, then fills; only truly simultaneous events of different stocks follow the stock order (most liquid first) |
+| 2026-11-15 | A decision inside a session uses correlations of completed sessions before that day; a decision at the session's close may use that day |
