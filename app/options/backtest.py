@@ -359,6 +359,7 @@ class OptionEngine:
         self._reversal: dict[str, object] = {}
         self._adjusted: dict[str, object] = {}
         self.adjust_for_actions = True          # False: raw daily history only (to measure what the adjustment changes)
+        self.no_entry: dict[str, set[date]] = {}   # stock -> sessions without entries (excluded stock-years)
         self._trigger = None
         self.expiry_floor: date | None = None    # ignore expiries before this date (set_expiry_floor)
         # Last session a run tests. A stock's IV history then leaves out the at-the-money calls of
@@ -1111,7 +1112,9 @@ class OptionEngine:
         key = key or (sym, variant)
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
-        allowed = set(sessions)
+        # data-quality exclusion (app/data_quality.py): no entry in an excluded stock-year, for every variant alike
+        sessions_set = set(sessions)
+        allowed = sessions_set - self.no_entry.get(sym, set())
         last_allowed = max(sessions) if sessions else None
         brk = set(self.base.breaks(sym)) if kind == "stock" else set()
         is_long = strategy.id == "long_option"
@@ -1330,7 +1333,12 @@ class OptionEngine:
             if not is_long:
                 used_expiries.add(out[0].legs[0].expiry)
         # a scheduled day inside the tested period on which the underlying has no bar: skipped, not retried
+        blocked = self.no_entry.get(sym, set())
         for d, items in sorted(schedule.items()):
+            if d in blocked and d in sessions_set and last_allowed is not None and d < last_allowed:
+                for item in items:
+                    scheduled(d, item).update(result="skipped", reason="EXCLUDED_STOCK_YEAR")
+                    skipped["NO_SIGNAL:EXCLUDED_STOCK_YEAR"] += 1
             if d in allowed and last_allowed is not None and d < last_allowed and d not in attempted:
                 for item in items:
                     scheduled(d, item).update(result="skipped", reason="NO_UNDERLYING_BAR_ON_SCHEDULED_DAY")

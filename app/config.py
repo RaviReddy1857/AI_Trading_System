@@ -170,6 +170,16 @@ class ExternalData(StrictModel):
     crosscheck_mismatch_pct: float = Field(0.5, gt=0, le=50)   # daily close vs Breeze: report above this
 
 
+class DataQuality(StrictModel):
+    """Pre-registered 2026-11-15 (app/data_quality.py): a stock-year is excluded from the Phase 9 backtests when
+    its unexplained Breeze-vs-repo close mismatches exceed max_unexplained_pct of its sessions, or its Breeze
+    closes jump more than max_one_day_jump_pct in one day without a split, bonus or demerger, unless it is
+    listed in resolved_stock_years ("SYMBOL:YEAR", the resolution recorded in docs/STATUS.md)."""
+    max_unexplained_pct: float = Field(5.0, gt=0, le=100)
+    max_one_day_jump_pct: float = Field(20.0, gt=0, le=1000)
+    resolved_stock_years: list[str] = []
+
+
 class DataStatusLimits(StrictModel):
     """When a data source counts as STALE on the Data status page."""
     fii_dii_max_trading_days: int = Field(1, ge=0, le=30)
@@ -780,6 +790,7 @@ class Settings(StrictModel):
     stock_option_selling: StockOptionSelling = StockOptionSelling()   # phase 9
     external_data: ExternalData = ExternalData()
     data_status: DataStatusLimits = DataStatusLimits()
+    data_quality: DataQuality = DataQuality()
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":

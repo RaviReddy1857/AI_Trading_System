@@ -1433,6 +1433,69 @@ any stock with a confirmed action), so backtest results on them change. The back
 - RBI: no coming meeting entered as "scheduled".
 - Daily bars of ICICILIFE (not in the repo).
 
+## Data quality: BSE and TATASTEEL investigated; PRE-REGISTERED stock-year exclusion rule (2026-11-15)
+
+Decided before any 2023-2024 option backtest (none has been run; no 2023-2024 option data is downloaded).
+
+### 1. BSE and TATASTEEL mismatches: Breeze errors (a partly adjusted history), not the repo
+Both stocks show the same pattern in the Breeze daily bars: the history from **2021-08-02** onwards is adjusted for a
+corporate action that happened LATER, while the history before 2021-08-02 is not. 2021-08-02 is not an action date for
+either stock, so Breeze shows a one-day fall there that never happened. The repo's series is smooth across that date and
+is consistent with the actions (repo / Breeze = the product of the later actions' factors).
+- **BSE** (bonus 2:1 on 2022-03-21 and 2:1 on 2025-05-23, factor 1/3 each):
+  - 2021-07-30 Breeze close 1,248.80, 2021-08-02 Breeze close 425.80 (-65.9% in one day); repo 138.76 -> 141.93 (+2.3%).
+  - Before 2021-08-02 repo / Breeze = 0.1111 (= 1/9, both bonuses) on 620 days; from 2021-08-02 Breeze is already
+    adjusted for the 2022 bonus, so the 2022-03-21 ex-date shows no gap in Breeze (937.00 -> 939.90) - which is why that
+    bonus is "not seen in the prices" and is not applied. The 2025 bonus is raw in Breeze (6,996.50 -> 2,448.00) and is applied.
+  - Remaining unexplained BSE days after 2022: short runs where repo / Breeze is 0.329-0.337 instead of 0.3333 (repo and
+    Breeze closes differ by 1-1.5% on those days); which side is right is not known.
+- **TATASTEEL** (split 10:1 on 2022-07-28):
+  - 2021-07-30 Breeze 1,434.30, 2021-08-02 Breeze 141.30 (-90.1%); repo 143.43 -> 141.01. Before 2021-08-02 repo / Breeze
+    = 0.1000 on 620 days; from 2021-08-02 to the split Breeze is already adjusted, so the 2022-07-28 ex-date shows no gap
+    (96.04 -> 100.20).
+  - Two single unadjusted bars inside the adjusted stretch: 2022-03-29 Breeze 1,334.65 (repo 133.46) and 2022-06-14 Breeze
+    996.15 (repo 99.61), each +896% / +901% and back -90% the next day.
+  - 2019-01-21 Breeze bar about 1/10 of its neighbours (-92.2%, then +1,138.9% on 2019-01-22).
+- The repo had no one-day close move over 20% for either stock since 2019. Conclusion: Breeze errors (a vendor
+  adjustment boundary at 2021-08-02 and isolated bad bars); not unadjusted actions in the usual sense, and not repo errors.
+  Breeze data is not changed; the stock-years are excluded by the rule below.
+
+### 2. PRE-REGISTERED RULE (2026-11-15; `data_quality` in config.yaml; `app/data_quality.py`)
+A stock-year is **excluded from every Phase 9 backtest** - the strategy, every variant (A-D) and the baseline alike - when
+- its **unexplained** Breeze-vs-repo close mismatches (over 0.5%, no explanation; "possibly explained" by a later demerger
+  or rights issue does not count) exceed **5% of the year's Breeze sessions**, or
+- its Breeze daily closes contain **any one-day move over 20%** (up or down) on a session that is not the ex-date of a
+  split, bonus or demerger,
+
+**unless resolved**: a stock-year is kept only when it is listed in `data_quality.resolved_stock_years` with the
+resolution recorded here. Exclusion means no entry (no signal, no scheduled baseline attempt) in that stock-year or in the
+45 calendar days before it; scheduled baseline attempts there are counted as EXCLUDED_STOCK_YEAR. A year with no external
+closes to compare is judged on the jump rule alone. Whether the repo shows the same move is recorded as evidence only.
+
+### Stock-years this excludes now (30 priority stocks, years from 2019; Phase 9 tests start 2019-01-22)
+27 stock-years. "(repo: same move)" = the repo's close moves by the same amount that day (evidence that the move was
+real); the rule excludes these too, unless you resolve them.
+| Stock | Years | Reason |
+|---|---|---|
+| BSE | 2019, 2020, 2021, 2022, 2023 | unexplained mismatches 93%, 100%, 61%, 7.3%, 10.6%; 2021-08-02 -65.9% (Breeze error) |
+| TATASTEEL | 2019, 2020, 2021, 2022 | mismatches 93%, 100%, 58%; jumps 2019-01-21/22, 2021-08-02, 2022-03-29/30, 2022-06-14/15 (Breeze errors) |
+| ETERNAL | 2021, 2022, 2023, 2024 | unexplained mismatches 18.0%, 14.5%, 16.7%, 5.7%; 2022-01-24 -20.2% (repo: same move) |
+| ADANIENT | 2019, 2020, 2023, 2024 | jumps only: 2019-05-20 +27.4%, 2020-08-25 +23.7%, 2023-02-01 -26.7%, 2023-02-02 -28.2%, 2023-02-08 +22.1%, 2024-11-21 -22.6% (all: repo same move) |
+| ADANIPORTS | 2023, 2024 | 2023: unexplained mismatches 6.9%; 2024: 2024-06-04 -21.1% (repo: same move) |
+| HCLTECH, HDFCBANK | 2019 | a bad Breeze bar on 2019-01-21 (about 2x its neighbours; repo differs), the move back lands on 2019-01-22 |
+| AXISBANK, BAJFINANCE, SHRIRAMFIN | 2020 | 2020-03-23 -27.9%, -23.2%, -22.2% (repo: same move) |
+| M&M | 2020 | unexplained mismatches 15.6% |
+| SHRIRAMFIN | 2022 | unexplained mismatches 9.3% |
+
+- In **2023-2024** (the pre-registered comparison's period) this excludes **7 stock-years**: ADANIENT 2023 and 2024,
+  ADANIPORTS 2023 and 2024, BSE 2023, ETERNAL 2023 and 2024.
+- In **2025-2026** it excludes **none**, so the stored-data backtest is not affected by it.
+- Candidates for a resolution by you (jump-only years where the repo shows the same move, i.e. most likely real market
+  moves): ADANIENT 2019, 2020, 2023, 2024; ADANIPORTS 2024; AXISBANK 2020; BAJFINANCE 2020; SHRIRAMFIN 2020. Nothing is
+  resolved now.
+- Earlier years (2014-2017) have many more bad Breeze bars (pairs of +100% / -50% days on the same dates across stocks,
+  e.g. 2015-10-01/06, 2016-01-19/20); they are before the Phase 9 floor and not used.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1503,10 +1566,11 @@ any stock with a confirmed action), so backtest results on them change. The back
 | 74 | 9 | Bull call spread baseline with whole-lot sizing: 47 trades, -2,36,340 (PF 0.47) in five months | Reported; candidate stays watch only |
 | 75 | 9 | Score bands need several candidates a day; the stored months give 1 on 20 of 22 days | Open: needs more stocks and years downloaded |
 | 76 | 9 | Pre-registered comparison of variants A-D on 2023-2024 (2026-11-15) | Open: waits for 2023-2024 to be completely downloaded for the 30 priority stocks; B and C rows to be built first |
-| 77 | data | 1,856 unexplained daily-close mismatches Breeze vs the external repo (BSE 673, TATASTEEL 638, ...) | Open: check by hand; Breeze stays the source |
+| 77 | data | 1,856 unexplained daily-close mismatches Breeze vs the external repo (BSE 673, TATASTEEL 638, ...) | BSE, TATASTEEL investigated 2026-11-15: Breeze errors (adjustment boundary 2021-08-02, bad bars); the stock-years are excluded by the pre-registered rule |
 | 78 | data | TATASTEEL Breeze history has one-day price breaks (2021-08-02, 2022-03-29/30, 2022-06-14/15): 718 decision sessions short of history | Open |
 | 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Open: rerun when the backtest is next run |
 | 80 | data | NSE board-meetings and corporate-actions CSV columns not verified against the live pages | Open: first real download will confirm or be rejected with the columns named |
+| 81 | data | Pre-registered stock-year exclusion (2026-11-15): 27 stock-years from 2019 excluded, 7 of them in 2023-2024 | Applied; 8 jump-only years await your decision on resolution |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |

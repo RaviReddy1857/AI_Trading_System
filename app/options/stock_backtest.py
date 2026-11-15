@@ -379,7 +379,7 @@ def scan_candidates(settings: Settings, eng: OptionEngine, syms: list[str], dev:
             if i in brk:
                 start = i
             d = bar_date(bar)
-            if d not in allowed:
+            if d not in allowed or d in eng.no_entry.get(sym, ()):       # an excluded stock-year: no candidate
                 continue
             ctx = eng.context(scan, sym, d, bar.close, "strategy", None, eng.daily_window(sym, i, start), ())
             for sig in scan.evaluate(ctx):
@@ -922,6 +922,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"whose option history is completely downloaded. The rest is not in this result.")
         print(f"\nreport covers {len(covered)} stocks, {years[0]}..{years[-1]} (completely downloaded); "
               f"use --all-data for everything stored")
+    # pre-registered data-quality exclusion (app/data_quality.py), the same for the strategy, every variant and the baseline
+    from ..data_quality import assess, excluded_list, excluded_sessions
+    dq = assess(settings, store, sorted(set(stocks) | {r["stock"] for r in ranked}))
+    eng.no_entry = excluded_sessions(dq, sessions)
+    dq_rows = [r for r in excluded_list(dq) if r["year"] >= (dev[0].year if dev else 0)]
+    print(f"\ndata-quality exclusions (no entries; strategy, variants and baseline alike): "
+          f"{len(dq_rows)} stock-year(s) in the tested years: "
+          + (", ".join(f"{r['stock']} {r['year']}" for r in dq_rows) or "none"))
     if args.credit_distribution:
         span = [d for d in dev if first is None or d >= first]
         eng.last_session = dev[-1]
@@ -950,7 +958,9 @@ def main(argv: list[str] | None = None) -> int:
                                                                  **incomplete_sensitivity(settings, e, syms, d, by_mode),
                                                                  **monthly_candidates(settings, e, syms, d, by_mode[next(iter(by_mode))][0]),
                                                                  **score_reports(settings, e, syms, d, by_mode),
-                                                                 **groups_at_end(settings, e, syms, d)})
+                                                                 **groups_at_end(settings, e, syms, d),
+                                                                 "data_quality_exclusions": [r for r in dq_rows
+                                                                                             if r["stock"] in syms]})
     print_report(res["report"], "breeze")
     print_effects(res["report"])
     rev = run_reversal_reports(settings, store, eng, use_stocks, [r["stock"] for r in ranked], dev, first, note)

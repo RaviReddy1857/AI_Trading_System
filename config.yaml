@@ -129,6 +129,11 @@ external_data:                   # one-time import (python -m app.external_data)
   positioning_since: 2024-01-01
   crosscheck_mismatch_pct: 0.5   # daily close vs Breeze: stored and reported above this
 
+data_quality:                    # PRE-REGISTERED 2026-11-15 (docs/STATUS.md): stock-years excluded from Phase 9 backtests
+  max_unexplained_pct: 5         # unexplained Breeze-vs-repo close mismatches above this share of the year's sessions
+  max_one_day_jump_pct: 20       # or any one-day Breeze close move above this with no split, bonus or demerger
+  resolved_stock_years: []       # "SYMBOL:YEAR" only once a resolution is recorded in docs/STATUS.md
+
 data_status:                     # the Data status page (/data-status): when a source counts as STALE
   fii_dii_max_trading_days: 1
   coverage_max_age_days: 7
