@@ -377,7 +377,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     def stock_option_selling_settlement():
         """Settlement readiness for sold stock option legs (phase 9 M3): ICICI's rules as entered, each with
         its confirmed flag, and the alerts of the open positions. Alerts and estimates only. Read-only."""
-        return {**rules_view(settings.stock_option_selling), "alerts": [],
+        return {**rules_view(settings.stock_option_selling, calendar, utcnow().astimezone(IST).date()), "alerts": [],
                 "note": "Stock options settle physically. Alerts and estimates only: the system never closes or "
                         "changes a position."}
 

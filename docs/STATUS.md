@@ -17,6 +17,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
+| - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Not started | | |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
@@ -1795,11 +1796,29 @@ appearing and disappearing with a rule's flag; positions unchanged. The app was 
 ### Not tested / not built here
 - **Sending and repeating the alerts** (Telegram, repeat interval per level) and **marking a position closed**: phase 6.
   No position is recorded before phase 6, so the route returns no alert and nothing is shown at the top of the dashboard yet.
-- **The holiday calendar in the day count**: the functions take the calendar's `is_trading_day`; the tests use weekdays.
-  Phase 6 must pass the calendar (a missing holiday would make every level one day late).
+- **The holiday calendar in the day count**: see the follow-ups below.
 - **ICICI's rules themselves** are as you entered them; none was checked from here (issue 85).
-- The backtest still exits at the time exit (10 calendar days), which is always before the 5-trading-day forced-exit
-  window, so the forced exit never fires in a backtest.
+- (Superseded by the follow-ups below: the backtest now applies the forced exit, and the day count uses the calendar.)
+
+## Phase 9 M3 follow-ups: holiday calendar in the settlement day count; forced exit in the backtest (2026-11-15)
+
+Two follow-ups asked for after M3. No default changed; variants A-D unchanged; "nothing before E-7 for an unknown
+price" kept as built. Whole suite: **647 passing**.
+
+| # | Change | Code | Tests |
+|---|---|---|---|
+| 1 | Settlement alerts count trading days with the holiday calendar (holidays.csv), not weekdays: the day count, the alert levels, the exit deadline, ICICI's cut-off days and the expiry-week margin day all follow it. When the calendar has no holiday row for a year the expiry month touches (the 31 days up to expiry), or there is no calendar, the count is weekdays LESS ONE: alerts, URGENT and the deadline come one session earlier, never later, and the alert carries `calendar: {covered: false, note, colour: red}`. The page card and the route show the same note for expiries in the next 70 days | `settlement.DayCount`, `day_count`, `uncovered_years`, `days_left`, `cutoffs`, `settlement_alert`, `rules_view(calendar, today)`; route and page card | `test_ACCEPTANCE_trading_days_use_the_holiday_calendar_not_weekdays` (a 25 December holiday: E-5 is the 21st, not the 22nd), `test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_day_earlier_and_says_so` (no calendar, empty file, last year's list), `test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card` |
+| 2 | The backtest now applies the forced exit: at a close, a credit spread whose next session is inside the last `forced_exit_trading_days_before_expiry` (5) trading days (by the run's holiday calendar) is closed at that next session (`FORCED_EXPIRY_EXIT`), under both executions. The time exit is still checked first. `strategy.time_exit = False` switches the time exit off for tests and comparisons; the forced exit cannot be switched off | `OptionEngine._late_exit`, `FORCED_EXPIRY_EXIT`; `StockOptionSelling.time_exit` | `tests/test_phase9_forced_exit.py`: with the time exit off the July spread of a fixture leaves at 09:15 on E-5 (22 July, expiry 29 July) on daily bars and on synchronized 5-minute bars, decided at the close of E-6; with it on, the time exit ends it on 21 July; with a holiday in the window the forced exit moves a session earlier |
+
+- **Stored-data results unchanged.** With the time exit on, the forced exit can only fire when two or more holidays
+  fall in the last fortnight before an expiry. The strategy's portfolio run on stored data (16 stocks 2025-2026 and 30
+  stocks 2026, both executions) gives the same trades, net and drawdown as the rerun above. The full reports and the
+  baselines were not rerun.
+- **What "covered" means:** NSE publishes a holiday list every year, so a year with no row in holidays.csv is treated as
+  not entered. A year with some rows but a missing holiday cannot be detected.
+- **Not tested here:** the live path (phase 6 must pass the app's calendar to `settlement_alert`; the route already
+  does for the page note). holidays.csv has rows for 2026 only, so every expiry from January 2027 on is counted
+  conservatively until the 2027 list is added; the page card says so from 70 days before.
 
 ## Open issues
 
@@ -1881,7 +1900,8 @@ appearing and disappearing with a rule's flag; positions unchanged. The app was 
 | 85 | 9 M3 | ICICI auto-close time (two differing statements), fresh-position block and the 11:00 shares deadline are unconfirmed | Waiting for user: confirm with ICICI, then set `confirmed: true` |
 | 88 | review | Backtest ran each stock's whole session before the next stock's; intraday roll gate read that day's close | Fixed 2026-11-15 (time-ordering fixes); rerun: one trade changed |
 | 86 | 9 M3 | The rupee amount of the expiry-week margin needs ICICI's VaR + ELM + adhoc margin for the position; the system does not have it | Open: shown as "margin unknown" with the schedule's percentage until the phase 6 position form takes the figure |
-| 87 | 9 M3 | Settlement day counts use weekdays in the tests; phase 6 must pass the holiday calendar | Open (phase 6) |
+| 87 | 9 M3 | Settlement day counts use weekdays in the tests; phase 6 must pass the holiday calendar | Fixed 2026-11-15: counted with the holiday calendar; a calendar that does not cover the expiry month counts one session earlier and says so. Phase 6 still has to pass the calendar when it sends alerts |
+| 89 | data | holidays.csv has 2026 only: settlement alerts for expiries from January 2027 are counted conservatively (one session earlier) | Waiting for user: add the 2027 NSE holidays when published |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
@@ -1988,3 +2008,5 @@ appearing and disappearing with a rule's flag; positions unchanged. The app was 
 | 2026-11-15 | Delivery estimate nets a sold leg only with a bought leg of the same right that is in the money at the last price too; the expiry-week margin is the schedule's percentage of a margin base entered by the user, never computed or assumed by the system |
 | 2026-11-15 | Portfolio backtest: one queue of every stock's events in time order; at one instant decisions, then new signals, then fills; only truly simultaneous events of different stocks follow the stock order (most liquid first) |
 | 2026-11-15 | A decision inside a session uses correlations of completed sessions before that day; a decision at the session's close may use that day |
+| 2026-11-15 | Settlement trading days come from the holiday calendar; a year of the expiry month (31 days to expiry) without any holiday row, or no calendar, means weekdays less one: one session earlier, shown in red on the card (user) |
+| 2026-11-15 | Backtest: forced exit at the first session inside the last 5 trading days (FORCED_EXPIRY_EXIT), after the time exit; the time exit can be switched off on the strategy object for tests, the forced exit cannot |

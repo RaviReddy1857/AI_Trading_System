@@ -21,6 +21,9 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
    "margin unknown", never zero.
 3. Planned-exit deadline (`exit_deadline`): the stricter (earlier) of the forced exit and ICICI's own
    times. A position still open after it gets a red alert on every call until it is closed (`overdue`).
+   Trading days are counted with the holiday calendar (data/holidays.csv). When the calendar has no holiday
+   row for a year the expiry month touches, a holiday may be missing: the count is then taken on weekdays
+   LESS ONE, so every alert and deadline comes one session earlier, and the alert says so (`calendar`).
 4. Every ICICI rule used carries its `confirmed` flag; an unconfirmed one is named in `not_confirmed` as
    "ICICI rule not confirmed: ...".
 """
@@ -94,13 +97,61 @@ def moneyness(leg: HeldLeg, spot: float | None, near_money_pct: float) -> dict:
             "itm_inr": round(depth * leg.shares, 2)}
 
 
-def days_left(today: date, expiry: date | None, is_trading_day: Callable[[date], bool] | None = None) -> int | None:
-    """Trading days to expiry (0 on expiry day, negative after it); None when the expiry is not known."""
+CALENDAR_COVERED = "trading days counted with the holiday calendar"
+
+
+def uncovered_years(calendar, first: date, last: date) -> list[int]:
+    """The calendar years from `first` to `last` for which the holiday calendar holds no holiday at all
+    (NSE publishes a list every year, so a year without a row has not been entered). No calendar: all."""
+    have = {h.year for h in calendar.holidays} if calendar is not None else set()
+    return [y for y in range(first.year, last.year + 1) if y not in have]
+
+
+@dataclass(frozen=True)
+class DayCount:
+    """How trading days to one expiry are counted. `covered`: the holiday calendar covers the expiry month
+    (the 31 days up to expiry). Not covered: weekdays less one - one session earlier, never later."""
+    expiry: date | None
+    covered: bool
+    note: str
+    is_trading_day: Callable[[date], bool] | None = None
+
+    def left(self, today: date) -> int | None:
+        """Trading days to expiry (0 on expiry day, negative after it); None when the expiry is not known."""
+        if self.expiry is None:
+            return None
+        if today > self.expiry:
+            return -trading_days_to(self.expiry, today, self.is_trading_day)
+        n = trading_days_to(today, self.expiry, self.is_trading_day)
+        return n if self.covered else max(n - 1, 0)
+
+    def session(self, n: int) -> date:
+        """The session with n trading days left to expiry (0: expiry day); not covered: one session earlier."""
+        d, n = self.expiry, n if self.covered else n + 1
+        while n > 0:
+            d -= timedelta(days=1)
+            if d.weekday() < 5 and (self.is_trading_day is None or self.is_trading_day(d)):
+                n -= 1
+        return d
+
+
+def day_count(expiry: date | None, calendar=None) -> DayCount:
+    """`calendar`: the app's MarketCalendar (holidays.csv), or None when there is none."""
     if expiry is None:
-        return None
-    if today > expiry:
-        return -trading_days_to(expiry, today, is_trading_day)
-    return trading_days_to(today, expiry, is_trading_day)
+        return DayCount(None, False, "the expiry is not known")
+    missing = uncovered_years(calendar, expiry - timedelta(days=31), expiry)
+    if not missing:
+        return DayCount(expiry, True, CALENDAR_COVERED, calendar.is_trading_day)
+    why = "no holiday calendar" if calendar is None else \
+        f"holidays.csv has no holidays for {', '.join(map(str, missing))}"
+    return DayCount(expiry, False, f"{why}: trading days are counted on weekdays less one, so alerts and the deadline "
+                                   f"come one session earlier. Add the NSE holidays to data/holidays.csv.",
+                    calendar.is_trading_day if calendar is not None else None)
+
+
+def days_left(today: date, expiry: date | None, calendar=None) -> int | None:
+    """Trading days to expiry by the holiday calendar (conservative when it does not cover the expiry month)."""
+    return day_count(expiry, calendar).left(today)
 
 
 def leg_level(leg: HeldLeg, spot: float | None, left: int | None, cfg, past_cutoff: bool = False) -> tuple[str | None, str]:
@@ -124,64 +175,55 @@ def leg_level(leg: HeldLeg, spot: float | None, left: int | None, cfg, past_cuto
 
 
 # ---------------- ICICI's rules: which are used, and which are not confirmed ----------------
-def _session_before_expiry(expiry: date, n: int, is_trading_day=None) -> date:
-    """The session with n trading days left to expiry (n = 0: expiry day itself)."""
-    d = expiry
-    while n > 0:
-        d -= timedelta(days=1)
-        if d.weekday() < 5 and (is_trading_day is None or is_trading_day(d)):
-            n -= 1
-    return d
-
-
 def _at(d: date, t: time) -> datetime:
     return datetime.combine(d, t, IST)
 
 
-def cutoffs(pos: HeldPosition, sos, is_trading_day=None) -> list[dict]:
+def cutoffs(pos: HeldPosition, sos, calendar=None) -> list[dict]:
     """Every moment by which the position should be out, earliest first: the system's forced exit and
     ICICI's own times, each with what set it and whether ICICI's rule is confirmed. `sos`:
     stock_option_selling. Empty when the expiry is not known."""
     if pos.expiry is None:
         return []
+    dc = day_count(pos.expiry, calendar)
     b = sos.settlement.broker
     forced = sos.forced_exit_trading_days_before_expiry
-    out = [{"at": _at(_session_before_expiry(pos.expiry, forced, is_trading_day), MARKET_CLOSE), "broker": False,
+    out = [{"at": _at(dc.session(forced), MARKET_CLOSE), "broker": False,
             "confirmed": True, "rule": "forced exit",
             "what": f"forced exit: no position inside the last {forced} trading days (the close of E-{forced})"}]
     dm = b.delivery_margin
     if dm.schedule_pct and pos.shorts:
         first = max(dm.schedule_pct)
-        day = _session_before_expiry(pos.expiry, first, is_trading_day)
+        day = dc.session(first)
         t = hhmm(dm.collected_daily_at) if first in dm.collected_daily_on_days and dm.collected_daily_at else time(9, 15)
         out.append({"at": _at(day, t), "broker": True, "confirmed": dm.confirmed, "rule": "delivery margin",
                     "what": f"ICICI delivery margin starts ({dm.schedule_pct[first]:g}% of {dm.base or 'the margin base'} "
                             f"on E-{first})"})
     t = b.auto_close.deadline(has_long=bool(pos.longs), has_short=bool(pos.shorts))
     if t is not None:
-        out.append({"at": _at(pos.expiry, t), "broker": True, "confirmed": b.auto_close.confirmed, "rule": "auto close",
+        out.append({"at": _at(dc.session(0), t), "broker": True, "confirmed": b.auto_close.confirmed, "rule": "auto close",
                     "what": "ICICI closes open option positions itself on expiry day (earliest stated time for the legs held)"})
     ob = b.obligation
     if ob.call_shares_in_demat_by and any(x.right == "CE" for x in pos.shorts):
-        out.append({"at": _at(pos.expiry, hhmm(ob.call_shares_in_demat_by)), "broker": True,
+        out.append({"at": _at(dc.session(0), hhmm(ob.call_shares_in_demat_by)), "broker": True,
                     "confirmed": ob.call_shares_deadline_confirmed, "rule": "call shares deadline",
                     "what": "shares for a sold call must be in demat by this time on expiry day"})
     return sorted(out, key=lambda c: c["at"])
 
 
-def exit_deadline(pos: HeldPosition, sos, is_trading_day=None) -> dict | None:
+def exit_deadline(pos: HeldPosition, sos, calendar=None) -> dict | None:
     """The planned-exit deadline: the earliest cut-off. None when the expiry is not known (the alert is
     then URGENT "price unknown" and the position counts as overdue)."""
-    cs = cutoffs(pos, sos, is_trading_day)
+    cs = cutoffs(pos, sos, calendar)
     return cs[0] if cs else None
 
 
-def overdue(pos: HeldPosition, now: datetime, closed: bool, sos, is_trading_day=None) -> dict | None:
+def overdue(pos: HeldPosition, now: datetime, closed: bool, sos, calendar=None) -> dict | None:
     """The red alert for a planned exit that is not confirmed: returned on EVERY call after the deadline
     while the position is not marked closed (the caller repeats it), None once it is closed."""
     if closed or not pos.shorts:
         return None
-    dl = exit_deadline(pos, sos, is_trading_day)
+    dl = exit_deadline(pos, sos, calendar)
     if dl is None:
         return {"kind": "EXIT_OVERDUE", "colour": "red", "repeat": True, "deadline": None,
                 "text": f"{pos.underlying}: expiry not known, so no exit deadline can be set: check this position now"}
@@ -298,7 +340,7 @@ def not_confirmed(pos: HeldPosition, sos, used_cutoffs: Sequence[dict]) -> list[
 
 
 def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, capital: float,
-                     previous_level: str | None = None, closed: bool = False, is_trading_day=None,
+                     previous_level: str | None = None, closed: bool = False, calendar=None,
                      base_margin_inr: float | None = None, near_month: bool = True) -> dict | None:
     """The settlement-readiness alert of one open position at `now`, or None when the position is
     closed, has no sold leg, or nothing applies yet (no level and not overdue). `previous_level`: the
@@ -309,8 +351,9 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
         return None
     st = sos.settlement
     today = now.astimezone(IST).date()
-    left = days_left(today, pos.expiry, is_trading_day)
-    cs = cutoffs(pos, sos, is_trading_day)
+    dc = day_count(pos.expiry, calendar)
+    left = dc.left(today)
+    cs = cutoffs(pos, sos, calendar)
     past = any(c["broker"] and now >= c["at"] for c in cs)
     legs, level = [], None
     for leg in pos.shorts:
@@ -320,7 +363,7 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
                      "lots": leg.lots, "lot_size": leg.lot_size, "level": lv, "why": why,
                      **moneyness(leg, spot, st.near_money_pct)})
     level = escalate(previous_level, level)
-    late = overdue(pos, now, closed, sos, is_trading_day)
+    late = overdue(pos, now, closed, sos, calendar)
     if level is None and late is None:
         return None
     dl = cs[0] if cs else None
@@ -328,6 +371,8 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
     kind = "spread" if pos.longs else "position"
     return {"underlying": pos.underlying, "label": pos.label, "level": level, "colour": "red" if late or level == URGENT else None,
             "expiry": pos.expiry.isoformat() if pos.expiry else None, "trading_days_left": left,
+            # how the days were counted; not covered = one session earlier, shown on the card in red
+            "calendar": {"covered": dc.covered, "note": dc.note, "colour": None if dc.covered else "red"},
             "legs": legs, "estimate": delivery_estimate(pos, spot, left, sos, capital, base_margin_inr, near_month),
             "deadline": dl["at"].isoformat() if dl else None, "deadline_set_by": dl["what"] if dl else None,
             "cutoffs": [{**c, "at": c["at"].isoformat()} for c in cs],
@@ -336,9 +381,17 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
             "note": "alert and estimate only: the system never closes or changes a position"}
 
 
-def rules_view(sos) -> dict:
+def rules_view(sos, calendar=None, today: date | None = None) -> dict:
     """ICICI's rules as stored, for the stock option page: each with its confirmed flag and, when it is
-    not confirmed, the label shown on every card and alert that uses it."""
+    not confirmed, the label shown on every card and alert that uses it. With `today`: whether the
+    holiday calendar covers the expiries of the next 70 days (the entry window and the month after)."""
+    cal = None
+    if today is not None:
+        missing = uncovered_years(calendar, today - timedelta(days=31), today + timedelta(days=70))
+        cal = {"covered": not missing, "colour": None if not missing else "red",
+               "note": CALENDAR_COVERED if not missing else
+               f"holidays.csv has no holidays for {', '.join(map(str, missing))}: for expiries there, trading days are "
+               f"counted on weekdays less one (alerts one session earlier). Add the NSE holidays to data/holidays.csv."}
     b = sos.settlement.broker
     st = sos.settlement
 
@@ -366,5 +419,6 @@ def rules_view(sos) -> dict:
                 row("call shares deadline", ob.call_shares_deadline_confirmed,
                     f"in demat by {ob.call_shares_in_demat_by} on expiry day" if ob.call_shares_in_demat_by else ""),
             ],
+            "calendar": cal,
             "positions_note": "No open positions are recorded yet (phase 6 adds the journal): the rules and estimates are "
                               "built and tested, alerts are not sent."}

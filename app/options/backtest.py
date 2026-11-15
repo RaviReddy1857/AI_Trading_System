@@ -73,7 +73,7 @@ from .instruments import InstrumentBook
 from .stock_profile import (MARKET_UNKNOWN, MARKET_WEAK, ClosedTrade, Snapshot, alert_kinds, breadth_pct, market_weak,
                             vix_spike_series,
                             snapshot)
-from .stock_selling import SpreadPosition, roll_choices, roll_money
+from .stock_selling import SpreadPosition, roll_choices, roll_money, trading_days_to
 from .option_history import (ModelPrices, OptionHistory, OptionIntraday, atm_candidates, budgeted_fetcher,
                              discover_expiries, simulated_expiries, stock_iv_series)
 
@@ -104,6 +104,7 @@ EXIT_CHECK_LABEL = {
                 "synchronized bar's open; a campaign with a session lacking such a bar is data-incomplete and left out",
 }
 OPEN_AT_CUTOFF = "OPEN_AT_CUTOFF"
+FORCED_EXPIRY_EXIT = "FORCED_EXPIRY_EXIT"     # phase 9: out at the first session inside the forced-exit window
 # Order of the steps that fall on one instant (OptionEngine.run_portfolio): decisions on what is known at
 # that instant, then new entry signals, then fills at the open of the bar that starts there.
 DECIDE, SIGNAL, FILL = 0, 1, 2
@@ -230,7 +231,7 @@ class OptionTrade:
     entry_net: float              # per share: credit received (+) or premium paid (-), after slippage
     exit_time: str
     exit_net: float               # per share: paid to close (-) or received (+), after slippage
-    exit_reason: str              # TARGET | STOP | TIME | EXPIRY_EXIT | PERIOD_END | OPEN_AT_CUTOFF (still open: a mark)
+    exit_reason: str              # TARGET | STOP | TIME | FORCED_EXPIRY_EXIT | EXPIRY_EXIT | PERIOD_END | OPEN_AT_CUTOFF (a mark)
     gross_pnl: float
     costs: dict
     net_pnl: float
@@ -760,6 +761,20 @@ class OptionEngine:
             return p.exit_days_before_expiry
         return p.stock_exit_days_before_expiry if self.kinds.get(sym) == "stock" else p.index_exit_days_before_expiry
 
+    def _late_exit(self, strategy: OptionStrategy, sym: str, nxt: date, expiry: date) -> str | None:
+        """The exit a credit spread is given at a close because of the calendar alone, filled at the next
+        session `nxt`: TIME when nxt is within the time exit (calendar days before expiry), else
+        FORCED_EXPIRY_EXIT when nxt is inside the forced-exit window (phase 9:
+        `forced_exit_trading_days_before_expiry` trading days, counted with the run's holiday calendar) -
+        no position is ever inside that window. `strategy.time_exit = False` switches the time exit off
+        (tests and comparisons); the forced exit cannot be switched off."""
+        if getattr(strategy, "time_exit", True) and (expiry - nxt).days <= self._exit_days(strategy, sym):
+            return "TIME"
+        forced = getattr(strategy.params, "forced_exit_trading_days_before_expiry", None)
+        if forced is not None and trading_days_to(nxt, expiry, self.base.calendar.is_trading_day) <= forced:
+            return FORCED_EXPIRY_EXIT
+        return None
+
     def _sync_bars(self, sym: str, legs, d: date):
         """The synchronized 5-minute bars of session d for these legs, or None when any leg's 5-minute
         bars are unknown (not stored, or the session is outside the stored window)."""
@@ -941,8 +956,8 @@ class OptionEngine:
                 pos.pending_exit, pos.pending_basis = "TARGET", "daily close (sensitivity: no synchronized bar that session)"
             elif not never and cost >= sig.stop:
                 pos.pending_exit, pos.pending_basis = "STOP", "daily close (sensitivity: no synchronized bar that session)"
-            elif (expiry - nxt).days <= self._exit_days(strategy, sym):
-                pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
+            elif self._late_exit(strategy, sym, nxt, expiry):
+                pos.pending_exit, pos.pending_basis = self._late_exit(strategy, sym, nxt, expiry), "rule at the close"
             return ("hold",)
         if pos.pending_exit and sync:                      # decided earlier: the first synchronized bar's open
             return (yield from self._sync_exit(pos, sym, d, i, sync, 0, pos.pending_exit, strategy))
@@ -980,8 +995,8 @@ class OptionEngine:
         elif alerts and any(a in strategy.alert_exits for a in alerts[side]):
             pos.pending_exit = "ALERT_" + next(a for a in alerts[side] if a in strategy.alert_exits)
             pos.pending_basis = "alert at the close"
-        elif (expiry - nxt).days <= self._exit_days(strategy, sym):
-            pos.pending_exit, pos.pending_basis = "TIME", basis
+        elif self._late_exit(strategy, sym, nxt, expiry):
+            pos.pending_exit, pos.pending_basis = self._late_exit(strategy, sym, nxt, expiry), basis
         wants_roll = (policy == "roll_rules" and pos.pending_exit == "STRIKE_BREACHED") or \
                      (never_stop and pos.pending_exit == "TIME" and cost > credit)
         if wants_roll:
@@ -1031,8 +1046,8 @@ class OptionEngine:
             elif alerts and any(a in strategy.alert_exits for a in alerts[0 if pos.legs[0].right == "PE" else 1]):
                 kind = next(a for a in alerts[0 if pos.legs[0].right == "PE" else 1] if a in strategy.alert_exits)
                 pos.pending_exit, pos.pending_basis = "ALERT_" + kind, "alert at the close"
-            elif (expiry - nxt).days <= exit_days:
-                pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
+            elif self._late_exit(strategy, sym, nxt, expiry):
+                pos.pending_exit, pos.pending_basis = self._late_exit(strategy, sym, nxt, expiry), "rule at the close"
             credit = float(sum((f * s for f, s in zip(pos.fills, signs)), Decimal(0)))
             wants_roll = (policy == "roll_rules" and pos.pending_exit in ("STOP", "STRIKE_BREACHED")) or \
                          (policy == "roll_always" and pos.pending_exit == "TIME" and value > credit)

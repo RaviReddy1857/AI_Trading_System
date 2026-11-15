@@ -179,6 +179,7 @@ class StockOptionSelling(CreditSpread):
     alert_exits: frozenset = frozenset()
 
     exit_policy = "stop"                 # backtest comparison: stop | roll_rules | roll_always
+    time_exit = True                     # backtests: False = no time exit, so only the forced exit ends a late position
     below_base_low = False               # reversal candidate: the sold strike always sits below the base low
     report_open_at_cutoff = True         # backtests: a position open at the end of the period is reported open
 

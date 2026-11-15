@@ -7,11 +7,21 @@ from pathlib import Path
 
 import pytest
 
+import app.options.settlement as sm
+from functools import partial
+
+from app.calendar import MarketCalendar
 from app.config import DeliveryMargin, Settlement, load_settings
-from app.options.settlement import (MARGIN_UNKNOWN, NOT_CONFIRMED, NOTICE, PRICE_UNKNOWN, URGENT, WARNING, HeldLeg,
-                                    HeldPosition, cutoffs, days_left, delivery_estimate, delivery_margin, escalate,
-                                    exit_deadline, leg_level, moneyness, overdue, rules_view, settlement_alert)
+from app.options.settlement import (CALENDAR_COVERED, MARGIN_UNKNOWN, NOT_CONFIRMED, NOTICE, PRICE_UNKNOWN, URGENT, WARNING,
+                                    HeldLeg, HeldPosition, day_count, delivery_estimate, delivery_margin, escalate,
+                                    leg_level, moneyness, rules_view, uncovered_years)
 from app.quality import IST
+
+# A holiday calendar that covers 2026 and has no holiday near the test expiry: in the tests above the
+# calendar section, trading days are therefore the weekdays. The calendar tests below use their own.
+CAL = MarketCalendar({date(2026, 1, 26): "Republic Day"})
+cutoffs, days_left, exit_deadline, overdue, settlement_alert = (
+    partial(f, calendar=CAL) for f in (sm.cutoffs, sm.days_left, sm.exit_deadline, sm.overdue, sm.settlement_alert))
 
 SOS = load_settings().stock_option_selling                 # the shipped rules: E-7, URGENT from E-5, 5% of spot
 ST = SOS.settlement
@@ -282,8 +292,105 @@ def test_settlement_route_and_page_are_read_only():
     with TestClient(app) as c:
         j = c.get("/api/stock-option-selling/settlement").json()
         assert j["alerts"] == [] and "never closes or changes" in j["note"]
+        assert set(j["calendar"]) == {"covered", "colour", "note"} and isinstance(j["calendar"]["covered"], bool)
         assert j["alerts_from"] == {"from_trading_days": 7, "urgent_from_trading_days": 5, "near_money_pct": 5.0,
                                     "forced_exit_trading_days": 5}
         assert any(r["label"] == f"{NOT_CONFIRMED}: auto close" for r in j["rules"])
         assert "Settlement readiness" in c.get("/stock-option-selling").text
         assert c.post("/api/stock-option-selling/settlement", json={}).status_code in (403, 405)
+
+
+
+# ---------------- trading days by the holiday calendar ----------------
+XMAS = MarketCalendar({date(2026, 1, 26): "Republic Day", date(2026, 12, 25): "Christmas"})
+
+
+def on(d, hh=10, mm=0):
+    return datetime.combine(d, time(hh, mm), IST)
+
+
+def test_ACCEPTANCE_trading_days_use_the_holiday_calendar_not_weekdays():
+    """Expiry Tuesday 29 December 2026 with Friday 25 December a holiday. Sessions before expiry: 28 (E-1),
+    24 (E-2), 23 (E-3), 22 (E-4), 21 (E-5), 18 (E-6), 17 (E-7). By weekdays alone E-5 would be the 22nd."""
+    left = lambda d: sm.days_left(d, EXP, XMAS)
+    assert [left(date(2026, 12, n)) for n in (16, 17, 18, 21, 22, 23, 24, 28, 29)] == [8, 7, 6, 5, 4, 3, 2, 1, 0]
+    assert days_left(date(2026, 12, 21), EXP) == 6                        # the same day without the holiday: E-6
+    dc = day_count(EXP, XMAS)
+    assert dc.covered and dc.note == CALENDAR_COVERED
+    assert [dc.session(n) for n in (0, 1, 2, 5, 7)] == [EXP, date(2026, 12, 28), date(2026, 12, 24), date(2026, 12, 21),
+                                                       date(2026, 12, 17)]
+    pos = put_spread()
+    # Monday 21 December is E-5: an in-the-money leg is URGENT (WARNING if the holiday were not counted)
+    a = sm.settlement_alert(pos, 980.0, on(date(2026, 12, 21)), SOS, CAP, calendar=XMAS)
+    assert a["level"] == URGENT and a["trading_days_left"] == 5 and a["calendar"] == {"covered": True, "note": CALENDAR_COVERED,
+                                                                                      "colour": None}
+    assert settlement_alert(pos, 980.0, on(date(2026, 12, 21)), SOS, CAP)["level"] == WARNING
+    # alerts start on E-7 = Thursday 17 December; nothing on the 16th
+    assert sm.settlement_alert(pos, 980.0, on(date(2026, 12, 17)), SOS, CAP, calendar=XMAS)["level"] == WARNING
+    assert sm.settlement_alert(pos, 980.0, on(date(2026, 12, 16)), SOS, CAP, calendar=XMAS) is None
+    # the deadline and ICICI's margin start move with the holiday: forced exit at the close of the 21st, margin on the 22nd
+    cs = {c["rule"]: c["at"] for c in sm.cutoffs(pos, SOS, XMAS)}
+    assert cs["forced exit"] == on(date(2026, 12, 21), 15, 30) and cs["delivery margin"] == on(date(2026, 12, 22), 15, 15)
+    assert a["action"] == "Exit the spread by 21-Dec-2026 15:30"
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 30), False, SOS, XMAS)["colour"] == "red"
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 29), False, SOS, XMAS) is None
+    # the expiry-week margin follows the calendar's day count: 22 December is E-4 (10%), 24 December E-2 (45%)
+    m = lambda d: sm.settlement_alert(pos, 990.0, on(d), SOS, CAP, calendar=XMAS, base_margin_inr=80000.0)["estimate"]["margin"]
+    assert m(date(2026, 12, 22))["pct_of_base"] == 10 and m(date(2026, 12, 24))["margin_inr"] == 36000.0
+
+
+@pytest.mark.parametrize("calendar, names", [
+    (None, "no holiday calendar"),                                                    # no calendar at all
+    (MarketCalendar(), "holidays.csv has no holidays for 2026"),                      # an empty file
+    (MarketCalendar({date(2025, 12, 25): "Christmas"}), "holidays.csv has no holidays for 2026"),   # last year's list only
+])
+def test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_day_earlier_and_says_so(calendar, names):
+    """Not covered: trading days = weekdays LESS ONE. A holiday that is not in the file (25 December here)
+    then cannot make an alert or the deadline late."""
+    dc = day_count(EXP, calendar)
+    assert dc.covered is False and names in dc.note and "one session earlier" in dc.note and "data/holidays.csv" in dc.note
+    left = lambda d: sm.days_left(d, EXP, calendar)
+    # weekdays to expiry on 16, 17, 18, 21, 22, 28, 29 December: 9, 8, 7, 6, 5, 1, 0
+    assert [left(date(2026, 12, n)) for n in (16, 17, 18, 21, 22, 28, 29)] == [8, 7, 6, 5, 4, 0, 0]
+    pos = put_spread()
+    alert = lambda d, spot=980.0: sm.settlement_alert(pos, spot, on(d), SOS, CAP, calendar=calendar)
+    assert alert(date(2026, 12, 15)) is None                                          # weekday E-10: counted E-9, still nothing
+    assert alert(date(2026, 12, 17))["level"] == WARNING                              # weekday E-8: alerts start a day early
+    assert alert(date(2026, 12, 21))["level"] == URGENT                               # weekday E-6: URGENT a day early
+    a = alert(date(2026, 12, 21))
+    # the card says so, in red
+    assert a["calendar"]["covered"] is False and a["calendar"]["colour"] == "red" and names in a["calendar"]["note"]
+    # the deadline is one session earlier too: the close of Monday 21 December (weekday E-6), not Tuesday 22
+    assert a["deadline"] == on(date(2026, 12, 21), 15, 30).isoformat()
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 30), False, SOS, calendar)["kind"] == "EXIT_OVERDUE"
+    # never later than the count with the true holiday: on every day it is at or below the covered count
+    for n in range(10, 30):
+        d = date(2026, 12, n)
+        if d.weekday() < 5 and d != date(2026, 12, 25):
+            assert left(d) <= sm.days_left(d, EXP, XMAS)
+
+
+def test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card():
+    only_2026 = MarketCalendar({date(2026, 1, 26): "Republic Day"})
+    assert uncovered_years(only_2026, date(2026, 11, 28), EXP) == []
+    assert uncovered_years(only_2026, date(2026, 12, 20), date(2027, 1, 20)) == [2027]
+    assert uncovered_years(None, date(2026, 12, 20), date(2027, 1, 20)) == [2026, 2027]
+    assert day_count(EXP, only_2026).covered is True
+    # an expiry early in January: the 31 days before it reach into the old year, so both years are needed
+    jan = date(2027, 1, 5)
+    assert day_count(jan, only_2026).covered is False and "2027" in day_count(jan, only_2026).note
+    assert day_count(jan, MarketCalendar({date(2027, 1, 26): "Republic Day"})).covered is False       # 2026 missing
+    both = MarketCalendar({date(2026, 1, 26): "x", date(2027, 1, 26): "y"})
+    assert day_count(jan, both).covered is True
+    # an unknown expiry: no count at all (the alert is URGENT "price unknown")
+    assert day_count(None, both).left(EXP) is None and day_count(None, both).covered is False
+    # after expiry the count is negative, covered or not
+    assert sm.days_left(EXP + timedelta(days=1), EXP, None) == -1
+    # the page card: covered or, in red, what is missing
+    ok = rules_view(SOS, only_2026, date(2026, 6, 1))["calendar"]
+    assert ok == {"covered": True, "colour": None, "note": CALENDAR_COVERED}
+    late = rules_view(SOS, only_2026, date(2026, 11, 15))["calendar"]                 # 70 days ahead reaches January 2027
+    assert late["covered"] is False and late["colour"] == "red" and "2027" in late["note"] and "one session earlier" in late["note"]
+    assert rules_view(SOS)["calendar"] is None                                        # no date given: nothing claimed
+    from app.page import SHORTLIST_HTML
+    assert "sr.calendar.note" in SHORTLIST_HTML and "CALENDAR:" in SHORTLIST_HTML

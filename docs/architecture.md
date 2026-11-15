@@ -300,7 +300,9 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   open), a delivery and expiry-week margin estimate ("margin unknown" when a rule or the margin base is missing, never
   zero), and a planned-exit deadline = the earliest of the forced exit (close of E-5) and ICICI's own times, with a red
   alert on every evaluation after it until the position is marked closed. Unconfirmed ICICI rules are named "ICICI rule
-  not confirmed". Pure functions: nothing closes or changes a position. Sending and repeating is phase 6.
+  not confirmed". Trading days come from the holiday calendar; when it has no row for a year the expiry month touches,
+  the count is weekdays less one (one session earlier) and the alert says so. Pure functions: nothing closes or changes
+  a position. Sending and repeating is phase 6.
 - Phase 9 short strike: beyond the nearest support (puts) or resistance (calls), beyond the highest-OI strike on that side,
   and |delta| at or below `max_short_delta`; otherwise no signal. Hedge: same expiry, `hedge_strikes_out` strikes further out,
   liquid, keeping max loss within `max_loss_per_stock_spread_pct`.
@@ -410,7 +412,9 @@ Stock option selling backtests (`app/options/stock_backtest.py`) add: target and
 (filled at the next 5-minute bar's open; a leg that did not trade in a bar is priced at its last trade if at most
 `intraday_leg_max_age_minutes` old) beside the daily check; three exit policies on identical recorded entries (stop, roll
 by the rules, roll every month), reported per campaign; the effect of each rule and alert against the baseline; and the
-reversal study. Only complete (stock, year) pairs of downloaded option history are reported unless `--all-data` is given.
+reversal study. A spread still open when its next session is inside the last `forced_exit_trading_days_before_expiry`
+trading days is closed at that session (`FORCED_EXPIRY_EXIT`), after the time exit has been checked.
+Only complete (stock, year) pairs of downloaded option history are reported unless `--all-data` is given.
 
 **Event order in a portfolio run (2026-11-15, `OptionEngine.run_portfolio`).** When several stocks run under the
 portfolio limits, every stock's steps (entries, exits, rolls, pending entries, new signals) go through ONE queue in

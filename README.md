@@ -351,7 +351,9 @@ forecast"). Backtest results are on http://127.0.0.1:8000/backtests.
 (`stock_option_selling.settlement.broker`), each marked confirmed or "ICICI rule not confirmed". The rules behind it
 (`app/options/settlement.py`) give, for every open position with a sold stock option leg: NOTICE / WARNING from 7
 trading days before expiry and URGENT from 5 (or when the price is unknown), the delivery obligation and expiry-week
-margin estimate, and a red alert when the position is not marked closed by its exit deadline. They are alerts and
+margin estimate, and a red alert when the position is not marked closed by its exit deadline. Trading days are counted
+with `data/holidays.csv`; if that file has no holidays for a year the expiry month touches, the count is made one
+session earlier and the card says so in red: add each year's NSE holidays when they are published. They are alerts and
 estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or
 sent yet. To do: confirm the auto-close time, the fresh-position block and the 11:00 shares deadline with ICICI and set
 their `confirmed` flags. For a rupee margin figure the VaR + ELM + adhoc margin of the position must be entered (phase 6
