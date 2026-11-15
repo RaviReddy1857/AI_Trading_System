@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import heapq
 import json
 import logging
 import uuid
@@ -103,6 +104,9 @@ EXIT_CHECK_LABEL = {
                 "synchronized bar's open; a campaign with a session lacking such a bar is data-incomplete and left out",
 }
 OPEN_AT_CUTOFF = "OPEN_AT_CUTOFF"
+# Order of the steps that fall on one instant (OptionEngine.run_portfolio): decisions on what is known at
+# that instant, then new entry signals, then fills at the open of the bar that starts there.
+DECIDE, SIGNAL, FILL = 0, 1, 2
 # phase 9 strategies sized in whole lots by max_risk_per_position_pct: re-sized at the actual entry fill
 RISK_SIZED_STRATEGIES = ("stock_option_selling", "reversal_put_spread", "reversal_bull_call_spread")
 
@@ -786,12 +790,13 @@ class OptionEngine:
 
     def _sync_exit(self, pos: _Position, sym: str, d: date, i: int, sync: list, k: int, reason: str,
                    strategy: OptionStrategy):
-        """Close at the open of synchronized bar k. With a roll pending, the old spread is closed and the
-        replacement opened at the first bar from there on in which all four legs traded; without one in
-        this session the roll is not made and the spread is simply closed."""
+        """Close at the open of synchronized bar k (a generator: it yields the moment of the fill BEFORE
+        filling, see iter_stream). With a roll pending, the old spread is closed and the replacement
+        opened at the first bar from there on in which all four legs traded; without one in this session
+        the roll is not made and the spread is simply closed."""
         start, bars = sync[k]
         rolled = None
-        if pos.pending_roll is not None:
+        if pos.pending_roll is not None:               # where the roll would fill: read from the bars alone
             new = pos.pending_roll
             four = self._sync_bars(sym, list(pos.legs) + list(new.legs), d)
             for s4, b4 in (four or []):
@@ -804,6 +809,7 @@ class OptionEngine:
                         rolled.last_bar = rolled.entry_bar = s4
                         start, bars = s4, b4[:len(pos.legs)]
                 break
+        yield (start, FILL)
         done = self._close(pos, sym, d, [b.open for b in bars], False, "ROLLED" if rolled is not None else reason,
                            strategy, "intraday", pos.pending_basis, exit_dt=start)
         if rolled is not None:
@@ -812,6 +818,20 @@ class OptionEngine:
         else:
             done.roll_refused = "ROLL_NOT_FILLED" if pos.pending_roll is not None else pos.roll_refused
         return ("trade", done, rolled)
+
+    def _sync_entry(self, sig: Signal, sym: str, d: date, i: int, variant: str, skipped: Counter, row: dict | None):
+        """A pending entry of session d on synchronized bars (a generator): it yields the moment of the
+        fill - the first bar in which every leg traded, or the session's open when there is none and the
+        entry is not made - and returns the position or None."""
+        sync = self._sync_bars(sym, sig.legs, d) if not check_hedged(sig.legs or ()) else None
+        yield (sync[0][0] if sync else daily_start(d), FILL)
+        before = Counter(skipped)
+        pos = self._enter_sync(sig, sym, d, i, variant, skipped)
+        if row is not None:
+            why = sorted((skipped - before).keys())
+            row.update(result="entered" if pos is not None else "skipped",
+                       reason=None if pos is not None else (why[0] if why else "NOT_ENTERED"))
+        return pos
 
     def _sync_roll_decision(self, pos: _Position, sym: str, d: date, start: datetime, bars: list, cost: float,
                             strategy: OptionStrategy, ctx_prev) -> None:
@@ -849,7 +869,7 @@ class OptionEngine:
         if m["roll_net_credit_pct_of_width"] is None or not m["roll_net_credit_pct_of_width"] > limit:
             pos.roll_refused = "ROLL_NET_CREDIT_TOO_SMALL"
             return
-        refused = self._roll_gate(sym, d, new, pos)
+        refused = self._roll_gate(sym, d, new, pos, intraday=True)
         if refused:
             pos.roll_refused = refused
             return
@@ -857,13 +877,19 @@ class OptionEngine:
 
     def _manage_sync(self, pos: _Position, sym: str, d: date, i: int, last_allowed: date, strategy: OptionStrategy,
                      skipped: Counter, spot: float | None, alerts: tuple, ctx_now, ctx_prev):
-        """One session of an open credit spread on synchronized 5-minute bars. Returns
+        """One session of an open credit spread on synchronized 5-minute bars, as a generator: it yields
+        (moment, phase) BEFORE each step that reads or changes the portfolio (a decision at a bar's
+        close, a fill at a bar's open, the rules at the session's close), so that iter_stream and
+        run_portfolio can run every stock's steps in time order. What it reads before a yield is this
+        position's own bars only. Returns
         ('trade', OptionTrade, replacement position or None) | ('hold',) | ('incomplete',).
         'incomplete': the session's 5-minute bars are not stored for a leg, or the session has no bar
         in which every leg traded; the campaign is then data-incomplete and left out of the results."""
         sig, expiry = pos.sig, pos.legs[0].expiry
+        t_open, t_close, five = daily_start(d), session_end(d), timedelta(minutes=5)
         sync = self._sync_bars(sym, pos.legs, d)
         if sync is None:
+            yield (t_open, FILL)
             skipped["DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED"] += 1
             return ("incomplete",)
         gaps = self._leg_gaps(sym, pos.legs, d)
@@ -882,25 +908,29 @@ class OptionEngine:
             # otherwise the campaign is data-incomplete (review fix, 2026-11-15).
             usable = [x for x in sync if x[0] < gaps[0]]
             if pos.pending_exit and usable:
-                return self._sync_exit(pos, sym, d, i, usable, 0, pos.pending_exit, strategy)
+                return (yield from self._sync_exit(pos, sym, d, i, usable, 0, pos.pending_exit, strategy))
             hit = None if pos.pending_exit else sync_decision(usable, signs, sig.target, sig.stop, use_stop=not never_stop)
             if hit is not None and hit[1] + 1 < len(usable):
                 reason, k, cost = hit
+                yield (usable[k][0] + five, DECIDE)
                 pos.pending_exit, pos.pending_basis = reason, "synchronized 5-minute bar"
                 if reason == "STOP" and policy == "roll_rules":
                     self._sync_roll_decision(pos, sym, d, usable[k][0], usable[k][1], cost, strategy, ctx_prev)
-                return self._sync_exit(pos, sym, d, i, usable, k + 1, reason, strategy)
+                return (yield from self._sync_exit(pos, sym, d, i, usable, k + 1, reason, strategy))
+            yield (gaps[0], FILL)
             skipped["DATA_INCOMPLETE:MISSING_LEG_BAR"] += 1
             if not self.sync_missing_at_daily_close:
                 return ("incomplete",)
             missing_leg = True                               # sensitivity run: judged at the daily closes below
         if (not sync and not opened_here) or missing_leg:
             if not missing_leg:
+                yield (t_open, FILL)
                 skipped["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] += 1
             if not self.sync_missing_at_daily_close:
                 return ("incomplete",)
             # sensitivity run: the session is judged at the legs' daily closes; an exit decided there is still
             # filled at the next session's first synchronized bar. No daily bar for a leg: incomplete after all.
+            yield (t_close, DECIDE)
             daily = self._leg_bars(sym, pos.legs, d)
             nxt = self.base.next_session(d)
             if daily is None or pos.pending_exit or d >= last_allowed or nxt is None or nxt > expiry:
@@ -915,23 +945,25 @@ class OptionEngine:
                 pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
             return ("hold",)
         if pos.pending_exit and sync:                      # decided earlier: the first synchronized bar's open
-            return self._sync_exit(pos, sym, d, i, sync, 0, pos.pending_exit, strategy)
+            return (yield from self._sync_exit(pos, sym, d, i, sync, 0, pos.pending_exit, strategy))
         hit = sync_decision(sync, signs, sig.target, sig.stop, use_stop=not never_stop)
         if hit is not None:
             reason, k, cost = hit
+            yield (sync[k][0] + five, DECIDE)              # decided at this bar's close, on what is known then
             pos.pending_exit, pos.pending_basis = reason, "synchronized 5-minute bar"
             if reason == "STOP" and policy == "roll_rules":
                 self._sync_roll_decision(pos, sym, d, sync[k][0], sync[k][1], cost, strategy, ctx_prev)
             if k + 1 < len(sync):
-                return self._sync_exit(pos, sym, d, i, sync, k + 1, reason, strategy)
+                return (yield from self._sync_exit(pos, sym, d, i, sync, k + 1, reason, strategy))
             return ("hold",)                               # filled at the first synchronized bar of the next session
         # ---- rules decided at the session's close (filled at the next session's first synchronized bar) ----
+        yield (t_close, DECIDE)
         nxt = self.base.next_session(d)
         if not sync:
             return ("hold",)                               # opened on the session's last synchronized bar
         last_start, last = sync[-1]
         mark = [b.close for b in last]
-        at_close = last_start + timedelta(minutes=5)
+        at_close = last_start + five
         basis = "rule at the close"
         if d >= expiry or nxt is None or nxt > expiry:
             return ("trade", self._close(pos, sym, d, mark, False, "EXPIRY_EXIT", strategy, "intraday", basis,
@@ -1079,8 +1111,12 @@ class OptionEngine:
         the phase 4 strategies keep closing it there (PERIOD_END)."""
         return OPEN_AT_CUTOFF if getattr(strategy, "report_open_at_cutoff", False) else "PERIOD_END"
 
-    def _roll_gate(self, sym: str, d: date, new: Signal, pos: _Position) -> str | None:
-        return self._gate(sym, d, new, pos) if self._gate is not None else None
+    def _roll_gate(self, sym: str, d: date, new: Signal, pos: _Position, intraday: bool = False) -> str | None:
+        """`intraday`: the roll is decided inside session d, before its close: the gate may then use
+        completed sessions BEFORE d only (d's daily close has not happened)."""
+        if self._gate is None:
+            return None
+        return self._gate(sym, d, new, pos, True) if intraday else self._gate(sym, d, new, pos)
 
     def run_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
                    skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily",
@@ -1097,12 +1133,28 @@ class OptionEngine:
 
     def run_portfolio(self, strategy: OptionStrategy, streams: list[tuple[str, str]], sessions: list[date],
                       skipped: Counter, gate, exit_check: str = "daily", record: dict | None = None,
-                      replay: dict | None = None) -> list[OptionTrade]:
-        """Several streams ((symbol, variant) pairs) run side by side, day by day, so that the portfolio
-        gate sees every stream's open and pending positions at each decision. On one day the streams
-        decide in the order given. `gate(sym, day, signal, replacing)` returns the refusing code or None
-        (a new entry is refused before it is taken; a roll's replacement likewise). `record` / `replay`:
-        per stream key, as in run_stream."""
+                      replay: dict | None = None, trace: list | None = None) -> list[OptionTrade]:
+        """Several streams ((symbol, variant) pairs) run side by side as ONE queue of events in time
+        order, so that the portfolio gate sees every stream's open and pending positions exactly as
+        they stand at the moment of each decision - never another stock's later fills, exits, rolls
+        or signals of the same session.
+
+        Every stream announces the moment of its next step (iter_stream); the earliest step of all
+        streams runs next. Steps at the SAME instant run in this documented order:
+          1. DECIDE - decisions on a 5-minute bar's close and the management of open positions at the
+             session's close (exits at the close, roll decisions);
+          2. SIGNAL - new entry signals at the session's close;
+          3. FILL   - fills at a bar's open (entries, exits, a roll's two spreads) and drops.
+        A decision at a bar's close uses what is known at that instant, so it comes before a fill at
+        the open of the bar that starts then. Within one of these steps, truly simultaneous events of
+        different streams run in the order the streams are given (the caller passes the stocks most
+        liquid first): when two stocks signal at the same close and only one fits the limits, the
+        first stream gets it. Nothing else depends on the order of `streams`.
+
+        `gate(sym, day, signal, replacing[, intraday])` returns the refusing code or None (a new entry
+        is refused before it is taken; a roll's replacement likewise; `intraday` is passed as True for
+        a roll decided inside the session). `record` / `replay`: per stream key, as in run_stream.
+        `trace`: every step is appended to it as (moment, phase, stream key), in the order run."""
         import heapq
         if getattr(gate, "universe", ()) is None:          # the correlated groups: built over every tested stock
             gate.universe = sorted({s for s, _ in streams})
@@ -1110,21 +1162,25 @@ class OptionEngine:
         gens, out = {}, []
         try:
             heap = []
+
+            def advance(n: int, key) -> None:
+                try:
+                    at, phase = next(gens[key])
+                except StopIteration as stop:
+                    out.extend(stop.value)
+                else:
+                    heapq.heappush(heap, (at, phase, n, key))
+
             for n, key in enumerate(streams):
-                g = self.iter_stream(strategy, key[0], sessions, key[1], skipped, None, exit_check,
-                                     None if record is None else record.setdefault(key, []),
-                                     None if replay is None else replay.get(key, {}), key)
-                gens[key] = g
-                try:
-                    heapq.heappush(heap, (next(g), n, key))
-                except StopIteration as stop:
-                    out += stop.value
+                gens[key] = self.iter_stream(strategy, key[0], sessions, key[1], skipped, None, exit_check,
+                                             None if record is None else record.setdefault(key, []),
+                                             None if replay is None else replay.get(key, {}), key)
+                advance(n, key)
             while heap:
-                _, n, key = heapq.heappop(heap)
-                try:
-                    heapq.heappush(heap, (next(gens[key]), n, key))
-                except StopIteration as stop:
-                    out += stop.value
+                at, phase, n, key = heapq.heappop(heap)
+                if trace is not None:
+                    trace.append((at, phase, key))
+                advance(n, key)
         finally:
             self._gate, self._book = None, None
         out.sort(key=lambda t: (t.exit_time, t.symbol, t.variant))
@@ -1144,8 +1200,10 @@ class OptionEngine:
     def iter_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
                     skipped: Counter, schedule_log: list | None = None, exit_check: str = "daily",
                     record: list | None = None, replay: dict | None = None, key=None):
-        """run_stream as a generator: it yields the date of each session BEFORE processing it, and
-        returns the trades. Run alone or side by side (run_portfolio)."""
+        """run_stream as a generator. Before each step it yields (moment, phase): the time (UTC) of what it
+        is about to do and DECIDE | SIGNAL | FILL, so that run_portfolio can run every stream's steps in
+        time order (see run_portfolio for the order at one instant). Every step reads the portfolio as
+        published by the steps before it. Returns the trades. Run alone or side by side."""
         key = key or (sym, variant)
         kind = self.kinds.get(sym, "stock")
         bars = self.base.daily(sym)
@@ -1208,8 +1266,9 @@ class OptionEngine:
             d = bar_date(bar)
             if last_allowed is None or d > last_allowed:
                 break
+            t_open, t_close = daily_start(d), session_end(d)
             publish()
-            yield d
+            yield (t_open, FILL)
             gap = i > 0 and self.base.sessions_between(bar_date(bars[i - 1]), d) > 0
             if i in brk:
                 start = i
@@ -1222,80 +1281,121 @@ class OptionEngine:
             if positions and gap:
                 skipped["DROPPED_MISSING_DAILY_BAR_DURING_TRADE"] += len(positions)
                 positions = []
-            # ---- exits decided at the previous close, filled at this open ----
-            keep: list[_Position] = []
-            for pos in positions:
-                if not pos.pending_exit or sync:           # synchronized: filled inside the session (_manage_sync)
-                    keep.append(pos)
-                    continue
-                legs_bars = self._leg_bars(sym, pos.legs, d)
-                if legs_bars is None:
-                    skipped["DROPPED_MISSING_OPTION_BAR"] += 1
-                else:
-                    rolled = None
-                    if pos.pending_roll is not None and not gap:     # close this spread and open the next at the same open
-                        rolled = self._enter(pos.pending_roll, sym, d, i, variant, Counter())
-                    done = self._close(pos, sym, d, [b.open for b in legs_bars], True,
-                                       "ROLLED" if rolled is not None else pos.pending_exit, strategy, exit_check,
-                                       pos.pending_basis)
-                    if rolled is None and pos.pending_roll is not None:
-                        done.roll_refused = "ROLL_NOT_FILLED"            # the replacement could not be entered at this open
-                    elif rolled is None:
-                        done.roll_refused = pos.roll_refused
-                    trades.append(done)
-                    if rolled is not None:
-                        rolled.campaign_id, rolled.roll_no = done.campaign_id, pos.roll_no + 1
-                        rolled.realised = pos.realised + done.net_pnl
-                        keep.append(rolled)
-            positions = keep
-            # ---- entries from the previous close's signals, at this open ----
-            for sig, row in pending:
-                before = Counter(skipped)
-                pos = None
-                if gap:
+            if gap:                                           # the signal's next bar is not the next session
+                for _, row in pending:
                     skipped["NEXT_BAR_NOT_NEXT_SESSION"] += 1
-                else:
-                    pos = (self._enter_sync if sync else self._enter)(sig, sym, d, i, variant, skipped)
-                if pos is not None:
-                    positions.append(pos)
-                if row is not None:
-                    why = sorted((skipped - before).keys())
-                    row.update(result="entered" if pos is not None else "skipped",
-                               reason=None if pos is not None else (why[0] if why else "NOT_ENTERED"))
-            pending = []
-            # ---- every open position at this close ----
-            keep = []
+                    if row is not None:
+                        row.update(result="skipped", reason="NEXT_BAR_NOT_NEXT_SESSION")
+                pending = []
+            # what the session's close shows (used only by the rules decided at the close)
             alerts = ()
             if alert_exits:
                 snap = self.snapshot_at(sym, recent(i), d)
-                if positions:
+                if positions or pending:
                     alerts = tuple(tuple(a["kind"] for a in alert_kinds(prev_snap, snap, right))
                                    for right in ("PE", "CE"))
                 prev_snap = snap
             ctx_now = lambda: self.context(strategy, sym, d, bar.close, variant, None, recent(i), closed())
             ctx_prev = lambda: (self.context(strategy, sym, bar_date(bars[i - 1]), bars[i - 1].close, variant, None,
                                              recent(i - 1), closed()) if i > start else None)
-            queue = list(positions)
-            while queue:
-                pos = queue.pop(0)
-                if sync:
-                    r = self._manage_sync(pos, sym, d, i, last_allowed, strategy, skipped, bar.close, alerts, ctx_now, ctx_prev)
-                else:
+            if not sync:
+                # ---- exits decided at the previous close, filled at this open ----
+                keep: list[_Position] = []
+                for pos in positions:
+                    if not pos.pending_exit:
+                        keep.append(pos)
+                        continue
+                    legs_bars = self._leg_bars(sym, pos.legs, d)
+                    if legs_bars is None:
+                        skipped["DROPPED_MISSING_OPTION_BAR"] += 1
+                    else:
+                        rolled = None
+                        if pos.pending_roll is not None:          # close this spread and open the next at the same open
+                            rolled = self._enter(pos.pending_roll, sym, d, i, variant, Counter())
+                        done = self._close(pos, sym, d, [b.open for b in legs_bars], True,
+                                           "ROLLED" if rolled is not None else pos.pending_exit, strategy, exit_check,
+                                           pos.pending_basis)
+                        if rolled is None and pos.pending_roll is not None:
+                            done.roll_refused = "ROLL_NOT_FILLED"        # the replacement could not be entered at this open
+                        elif rolled is None:
+                            done.roll_refused = pos.roll_refused
+                        trades.append(done)
+                        if rolled is not None:
+                            rolled.campaign_id, rolled.roll_no = done.campaign_id, pos.roll_no + 1
+                            rolled.realised = pos.realised + done.net_pnl
+                            keep.append(rolled)
+                positions = keep
+                # ---- entries from the previous close's signals, at this open ----
+                for sig, row in pending:
+                    before = Counter(skipped)
+                    pos = self._enter(sig, sym, d, i, variant, skipped)
+                    if pos is not None:
+                        positions.append(pos)
+                    if row is not None:
+                        why = sorted((skipped - before).keys())
+                        row.update(result="entered" if pos is not None else "skipped",
+                                   reason=None if pos is not None else (why[0] if why else "NOT_ENTERED"))
+                pending = []
+                # ---- every open position at this close ----
+                if positions:
+                    publish()
+                    yield (t_close, DECIDE)
+                keep = []
+                for pos in positions:
                     r = self._manage(pos, sym, d, i, last_allowed, strategy, skipped, exit_check, bar.close, alerts, ctx_now)
-                if r[0] == "trade":
-                    trades.append(r[1])
-                    if len(r) > 2 and r[2] is not None:
-                        queue.append(r[2])                 # a replacement opened inside the session: manage its rest
-                elif r[0] == "hold":
-                    keep.append(pos)
-                elif r[0] == "incomplete":
-                    incomplete.add(pos.campaign_id or pos.sig.signal_id)
-            positions = keep
+                    if r[0] == "trade":
+                        trades.append(r[1])
+                    elif r[0] == "hold":
+                        keep.append(pos)
+                positions = keep
+            else:
+                # ---- synchronized 5-minute execution: this stream's steps of the session, in time order ----
+                # Each pending entry and each open position is a generator that announces the moment of its
+                # next step; the earliest runs next (ties: decisions before fills, then the order started).
+                # A step is run only after its moment has been yielded, so run_portfolio can run the other
+                # stocks' earlier steps first.
+                starting = [(self._sync_entry(sig, sym, d, i, variant, skipped, row), None) for sig, row in pending]
+                starting += [(self._manage_sync(pos, sym, d, i, last_allowed, strategy, skipped, bar.close, alerts,
+                                                ctx_now, ctx_prev), pos) for pos in positions]
+                pending = []
+                waiting: list = []
+                order = 0
+                while starting or waiting:
+                    if starting:
+                        gen, pos = starting.pop(0)             # runs to its first announced moment: reads its own bars only
+                    else:
+                        moment, _, gen, pos = heapq.heappop(waiting)
+                        publish()
+                        yield moment
+                    try:
+                        moment = next(gen)
+                    except StopIteration as stop:
+                        r = stop.value
+                    else:
+                        order += 1
+                        heapq.heappush(waiting, (moment, order, gen, pos))
+                        continue
+                    if pos is None:                            # a pending entry: filled, or not made
+                        if r is not None:
+                            positions.append(r)
+                            starting.append((self._manage_sync(r, sym, d, i, last_allowed, strategy, skipped, bar.close,
+                                                               alerts, ctx_now, ctx_prev), r))
+                    elif r[0] == "trade":
+                        trades.append(r[1])
+                        positions = [p for p in positions if p is not pos]
+                        if r[2] is not None:                   # a replacement opened inside the session: manage its rest
+                            positions.append(r[2])
+                            starting.append((self._manage_sync(r[2], sym, d, i, last_allowed, strategy, skipped, bar.close,
+                                                               alerts, ctx_now, ctx_prev), r[2]))
+                    elif r[0] == "incomplete":
+                        incomplete.add(pos.campaign_id or pos.sig.signal_id)
+                        positions = [p for p in positions if p is not pos]
             for pos in positions:                                 # daily mark-to-market of what stays open
                 self._mark(pos, sym, d, strategy, sync)
             publish()                                             # today's fills and exits, before any later decision
             if d not in allowed or d >= last_allowed:
                 continue
+            yield (t_close, SIGNAL)                               # new signals: after every stock's positions at this close
             if replay is not None:                               # the same entries as a recorded run
                 pending += [(sig, None) for sig in replay.get(d, ())]
                 continue

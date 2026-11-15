@@ -81,11 +81,13 @@ class Correlations:
             self._ret[sym] = daily_returns(self._daily(sym), self.sessions, self._breaks(sym))
         return self._ret[sym]
 
-    def at(self, d: date, a: str, b: str) -> float | None:
-        key = (d, *sorted((a, b)))
+    def at(self, d: date, a: str, b: str, include_day: bool = True) -> float | None:
+        """Correlation as known at the CLOSE of d (sessions up to and including d). `include_day=False`:
+        as known INSIDE session d, before its close - completed sessions before d only."""
+        key = (d, include_day, *sorted((a, b)))
         if key not in self._cache:
-            i = bisect.bisect_right(self.sessions, d)
-            win = self.sessions[max(0, i - self.window):i]           # completed sessions up to and including d
+            i = bisect.bisect_right(self.sessions, d) if include_day else bisect.bisect_left(self.sessions, d)
+            win = self.sessions[max(0, i - self.window):i]           # completed sessions only
             self._cache[key] = correlation(self.returns(a), self.returns(b), win, self.min_overlap)
         return self._cache[key]
 
@@ -226,10 +228,14 @@ class PortfolioGate:
         from collections import Counter
         self.checks, self.refused, self.group_sizes = 0, Counter(), Counter()
 
-    def __call__(self, sym: str, d: date, sig, replacing) -> str | None:
+    def __call__(self, sym: str, d: date, sig, replacing, intraday: bool = False) -> str | None:
+        """`intraday`: the decision is taken inside session d (a roll at a 5-minute bar's close), so the
+        correlations use completed sessions before d only; d's daily close has not happened yet. A
+        decision at d's close (a new signal, a roll decided by a rule at the close) may use d."""
         holdings = self.eng.book_holdings(exclude_sig=replacing.sig if replacing is not None else None)
         risk = float(sig.details.get("max_loss_inr") or 0.0)
-        code, _, facts = portfolio_check(sym, risk, holdings, self.sectors, lambda a, b: self.corr.at(d, a, b),
+        code, _, facts = portfolio_check(sym, risk, holdings, self.sectors,
+                                         lambda a, b: self.corr.at(d, a, b, include_day=not intraday),
                                          self.cfg, self.capital, history_verified=self.history_verified,
                                          universe=self.universe or ())
         self.checks += 1
