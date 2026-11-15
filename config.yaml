@@ -140,6 +140,8 @@ data_status:                     # the Data status page (/data-status): when a s
   corporate_actions_max_age_days: 7
   rbi_decision_grace_days: 3     # a scheduled RBI meeting with no decision row this many days later: amber
   inbox_dir: data/inbox          # files you download by hand; processed -> done/, rejected -> rejected/
+  board_meetings_min_symbols: 100   # an all-companies board-meetings export lists at least this many companies
+  board_meetings_edge_days: 7       # ... and has meetings within this many days of both ends of the declared range
 
 server:
   host: 127.0.0.1              # local only; do not change to 0.0.0.0

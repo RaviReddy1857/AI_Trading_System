@@ -248,7 +248,15 @@ class OptionHistory:
         self._asked: dict[str, dict[tuple, int]] = {}
         self.stats: Counter = Counter()
         self.not_stored: set[tuple] = set()
+        self.misses = 0                          # requests for a contract that is not stored (every time)
         self.error: str | None = None            # first download error; downloading stops after it
+
+    def _miss(self, key: tuple) -> None:
+        """A wanted contract that is not stored: remembered, and counted on EVERY request (`misses`), so a
+        caller can tell whether a stretch of work wanted anything missing even if an earlier stretch had
+        already wanted the same contract."""
+        self.not_stored.add(key)
+        self.misses += 1
 
     def _load(self, underlying: str) -> None:
         if underlying in self._bars:
@@ -267,17 +275,17 @@ class OptionHistory:
         if key in self._asked[underlying]:
             return self._bars[underlying].get(key, {})
         if self.fetcher is None or self.error is not None or not self.fetcher.budget_left:
-            self.not_stored.add((underlying, *key))
+            self._miss((underlying, *key))
             return None
         try:
             rows = self.fetcher.fetch(underlying, expiry, strike, right, expect_data)
         except RequestBudgetUsed:
-            self.not_stored.add((underlying, *key))
+            self._miss((underlying, *key))
             return None
         except OptionHistoryError as e:
             self.error = str(e)
             log.error("option history download stopped: %s", e)
-            self.not_stored.add((underlying, *key))
+            self._miss((underlying, *key))
             return None
         bars, bad = parse_option_rows(rows)
         now = self.now or utcnow()
@@ -334,6 +342,14 @@ class OptionIntraday:
         self._bars: dict[tuple, dict[date, list[IntradayBar]]] = {}
         self.stats: Counter = Counter()
         self.not_stored: set[tuple] = set()
+        self.misses = 0
+
+    def _miss(self, key: tuple) -> None:
+        """A wanted contract that is not stored: remembered, and counted on EVERY request (`misses`), so a
+        caller can tell whether a stretch of work wanted anything missing even if an earlier stretch had
+        already wanted the same contract."""
+        self.not_stored.add(key)
+        self.misses += 1
 
     @staticmethod
     def window(expiry: date) -> tuple[date, date]:
@@ -359,18 +375,18 @@ class OptionIntraday:
             return self._bars[key]
         f = self.hist.fetcher
         if f is None or self.hist.error is not None or not f.budget_left:
-            self.not_stored.add(key)
+            self._miss(key)
             return None
         first, last = self.window(expiry)
         try:
             rows = f.fetch_intraday(underlying, expiry, strike, right, first, last)
         except RequestBudgetUsed:
-            self.not_stored.add(key)
+            self._miss(key)
             return None
         except OptionHistoryError as e:
             self.hist.error = str(e)
             log.error("option history download stopped: %s", e)
-            self.not_stored.add(key)
+            self._miss(key)
             return None
         bars, bad = parse_option_rows(rows, intraday=True)
         now = self.hist.now or utcnow()

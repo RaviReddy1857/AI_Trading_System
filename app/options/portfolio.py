@@ -128,6 +128,43 @@ def _components(symbols: Sequence[str], sectors: dict[str, str | None], corr: Ca
     return sorted(groups.values(), key=lambda g: (-len(g), sorted(g))), problems
 
 
+def _unknown_joins(groups: list[set[str]], problems: list[tuple[tuple[str, ...], str]], held: set[str]) -> list[str]:
+    """The problems that could change a group holding positions (texts).
+
+    A held (or the proposed) stock's own sector unknown always counts. Otherwise the known groups are
+    joined along every POSSIBLE link - an unmeasurable correlation, or any link of a stock whose sector
+    is unknown (it may share a sector with any stock) - through every stock of the universe, held or
+    not. When two components that hold positions could end up in one group, every unknown link inside
+    that possible group counts: A(held) -?- C(unheld) -?- B(held) is unknown, although neither link
+    alone joins two held components. Unknown links that could only join empty components change nothing."""
+    comp = {s: k for k, g in enumerate(groups) for s in g}
+    occupied = {comp[s] for s in held}
+    out = [text for who, text in problems if len(who) == 1 and who[0] in held]
+    parent = list(range(len(groups)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    unknown_sector = [who[0] for who, _ in problems if len(who) == 1]
+    for who, _ in problems:
+        if len(who) == 2:
+            parent[find(comp[who[0]])] = find(comp[who[1]])
+    for s in unknown_sector:                                 # its sector may match any other stock's
+        for k in range(len(groups)):
+            parent[find(comp[s])] = find(k)
+    roots: dict[int, int] = {}
+    for k in occupied:
+        roots[find(k)] = roots.get(find(k), 0) + 1
+    joinable = {r for r, n in roots.items() if n > 1}
+    for who, text in problems:
+        if text not in out and find(comp[who[0]]) in joinable:
+            out.append(text)
+    return out
+
+
 def portfolio_check(symbol: str, risk_inr: float, holdings: Sequence[Holding] | None, sectors: dict[str, str | None],
                     corr: Callable[[str, str], float | None], cfg, capital_inr: float,
                     history_verified: bool = False, universe: Sequence[str] = ()) -> tuple[str | None, str, dict]:
@@ -154,19 +191,7 @@ def portfolio_check(symbol: str, risk_inr: float, holdings: Sequence[Holding] | 
                                   f"(Rs {limit:,.0f})", facts)
     held = {h.symbol for h in hs}
     groups, problems = _components(sorted(set(universe) | held), sectors, corr, cfg.correlation_threshold)
-    # An unknown sector or link matters when it could change a group holding positions: a held (or the
-    # proposed) stock's own sector unknown, or an unknown link that could join two components which both
-    # hold positions. Unknown links among stocks that could only join an empty component change nothing.
-    comp = {s: k for k, g in enumerate(groups) for s in g}
-    holding = {comp[s] for s in held}
-    relevant = []
-    for who, text in problems:
-        if len(who) == 1:
-            s = who[0]
-            if s in held or (comp[s] in holding and len(holding) > 1):
-                relevant.append(text)
-        elif comp[who[0]] != comp[who[1]] and comp[who[0]] in holding and comp[who[1]] in holding:
-            relevant.append(text)
+    relevant = _unknown_joins(groups, problems, held)
     if relevant:
         return CORRELATION_UNKNOWN, "; ".join(relevant[:3]), facts
     group = next(g for g in groups if symbol in g)

@@ -64,7 +64,9 @@ Paste data on the dashboard ("Paste FII/DII figures, events or holidays"), or ed
 ### Data status page, inbox importers and the one-time external import
 **Data status** (`/data-status`, and a green / amber / red strip at the top of the main page): one row per data source
 with when it was last updated, its coverage, its status (OK, STALE, MISSING, PARTIAL or INFO), what it blocks, and exactly
-what to do. A STALE, MISSING or PARTIAL source is never shown as OK. The page ends with the daily and weekly routine.
+what to do. A STALE, MISSING or PARTIAL source is never shown as OK. Rows dated after today are never used to judge
+freshness: a source holding any is shown as DATA_ERROR (red) with the rows listed and its status without them. The page
+ends with the daily and weekly routine.
 The Breeze session is confirmed only by data that arrived today (live prices or a download); the token in `.env` is
 never read. Times are shown in IST ("15 Nov 2026, 10:30 AM"). The option-history row shows today's actual
 request budget: `python -m app.options.stock_backtest --download --day-budget 4500` raises it for today only
@@ -75,10 +77,18 @@ Data status page (or run `python -m app.inbox`). Processed files move to `data/i
 `data/inbox/rejected/` with a `.reason.txt`. Duplicates are skipped and no row you entered is ever replaced.
 | File | Where | Columns read | What it adds |
 |---|---|---|---|
-| NSE board meetings | nseindia.com > Companies listing > Corporate filings > Board meetings, Download (.csv) | `SYMBOL`, `PURPOSE`, a meeting-date column (`MEETING DATE` / `BOARD MEETING DATE`), optional `DETAILS` | RESULTS events (purpose mentions results); a COVERAGE row for every watchlist stock through the latest meeting date (or `--covered-through`) |
+| NSE board meetings | nseindia.com > Companies listing > Corporate filings > Board meetings: a date range from today through at least the next monthly expiry, **no symbol, index or purpose filter**, Download (.csv) | `SYMBOL`, `PURPOSE`, a meeting-date column (`MEETING DATE` / `BOARD MEETING DATE`), optional `DETAILS` | RESULTS events (purpose mentions results); a COVERAGE row for every watchlist stock through the END date you declare (see below) |
 | NSE corporate actions | nseindia.com > Companies listing > Corporate filings > Corporate actions (Equity), Download (.csv) | `SYMBOL`, `PURPOSE`, `EX-DATE`, optional `SERIES`, `RECORD DATE` | splits, bonuses, demergers, rights, dividends (table `corporate_actions`, source `nse_inbox`) |
 | NSE FII/DII activity | nseindia.com > Reports > FII/DII trading activity, Download (.csv) | `Category`, `Date`, `Buy Value`, `Sell Value`, `Net Value` (or `date,fii_net_cr,dii_net_cr`) | new days in `fii_dii.csv` |
 | RBI decisions | rbi.org.in (monetary policy statements) | `date`, `decision` (`scheduled` for a planned meeting) | RBI_POLICY rows in `events.csv` (or use the RBI form on the page) |
+
+**Board meetings need your declaration.** A filtered list proves nothing about the stocks it leaves out, so a
+board-meetings file is imported only when you give the export's date range and confirm that it is the unfiltered
+all-companies list: on the Data status page fill in *from* and *through* and tick the confirmation, or run
+`python -m app.inbox --board-from 2026-11-16 --board-through 2026-12-31 --all-companies`. The file is then rejected
+(moved to `rejected/` with the reason) when it lists fewer than `data_status.board_meetings_min_symbols` companies
+(default 100), has a meeting date outside the declared range, or has no meeting within
+`data_status.board_meetings_edge_days` (default 7) of either end. Coverage runs through the declared end date.
 
 **Corporate-action adjustment:** splits, bonuses and demergers adjust the daily history used for the trend, 52-week low,
 range and profile (`app/corporate_actions.py`), point in time (an action counts from its announcement date if known,
@@ -92,6 +102,10 @@ the project (`../external_data/`; a sparse clone of `data/CORPORATE_ACTIONS`, `d
 none of its scripts is run. Imported rows are tagged `external_repo` with the commit and import date, kept in the SQLite
 store and in the gitignored overlays `data/external/events_external.csv` and `fii_dii_external.csv` (merged on load; your
 own rows win). Breeze data always comes first. Needs `pyarrow` (in requirements.txt).
+Tracked files (docs, README) must never carry a value of the repo's rows: give factors, methods and aggregates, and keep
+raw values in the gitignored `data/diagnostics/`. `python -m app.external_data --check-docs` lists any line that does
+(a test runs the same check). The GitHub repo is private; its history still holds such values in older commits of
+`docs/STATUS.md` and must be cleaned before the repo is ever made public (see docs/STATUS.md).
 
 **FII bias:** BEARISH after 3 straight sessions of FII net selling, BULLISH after 3 of net buying, otherwise
 NEUTRAL. It is UNKNOWN if any of the last 3 sessions' figures are missing.
@@ -335,6 +349,7 @@ python -m app.options.stock_backtest --status      # liquidity ranking, today's 
 python -m app.options.stock_backtest --download    # fetch stock option history within the daily budget, then report
 python -m app.options.stock_backtest               # report from stored prices only (no login needed)
 python -m app.options.stock_backtest --recheck --no-report   # after an interrupted download: mark what is completely stored
+python -m app.options.stock_backtest --recheck --verify-complete --no-report   # judge every complete mark again (no requests)
 python -m app.options.stock_backtest --credit-distribution   # net credit / max loss of spreads passing every other rule (no outcomes)
 python -m app.options.shortlist                    # after the close: load stock option chains, build the day's shortlist
 python -m app.history                              # daily bars must be up to date for the shortlist, profile and watch list

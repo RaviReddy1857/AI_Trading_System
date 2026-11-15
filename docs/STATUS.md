@@ -21,6 +21,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
+| - | Review fixes (Codex review of 782e870..2e3e2c4, 6 findings) | Fixed and tested: correlation unknown through unheld stocks, declared board-meetings coverage, synchronized marks, per-block completion (KOTAKBANK 2025 and ETERNAL 2020 no longer complete), repo prices out of the tracked docs, future-dated rows flagged; no backtest rerun | 595 passing (whole suite) | 2026-11-15 |
 
 ## Phase 1
 
@@ -1417,6 +1418,8 @@ any stock with a confirmed action), so backtest results on them change. The back
 - An action the Breeze prices do not show is not applied (adjusting already adjusted history would create a false break).
 - Board meetings: COVERAGE rows for every watchlist stock through the latest meeting date in the file (the NSE list
   covers every company for its period), or the date you give (`--covered-through` / the field on the page).
+  **Superseded 2026-11-15 (review fix 2):** only with your declared range and all-companies confirmation, after the
+  sanity checks; coverage through the declared end date.
 - RBI: a decision row "scheduled" marks a planned meeting; amber when a scheduled meeting is 3 days past without a decision,
   and also when no coming meeting is entered (a missed decision could not be noticed otherwise).
 - Breeze session: OK only when live prices or a download with data arrived today; the token is never read.
@@ -1442,19 +1445,21 @@ Both stocks show the same pattern in the Breeze daily bars: the history from **2
 corporate action that happened LATER, while the history before 2021-08-02 is not. 2021-08-02 is not an action date for
 either stock, so Breeze shows a one-day fall there that never happened. The repo's series is smooth across that date and
 is consistent with the actions (repo / Breeze = the product of the later actions' factors).
+(Raw prices removed 2026-11-15: this file is tracked and the repo's licence forbids redistribution. Factors, method and aggregates only; the raw values are in the gitignored `data/diagnostics/status_raw_values_2026-11-15.md`.)
 - **BSE** (bonus 2:1 on 2022-03-21 and 2:1 on 2025-05-23, factor 1/3 each):
-  - 2021-07-30 Breeze close 1,248.80, 2021-08-02 Breeze close 425.80 (-65.9% in one day); repo 138.76 -> 141.93 (+2.3%).
+  - From 2021-07-30 to 2021-08-02 the Breeze close falls 65.9% in one day; the repo's close rises 2.3%.
   - Before 2021-08-02 repo / Breeze = 0.1111 (= 1/9, both bonuses) on 620 days; from 2021-08-02 Breeze is already
-    adjusted for the 2022 bonus, so the 2022-03-21 ex-date shows no gap in Breeze (937.00 -> 939.90) - which is why that
-    bonus is "not seen in the prices" and is not applied. The 2025 bonus is raw in Breeze (6,996.50 -> 2,448.00) and is applied.
-  - Remaining unexplained BSE days after 2022: short runs where repo / Breeze is 0.329-0.337 instead of 0.3333 (repo and
-    Breeze closes differ by 1-1.5% on those days); which side is right is not known.
+    adjusted for the 2022 bonus, so the 2022-03-21 ex-date shows no gap in Breeze (+0.3%) - which is why that bonus is
+    "not seen in the prices" and is not applied. The 2025 bonus is raw in Breeze (a -65.0% gap on its ex-date, factor
+    1/3) and is applied.
+  - Remaining unexplained BSE days after 2022: short runs where repo / Breeze is 0.329-0.337 instead of 0.3333 (the two
+    closes differ by 1-1.5% on those days); which side is right is not known.
 - **TATASTEEL** (split 10:1 on 2022-07-28):
-  - 2021-07-30 Breeze 1,434.30, 2021-08-02 Breeze 141.30 (-90.1%); repo 143.43 -> 141.01. Before 2021-08-02 repo / Breeze
-    = 0.1000 on 620 days; from 2021-08-02 to the split Breeze is already adjusted, so the 2022-07-28 ex-date shows no gap
-    (96.04 -> 100.20).
-  - Two single unadjusted bars inside the adjusted stretch: 2022-03-29 Breeze 1,334.65 (repo 133.46) and 2022-06-14 Breeze
-    996.15 (repo 99.61), each +896% / +901% and back -90% the next day.
+  - From 2021-07-30 to 2021-08-02 the Breeze close falls 90.1%; the repo's close falls 1.7%. Before 2021-08-02
+    repo / Breeze = 0.1000 on 620 days; from 2021-08-02 to the split Breeze is already adjusted, so the 2022-07-28
+    ex-date shows no gap (+4.3%).
+  - Two single unadjusted bars inside the adjusted stretch (2022-03-29 and 2022-06-14): each about 10x the repo's close
+    (repo / Breeze 0.100), +896% / +901% and back -90% the next day.
   - 2019-01-21 Breeze bar about 1/10 of its neighbours (-92.2%, then +1,138.9% on 2019-01-22).
 - The repo had no one-day close move over 20% for either stock since 2019. Conclusion: Breeze errors (a vendor
   adjustment boundary at 2021-08-02 and isolated bad bars); not unadjusted actions in the usual sense, and not repo errors.
@@ -1555,35 +1560,35 @@ and the baseline; an excluded stock-year gets no entry in it or in the 45 calend
    (closing-price definition noise on a volatile day). Any erratic day excludes the stock-year; otherwise it is kept as
    the repo's own adjustment. (The literal 0.2% day-to-day test would have excluded 115 of the 131 stock-years with
    unexplained mismatches: in 2021-2024 the two sources' closes differ by 0.1-0.15% on a typical day, a closing-price
-   definition difference, e.g. ICICIBANK 2022-06-08 Breeze 727.05, repo 729.50.)
+   definition difference; e.g. ICICIBANK 2022-06-08 differs by 0.34%.)
 4. **Repo filler bars** (open = high = low = close = the previous close; 213 since 2019 on the 30 priority stocks, e.g.
    2025-03-18 for every stock) are repo errors and are left out of every comparison.
 
 ### BSE factor check (why 1/3 now and 1/9 earlier)
+(Raw prices removed 2026-11-15: this file is tracked and the repo's licence forbids redistribution. Factors, method and aggregates only; the raw values are in the gitignored `data/diagnostics/status_raw_values_2026-11-15.md`.)
 BSE bonuses: 2:1 with ex-date 2022-03-21 and 2:1 with ex-date 2025-05-23, each a price factor of 1/3.
-| Day | Breeze close | Repo close | Repo / Breeze | What it means |
-|---|---|---|---|---|
-| 2021-07-29 | 1,240.10 | 137.79 | 0.1111 = 1/9 | Breeze raw for BOTH bonuses; the repo adjusted for both |
-| 2021-07-30 | 1,248.80 | 138.76 | 0.1111 = 1/9 | same |
-| 2021-08-02 | 425.80 | 141.93 | 0.3333 = 1/3 | Breeze already adjusted for the 2022 bonus (no action that day), raw for the 2025 one |
-| 2021-08-03 | 421.45 | 140.48 | 0.3333 = 1/3 | same |
-The 1/9 in the earlier cross-check was the product of both bonuses (1/3 x 1/3). In the Breeze history the 2022 bonus
-shows no gap on its ex-date (2022-03-17 937.00, 2022-03-21 939.90), because Breeze already applied it from 2021-08-02;
-the 2025 bonus shows its gap (2025-05-22 6,996.50, 2025-05-23 2,448.00) and is applied as usual. So the Breeze bars
-before 2021-08-02 are not adjusted for the 2022 bonus only: correction x1/3 (2021-07-30: 1,248.80 x 1/3 = 416.27,
-repo / corrected = 0.3333 = the 2025 bonus, consistent with every later bar). Corrected: 244 bars in 2019, 250 in 2020,
-143 in 2021 (to 2021-07-30); BSE 2019-2023 are kept.
+| Days | Repo / Breeze | What it means |
+|---|---|---|
+| to 2021-07-30 (620 days) | 0.1111 = 1/9 | Breeze raw for BOTH bonuses; the repo adjusted for both |
+| from 2021-08-02 (no action that day) | 0.3333 = 1/3 | Breeze already adjusted for the 2022 bonus, raw for the 2025 one |
+Method: the ratio repo close / Breeze close on each day, compared with the products of the later actions' factors
+(1/3 x 1/3 = 1/9 before the boundary, 1/3 after it), tolerance 2%. The 1/9 in the earlier cross-check was the product
+of both bonuses. In the Breeze history the 2022 bonus shows no gap on its ex-date (+0.3% from the session before),
+because Breeze already applied it from 2021-08-02; the 2025 bonus shows its gap (-65.0%, factor 1/3) and is applied as
+usual. So the Breeze bars before 2021-08-02 are not adjusted for the 2022 bonus only: correction x1/3, after which
+repo / corrected = 0.3333 (= the 2025 bonus) on every corrected bar, consistent with every later bar. Corrected: 244
+bars in 2019, 250 in 2020, 143 in 2021 (to 2021-07-30); BSE 2019-2023 are kept.
 
 ### Other corrections (exact factor)
-- TATASTEEL: 250 bars in 2020 and 143 in 2021 (before 2021-08-02) and 2 bars in 2022 (2022-03-29 1,334.65 and
-  2022-06-14 996.15) x 1/10 for the split of 2022-07-28 (e.g. 2022-03-29: 133.47 against repo 133.46).
-- HCLTECH 2019-01-21: Breeze 965.75 (twice its neighbours 483.15 and 470.38) x 0.5 for the bonus of 2019-12-05 =
-  482.88 against repo 482.875: **confirmed corrected; HCLTECH 2019 kept**.
+- TATASTEEL: 250 bars in 2020 and 143 in 2021 (before 2021-08-02) and 2 bars in 2022 (2022-03-29 and 2022-06-14)
+  x 1/10 for the split of 2022-07-28; after the correction each is within 0.01% of the repo's close.
+- HCLTECH 2019-01-21: the Breeze close is about twice both neighbouring closes; x 0.5 for the bonus of 2019-12-05
+  brings it within 0.001% of the repo's close: **confirmed corrected; HCLTECH 2019 kept**.
 - HDFCBANK 2019-01-21 x 0.5 (split 2019-09-19); EICHERMOT 2019-01-21 x 0.1 (split 2020-08-24); POWERGRID 2019-01-21 and
   2021-04-23 x 0.75 (bonus 2021-07-29). (Older bars, 2015-2017, on the same dates are corrected too; they are before the
   Phase 9 floor.)
-- Not correctable: TATASTEEL 2019-01-21 Breeze 36.85 between corrected neighbours 47.06 and 45.66 (repo 47.17): no
-  factor explains it, so the move to 2019-01-22 (+23.9%, repo -3.2%) is an unconfirmed jump.
+- Not correctable: TATASTEEL 2019-01-21, a Breeze close 19-22% below both corrected neighbours and 21.9% below the
+  repo's close: no factor explains it, so the move to 2019-01-22 (+23.9%, repo -3.2%) is an unconfirmed jump.
 
 ### Stock-years under the amended rule (from 2019)
 **30 priority stocks - excluded (8):** ETERNAL 2021, 2022, 2023, INDIGO 2021, M&M 2020, SHRIRAMFIN 2022, TITAN 2022
@@ -1615,6 +1620,44 @@ rule-effect, CORRELATED_LIMIT (3 and 5 strategy refusals) and data-incomplete fi
 874 and 133. Why: the amended rule excludes nothing in 2025-2026, and the corrections only change bars of 2021 and
 earlier, which do not change any 2025-2026 decision (the windows differ, the outcomes of the rules do not). Reports:
 `data/diagnostics/stock_report_2026-11-15_amended_am_16.txt`, `..._am_30.txt`.
+
+## Review fixes (Codex review of 782e870..2e3e2c4, six findings), 2026-11-15
+
+Correctness and licence fixes, not tuning: no strategy, variant or default changed. Each fix has a test in
+`tests/test_review6_fixes.py` (11 tests) that fails on the code before the fix and passes now (checked by running it
+against the stashed old file). Whole suite: **595 passing**. Batch B, M3 and Phase 5 not started.
+
+| # | Fix | Code | Test |
+|---|---|---|---|
+| 1 (HIGH) | CORRELATION_UNKNOWN when an unknown link through ANY stock of the universe, held or not, could join two groups that hold positions: the known groups are joined along every possible link (an unmeasurable correlation, or any link of a stock whose sector is unknown) and every unknown link inside a possible group with two or more held groups counts. Was: only an unknown link directly between two held groups | `portfolio._unknown_joins` | `test_ACCEPTANCE_an_unknown_path_through_an_unheld_stock_that_could_join_held_groups_is_unknown` |
+| 2 (HIGH) | A board-meetings file gives coverage only with your declaration (date range + confirmation that it is the unfiltered all-companies export: page fields or `--board-from / --board-through / --all-companies`) and a sanity check: at least `board_meetings_min_symbols` (100) distinct companies, every meeting date inside the range, meetings within `board_meetings_edge_days` (7) of both ends, the range starting no later than the download day. Otherwise the file is rejected. Coverage runs through the declared END date (was: the latest meeting date, for every watchlist stock, from any file). `--covered-through` and the "cover through" field are gone | `inbox.check_board_meetings`, `BoardMeetingsDeclaration`, `declaration`; route `/data/import/inbox`; Data status page; config `data_status` | `test_ACCEPTANCE_a_partial_board_meetings_export_gives_no_coverage`, `test_board_meetings_declaration_and_sanity_checks`, `test_inbox_route_and_cli_take_the_declaration`; the inbox test in `test_data_import.py` no longer endorses blanket coverage from a two-company file |
+| 3 | Five-minute (synchronized) runs mark open positions at the LAST synchronized 5-minute bar of each session, never at the legs' independent daily closes; a session without one carries the previous mark with its own price time (counted stale; `max_mark_age_minutes` in the report). Daily runs keep the daily closes. Marks are stored as [session, value, price time] | `OptionEngine._mark(sync=)`, `mtm_equity`, `option_stats` | `test_ACCEPTANCE_five_minute_marks_use_the_last_synchronized_bar_never_the_daily_leg_closes`, `test_a_session_without_a_synchronized_bar_carries_the_previous_mark_and_its_age` |
+| 4 | A (stock, year) block is complete only when the block itself made no request for a contract that is not stored (`misses`, counted on every request). Was: no growth of the shared not-stored set, so a block wanting a contract an earlier block had already wanted looked complete | `OptionHistory/OptionIntraday._miss`, `download_blocks.missing` | `test_ACCEPTANCE_two_blocks_wanting_the_same_unavailable_contract_are_both_incomplete` |
+| 5 | External-repo prices removed from this file (sections "BSE and TATASTEEL investigated" and "AMENDED data-quality rule": 20 lines); replaced by factors, method and aggregates. Raw values only in the gitignored `data/diagnostics/status_raw_values_2026-11-15.md`. A scanner checks every tracked doc against the repo's rows held here (overlays in `data/external/`, the store's external tables, the clone) and for a price written after the word "repo" | `external_data.doc_leaks`, `external_values`, `tracked_docs`; `python -m app.external_data --check-docs` | `test_ACCEPTANCE_tracked_docs_carry_no_row_of_the_external_repo`, `test_doc_scanner_finds_repo_values_next_to_their_dates_and_after_the_word_repo` |
+| 6 | Rows dated after today never judge freshness, on every source of the Data status page (FII/DII rows, COVERAGE rows by retrieved date, RBI decisions, daily bars, corporate-action and external import times, the download log, the download progress time); a source holding any is DATA_ERROR (red) with the rows listed and its status without them. Dates that may lie ahead by nature are not flagged (RESULTS meetings, ex-dates, covered_through, scheduled RBI meetings) | `data_status._flag_future`, every row | `test_ACCEPTANCE_future_dated_rows_are_ignored_for_freshness_and_flagged_on_every_source` |
+
+### Recheck of the complete marks under fix 4 (offline, no requests; 285 s)
+`python -m app.options.stock_backtest --recheck --verify-complete --no-report` judged every one of the 38 complete
+marks again: **36 kept, 2 no longer complete: KOTAKBANK 2025 and ETERNAL 2020** (both blocks run on into later years
+and want contracts that are not stored, which an earlier block had already wanted). Complete now: 2026 for 26 of 30
+priority stocks, 2025 for 10 (was 11), 2020 for none. Recorded in `data/option_download_status.json`
+(`verify_complete_2026_11_15`); the next `--download` fetches what they want. No backtest was rerun in this task. The
+16-stock 2025-2026 runs above include KOTAKBANK and were already labelled INCOMPLETE (874 contracts wanted but not
+stored); ETERNAL 2020 is outside every reported run.
+
+### Git history must be cleaned before the repo is ever made public
+The GitHub repo is private. Its history still holds external-repo prices: `docs/STATUS.md` in commits 90ce771 and
+2e3e2c4 (and any later commit until this one). History was NOT rewritten (your instruction). **Before the repo is
+ever made public, rewrite the history to remove those values (for example with git filter-repo on `docs/STATUS.md`)
+and run `python -m app.external_data --check-docs` on every commit that stays.**
+
+### Not tested here
+- The real NSE board-meetings export against the new sanity checks (no NSE access from here): a real all-companies
+  export for a short range could list fewer than 100 companies; lower `data_status.board_meetings_min_symbols` only
+  after checking such a file.
+- The Data status page form in a browser (the HTML fields and the route are tested).
+- The future-dated download-progress time (it is read from `data/option_download_status.json`; the code path is
+  small and untested).
 
 ## Open issues
 
@@ -1690,6 +1733,9 @@ earlier, which do not change any 2025-2026 decision (the windows differ, the out
 | 78 | data | TATASTEEL Breeze history has one-day price breaks (2021-08-02, 2022-03-29/30, 2022-06-14/15): 718 decision sessions short of history | Open |
 | 79 | data | The corporate-action adjustment changes the daily history of 7 priority stocks: backtest results on them change | Rerun 2026-11-15 (see Data quality, section 3); 874 / 133 contracts now wanted, plan version 7 |
 | 80 | data | NSE board-meetings and corporate-actions CSV columns not verified against the live pages | Open: first real download will confirm or be rejected with the columns named |
+| 82 | review | Correlation unknown through unheld stocks; board-meetings blanket coverage; daily-close marks in five-minute runs; shared-set completion; repo prices in STATUS.md; future-dated rows judged fresh | Fixed 2026-11-15 (Review fixes, Codex review of 782e870..2e3e2c4) |
+| 83 | review | Git history (private repo) holds external-repo prices in older commits of docs/STATUS.md | Open: clean the history before the repo is ever made public |
+| 84 | review | KOTAKBANK 2025 and ETERNAL 2020 no longer complete after the per-block recheck | Open: the next `--download` fetches what they want |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
@@ -1786,3 +1832,7 @@ earlier, which do not change any 2025-2026 decision (the windows differ, the out
 | 2026-11-14 | MARKET_WEAK: breadth = share of the watchlist stocks that traded that day and closed above their 50-session average; unknown when under 80% of them have 50 closes. Applied to put selling only. New reason code MARKET_UNKNOWN for missing market data |
 | 2026-11-14 | Credit / max-loss distribution: one observation per stock, expiry and side, on the first day the spread passes every other rule; campaign limit off because it depends on results |
 | 2026-11-14 | Sensitivity run for data-incomplete campaigns: a session without a synchronized bar is judged on the legs' daily closes; an exit decided there still fills at the next session's first synchronized bar; made only when more than 30% of the strategy's or the baseline's campaigns are excluded |
+| 2026-11-15 | Board-meetings coverage only from a declared, unfiltered all-companies export that passes the sanity checks (100 companies, dates inside and spanning the declared range within 7 days); coverage through the declared end date (review fix 2) |
+| 2026-11-15 | Five-minute runs: marks at the last synchronized 5-minute bar of each session; none that day = the previous mark carried with its age (review fix 3) |
+| 2026-11-15 | Tracked files never carry values of the external repo's rows (factors, methods, aggregates only); history is not rewritten while the repo is private, but must be cleaned before it is ever made public (review fix 5) |
+| 2026-11-15 | Rows dated after today are a data error on the Data status page and never count as fresh (review fix 6) |

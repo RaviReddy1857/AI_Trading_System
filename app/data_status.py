@@ -3,8 +3,14 @@ not, and exactly what to do. A STALE, MISSING or PARTIAL source is never shown a
 signal is blocked is never hidden.
 
 Statuses: OK (fresh), STALE (older than its limit), MISSING (never loaded), PARTIAL (some stocks or years
-missing), INFO (informational, not counted). Colours: OK green; STALE and PARTIAL amber; MISSING red; the
-Breeze session red when it is not confirmed for today.
+missing), INFO (informational, not counted), DATA_ERROR (rows dated after today). Colours: OK green; STALE
+and PARTIAL amber; MISSING and DATA_ERROR red; the Breeze session red when it is not confirmed for today.
+
+Rows dated after today (after now, for timestamps) are never used to judge freshness: a date in the future
+cannot make a source look up to date. Every source on the page leaves them out and flags them as a data
+error (status DATA_ERROR, the rows listed, and the freshness without them in the detail). Dates that may
+lie ahead by nature are not flagged: meeting dates of RESULTS events, ex-dates of announced corporate
+actions, covered_through of a COVERAGE row and RBI meetings entered as 'scheduled'.
 """
 from __future__ import annotations
 
@@ -18,8 +24,8 @@ from .models import utcnow
 from .quality import IST
 from .store import Store
 
-OK, STALE, MISSING, PARTIAL, INFO = "OK", "STALE", "MISSING", "PARTIAL", "INFO"
-COLOUR = {OK: "green", STALE: "amber", PARTIAL: "amber", MISSING: "red", INFO: "grey"}
+OK, STALE, MISSING, PARTIAL, INFO, DATA_ERROR = "OK", "STALE", "MISSING", "PARTIAL", "INFO", "DATA_ERROR"
+COLOUR = {OK: "green", STALE: "amber", PARTIAL: "amber", MISSING: "red", INFO: "grey", DATA_ERROR: "red"}
 
 NSE_FII_DII = "https://www.nseindia.com/reports/fii-dii"
 NSE_BOARD = "https://www.nseindia.com/companies-listing/corporate-filings-board-meetings"
@@ -37,9 +43,11 @@ HOW_TO_UPDATE = {
         "The app fetches the daily stock history itself after you log in (python -m app.history does the same).",
     ],
     "weekly": [
-        f"Board meetings (results dates): open {NSE_BOARD}, choose the coming weeks (at least through the next monthly "
-        "expiry), Download (.csv), put it in data/inbox/ and press Import inbox files. This adds RESULTS events and a "
-        "COVERAGE row for every watchlist stock.",
+        f"Board meetings (results dates): open {NSE_BOARD}, choose a date range from today through at least the next "
+        "monthly expiry, with NO symbol, index or purpose filter, Download (.csv) and put it in data/inbox/. Enter the "
+        "same from and through dates on this page, tick the all-companies confirmation and press Import inbox files. "
+        "This adds RESULTS events and a COVERAGE row for every watchlist stock through your end date. A file with few "
+        "companies, or whose meeting dates do not span the dates you entered, is rejected.",
         f"Corporate actions: open {NSE_ACTIONS}, choose Equity and the coming weeks, Download (.csv), put it in "
         "data/inbox/ and press Import inbox files.",
         "Stock option history: python -m app.options.stock_backtest --download after a fresh Breeze login (within the "
@@ -83,6 +91,32 @@ def _row(source, last, coverage, status, blocks, todo, detail=None) -> dict:
             "blocks": blocks, "what_to_do": todo, "detail": detail or {}}
 
 
+def _flag_future(row: dict, future: list[str], what: str) -> dict:
+    """Mark a row DATA_ERROR when rows dated after today were found (they were already left out of its
+    freshness); the freshness without them stays in the detail."""
+    if not future:
+        return row
+    row["detail"] = {**row["detail"], "future_dated": future[:20], "future_dated_count": len(future),
+                     "status_without_them": row["status"]}
+    row["status"], row["colour"] = DATA_ERROR, COLOUR[DATA_ERROR]
+    row["coverage"] = f"{row['coverage']}; DATA ERROR: {len(future)} {what} dated after today (ignored)"
+    row["what_to_do"] = (f"Fix or delete the {what} dated after today ({', '.join(future[:5])}"
+                         f"{' ...' if len(future) > 5 else ''}), then re-import. "
+                         + ("" if row["what_to_do"] == "-" else row["what_to_do"]))
+    return row
+
+
+def _ts(text: str) -> datetime:
+    """An ISO timestamp; one without a zone is UTC (the store keeps UTC)."""
+    t = datetime.fromisoformat(text)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def _after(ts: str | None, now: datetime) -> bool:
+    """An ISO timestamp later than now."""
+    return bool(ts) and _ts(ts) > now
+
+
 def trading_days_after(cal, a: date, b: date) -> int:
     """Trading days after a, up to and including b."""
     n, d = 0, a
@@ -112,8 +146,12 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     # 1. Breeze session (never read from .env: confirmed only by data that arrived today)
     with store._lock:
         fetched_today = store._db.execute("SELECT MAX(fetched_utc) FROM option_fetch_log WHERE source='breeze' AND rows>0 "
-                                          "AND fetched_utc>=?", (datetime.combine(today, datetime.min.time(), IST)
-                                                                 .astimezone(timezone.utc).isoformat(),)).fetchone()[0]
+                                          "AND fetched_utc>=? AND fetched_utc<=?",
+                                          (datetime.combine(today, datetime.min.time(), IST).astimezone(timezone.utc)
+                                           .isoformat(), now.astimezone(timezone.utc).isoformat())).fetchone()[0]
+        future_fetch = [r[0] for r in store._db.execute(
+            "SELECT DISTINCT fetched_utc FROM option_fetch_log WHERE fetched_utc>? ORDER BY fetched_utc",
+            (now.astimezone(timezone.utc).isoformat(),)).fetchall()]
     confirmed = (feed_name == "breeze" and live_ticks_today) or fetched_today is not None
     rows.append(_row("Breeze session", fetched_today or ("live prices today" if live_ticks_today else None),
                      f"feed: {feed_name}", OK if confirmed else STALE,
@@ -124,6 +162,7 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                                        "the token itself is never read"}))
     if not confirmed:
         rows[-1]["colour"] = "red"
+    _flag_future(rows[-1], future_fetch, "download log entries")
 
     # 2. Breeze option history download
     planned_years = list(range(settings.stock_option_selling.backtest.download_first_years_from, today.year + 1))
@@ -138,7 +177,8 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     budget_text = f"{budget:,}" + ("" if budget == default else f" (set for today only; default {default:,})")
     need_pri = len(priority) * len(planned_years)
     st = MISSING if not done else (OK if pri_done == need_pri and all_done == len(priority) * len(all_years) else PARTIAL)
-    rows.append(_row("Breeze option history (stock options)", dl.get("updated"),
+    dl_future = [dl["updated"]] if _after(dl.get("updated"), now) else []
+    rows.append(_row("Breeze option history (stock options)", None if dl_future else dl.get("updated"),
                      f"{pri_done} of {need_pri} stock-years {planned_years[0]}-{planned_years[-1]} complete; "
                      f"{all_done} of {len(priority) * len(all_years)} for {all_years[0]}-{all_years[-1]}; "
                      f"{used:,} of {budget_text} requests used today",
@@ -146,9 +186,12 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "-" if st == OK else "After a fresh Breeze login run: python -m app.options.stock_backtest --download "
                                           "(stops at the daily budget and resumes the next day)",
                      {"requests_today": used, "budget": budget, "budget_default": default}))
+    _flag_future(rows[-1], dl_future, "download progress updates")
 
     # 3. FII/DII
-    fd = store.fii_dii_all()
+    fd_all = store.fii_dii_all()
+    fd = [r for r in fd_all if r["date"] <= today]
+    fd_future = [r["date"].isoformat() for r in fd_all if r["date"] > today]
     last_fd = fd[-1]["date"] if fd else None
     if last_fd is None:
         st, cov = MISSING, "no rows"
@@ -161,10 +204,12 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "-" if st == OK else f"Open {NSE_FII_DII}, Download (.csv) (FII/FPI & DII trading activity), put the file "
                                           f"in data/inbox/ and press Import inbox files; or paste it into the FII/DII box on "
                                           f"the main page"))
+    _flag_future(rows[-1], fd_future, "FII/DII rows")
 
     # 4. results dates and coverage
     events = store.all_events()
-    cov_rows = [e for e in events if e["type"] == "COVERAGE"]
+    cov_future = [f"{e['symbol']} {e['date'].isoformat()}" for e in events if e["type"] == "COVERAGE" and e["date"] > today]
+    cov_rows = [e for e in events if e["type"] == "COVERAGE" and e["date"] <= today]      # retrieved on or before today
     newest_cov = {}
     for e in cov_rows:
         f = coverage_fields(e["note"])
@@ -194,18 +239,21 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      f"{len(results)} RESULTS events; coverage for {len(priority) - len(missing_cov)} of {len(priority)} "
                      f"priority stocks through their next expiry", st,
                      "actionable stock option signals (EVENT_COVERAGE_UNKNOWN) for the stocks listed",
-                     "-" if st == OK else f"Open {NSE_BOARD}, choose dates through the next monthly expiry, Download (.csv), "
-                                          f"put it in data/inbox/ and press Import inbox files",
+                     "-" if st == OK else f"Open {NSE_BOARD}, choose dates from today through the next monthly expiry (no "
+                                          f"filter), Download (.csv), put it in data/inbox/, enter the same dates and tick "
+                                          f"the all-companies box on this page, and press Import inbox files",
                      {"stocks_without_coverage": missing_cov, "coverage_older_than_limit": old_cov}))
+    _flag_future(rows[-1], cov_future, "COVERAGE rows (retrieved_at)")
 
     # 5. corporate actions
     ca_last = [v for k, v in imports.items() if k == "corporate_actions"]
     acts = store.corporate_actions()
-    if not acts:
+    ca_future = sorted({a["imported_utc"] for a in acts if _after(a.get("imported_utc"), now)})
+    stamps = [a["imported_utc"] for a in acts if a.get("imported_utc") and not _after(a["imported_utc"], now)]
+    if not stamps:
         st, last = MISSING, None
     else:
-        with store._lock:
-            last = store._db.execute("SELECT MAX(imported_utc) FROM corporate_actions").fetchone()[0]
+        last = max(stamps, key=_ts)
         st = OK if _age_days(datetime.fromisoformat(last), today) <= lim.corporate_actions_max_age_days else STALE
     srcs = sorted({a["source"] for a in acts})
     rows.append(_row("Corporate actions", last, f"{len(acts)} actions ({', '.join(srcs) or 'none'}); latest ex-date "
@@ -214,11 +262,13 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "are not applied, and their price breaks cut the history (INSUFFICIENT_HISTORY)",
                      "-" if st == OK else f"Open {NSE_ACTIONS}, choose Equity and the coming weeks, Download (.csv), put it in "
                                           f"data/inbox/ and press Import inbox files"))
+    _flag_future(rows[-1], ca_future, "corporate-action imports (imported time)")
 
     # 6. RBI policy dates
     rbi = [e for e in events if e["type"] == "RBI_POLICY"]
     sched = [e["date"] for e in rbi if "scheduled" in (e["note"] or "").lower()]
-    decided = [e["date"] for e in rbi if "scheduled" not in (e["note"] or "").lower()]
+    rbi_future = [e["date"].isoformat() for e in rbi if "scheduled" not in (e["note"] or "").lower() and e["date"] > today]
+    decided = [e["date"] for e in rbi if "scheduled" not in (e["note"] or "").lower() and e["date"] <= today]
     overdue = [d for d in sched if d + timedelta(days=lim.rbi_decision_grace_days) < today
                and not any(d - timedelta(days=1) <= x <= d + timedelta(days=lim.rbi_decision_grace_days) for x in decided)]
     upcoming = sorted(d for d in sched if d >= today)
@@ -235,9 +285,12 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "the EVENT regime on RBI days (risk is not flagged on a missing date)",
                      "-" if st == OK else f"Enter the decision (and the next meetings as 'scheduled') with the RBI form on "
                                           f"this page, from {RBI_PAGE}"))
+    _flag_future(rows[-1], rbi_future, "RBI decisions (a decision cannot be dated after today)")
 
     # 7. external repo import (informational)
-    ext = {k: v for k, v in imports.items() if v["source"] == "external_repo"}
+    ext_all = {k: v for k, v in imports.items() if v["source"] == "external_repo"}
+    ext = {k: v for k, v in ext_all.items() if not _after(v["imported_utc"], now)}
+    ext_future = sorted(f"{k} {v['imported_utc']}" for k, v in ext_all.items() if k not in ext)
     if ext:
         any_ = next(iter(ext.values()))
         rows.append(_row("External repo import (aswinv90/indian-market-historical-data)", any_["imported_utc"],
@@ -247,11 +300,15 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     else:
         rows.append(_row("External repo import (aswinv90/indian-market-historical-data)", None, "not imported", INFO,
                          "nothing (informational)", "Optional: python -m app.external_data after cloning the repo"))
+    _flag_future(rows[-1], ext_future, "import records")
 
     # 8. stock daily history (Breeze)
-    behind, per = [], {}
+    behind, per, bars_future = [], {}, []
+    tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), IST).astimezone(timezone.utc)
     for s in priority:
-        b = store.history_bars("bars_1d", s, feed_name, limit=1)
+        ahead = store.history_bars("bars_1d", s, feed_name, since=tomorrow)
+        bars_future += [f"{s} {bar_date(x).isoformat()}" for x in ahead]
+        b = store.history_bars("bars_1d", s, feed_name, before=tomorrow, limit=1)
         last_d = bar_date(b[-1]) if b else None
         per[s] = last_d.isoformat() if last_d else None
         if last_d is None or last_d < last_session:
@@ -263,6 +320,7 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      "-" if st == OK else "After a fresh Breeze login restart the app (it updates history on start) or run "
                                           "python -m app.history",
                      {"behind": behind, "last_date_per_stock": per}))
+    _flag_future(rows[-1], bars_future, "daily bars")
 
     if manual is not None:
         for p in manual.problems():

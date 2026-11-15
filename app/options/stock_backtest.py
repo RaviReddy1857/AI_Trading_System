@@ -762,7 +762,10 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
     newly = 0
 
     def missing() -> int:
-        return len(hist.not_stored) + (len(intr.not_stored) if intr is not None else 0)
+        """Requests so far for a contract that is not stored, counted on every request: a block is complete only
+        when it made none itself. (Not the size of the shared not-stored set: a block that wants a contract an
+        earlier block already wanted adds nothing to that set, and would wrongly look complete.)"""
+        return hist.misses + (intr.misses if intr is not None else 0)
 
     first_from = settings.stock_option_selling.backtest.download_first_years_from
     priority_years = [y for y in years if y >= first_from]
@@ -824,6 +827,16 @@ def download_blocks(settings: Settings, engine: OptionEngine, strategy: StockOpt
             "requests_this_run": hist.fetcher.requests if hist.fetcher else 0}
 
 
+def verify_complete_marks(status: dict, years: list[int] | None = None) -> set[tuple[str, int]]:
+    """Take every complete mark (of `years`, if given) off, so an offline recheck with only=these marks
+    judges each again under the per-block rule. Returns the marks to check."""
+    complete = {s: list(v) for s, v in (status.get("complete") or {}).items()}
+    only = {(s, y) for s, ys in complete.items() for y in ys if not years or y in years}
+    status["complete"] = {s: [y for y in ys if (s, y) not in only] for s, ys in complete.items()}
+    status["complete"] = {s: v for s, v in status["complete"].items() if v}
+    return only
+
+
 def coverage(status: dict, stocks: list[str], years: list[int]) -> tuple[list[int], list[str]]:
     """(years, stocks) a report can cover without missing contracts: the newest run of consecutive
     years for which at least one stock is complete, and the stocks complete for all of them."""
@@ -854,6 +867,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--changed-only", action="store_true", help="with --recheck: only the stock-years whose daily "
                                                                 "history the plan-7 change altered (found offline in one "
                                                                 "pass); every other mark is kept")
+    ap.add_argument("--verify-complete", action="store_true",
+                    help="with --recheck: check every stock-year already marked complete again under the per-block rule "
+                         "(review fix 2026-11-15: a block is complete only if it itself wanted nothing missing); a mark "
+                         "stays only if it passes")
     ap.add_argument("--no-report", action="store_true", help="download or recheck only; do not run the reports")
     ap.add_argument("--credit-distribution", action="store_true",
                     help="only show the distribution of net credit / max loss of the spreads that pass every other rule "
@@ -960,12 +977,22 @@ def main(argv: list[str] | None = None) -> int:
                 migrate_to_7(eng, status, dev)
             only = {(s, y) for s, ys in (status.get("plan7_rechecked") or {}).items() for y in ys}
             print(f"finding the changed stock-years took {_t.monotonic() - t0:.1f} s")
+        if args.verify_complete:
+            only = verify_complete_marks(status, args.years)
+            print(f"verify: {len(only)} complete mark(s) checked again under the per-block rule")
         print(f"recheck (no requests): {len(stocks)} stocks" + (f", only {len(only)} changed stock-year(s)" if only is not None else ""))
         import time as _t
         t1 = _t.monotonic()
         download_blocks(settings, eng, strategy, stocks, want, status, offline=True,
                         checkpoint=lambda st: write_status(settings, st), only=only)
         print(f"recheck took {_t.monotonic() - t1:.1f} s")
+        if args.verify_complete:
+            kept = {s: set(v) for s, v in status.get("complete", {}).items()}
+            lost = sorted((s, y) for s, y in only if y not in kept.get(s, set()))
+            status["verify_complete_2026_11_15"] = {"checked": len(only), "kept": len(only) - len(lost),
+                                                    "no_longer_complete": [f"{s} {y}" for s, y in lost]}
+            print(f"verify: {len(only) - len(lost)} kept, {len(lost)} no longer complete: "
+                  + (", ".join(f"{s} {y}" for s, y in lost) or "none"))
         print(f"progress written to {write_status(settings, status)}")
         hist.not_stored.clear()
         eng.intraday.not_stored.clear()

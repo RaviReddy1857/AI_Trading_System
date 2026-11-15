@@ -22,6 +22,7 @@ Nothing else is read (no mutual funds, gold, bonds or unlisted shares).
 
 Run:  python -m app.external_data            (all steps)
       python -m app.external_data --history-report   (which INSUFFICIENT_HISTORY cases the adjustment resolves)
+      python -m app.external_data --check-docs       (tracked docs must carry no value of the repo's rows)
 """
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ import argparse
 import csv
 import json
 import logging
+import re
 import subprocess
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -360,14 +363,136 @@ def history_report(settings: Settings, store: Store, stocks: list[str], first: d
             "resolved_total": sum(v["resolved"] for v in out.values())}
 
 
+# ---------------- tracked docs must not carry the repo's rows ----------------
+# The licence forbids redistribution, and the docs are tracked in git (a GitHub remote). A doc may give
+# factors, methods and aggregates; never a value of the repo's rows. A raw value may be kept only in the
+# gitignored diagnostics (data/diagnostics/).
+_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_NUM = re.compile(r"(?<![\w.,/-])(-?\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|-?\d+\.\d+)(?![\d%]|\s*%)")
+_SYM = re.compile(r"\b[A-Z][A-Z0-9&]{1,14}\b")
+# "repo 138.76", "repo close 137.79", "against repo 482.875": a price-like value right after the word repo
+# (the RBI repo RATE is a percentage and is not matched)
+REPO_VALUE = re.compile(r"\brepo\b(?:'s)?(?:\s+(?:close[sd]?|price[sd]?|value[sd]?))?\s*[:=]?\s*\(?\s*"
+                        r"(\d[\d,]*\.\d+)(?!\d|\s*%)", re.I)
+
+
+def doc_candidates(text: str) -> list[tuple[int, str, list[date], list[float], set[str]]]:
+    """(line number, line, its dates, its decimal numbers of at least 1 that are not percentages, its
+    upper-case words) of every line that has both a date and such a number."""
+    out = []
+    for n, line in enumerate(text.splitlines(), start=1):
+        dates = []
+        for m in _DATE.finditer(line):
+            try:
+                dates.append(date.fromisoformat(m.group(1)))
+            except ValueError:
+                pass
+        if not dates:
+            continue
+        rest = _DATE.sub(" ", line)
+        nums = [float(m.group(1).replace(",", "")) for m in _NUM.finditer(rest)]
+        nums = [x for x in nums if abs(x) >= 1]
+        if nums:
+            out.append((n, line, dates, nums, set(_SYM.findall(line))))
+    return out
+
+
+def external_values(settings: Settings, store: Store | None, wanted: dict[date, set[str]]) -> dict[date, set[float]]:
+    """Every value of the external repo's rows on the given dates that this machine holds: the gitignored
+    overlays in data/external/, the store's external tables (external bars, cross-check closes, positioning)
+    and, for the stocks named next to a date, the clone's own daily files (if the clone is there)."""
+    out: dict[date, set[float]] = {}
+
+    def add(d: date, *vals) -> None:
+        if d in wanted:
+            out.setdefault(d, set()).update(float(v) for v in vals if isinstance(v, (int, float)))
+
+    ext_dir = settings.path("data/external")
+    for p in sorted(ext_dir.glob("*.csv")) if ext_dir.exists() else ():
+        lines = [x for x in p.read_text(encoding="utf-8").splitlines() if x and not x.startswith("#")]
+        for row in csv.DictReader(lines):
+            try:
+                d = parse_date(row.get("date") or "")
+            except ValueError:
+                continue
+            for v in row.values():
+                try:
+                    add(d, float(str(v).replace(",", "")))
+                except ValueError:
+                    pass
+    if store is not None and wanted:
+        keys = [d.isoformat() for d in wanted]
+        marks = ",".join("?" * len(keys))
+        with store._lock:
+            bars = store._db.execute(f"SELECT date, open, high, low, close FROM external_bars_1d WHERE date IN ({marks})",
+                                     keys).fetchall()
+            cross = store._db.execute(f"SELECT date, external_close FROM price_crosscheck WHERE date IN ({marks})",
+                                      keys).fetchall()
+            pos = store._db.execute(f"SELECT date, data_json FROM positioning_daily WHERE date IN ({marks})",
+                                    keys).fetchall()
+        for d, *vals in bars + cross:
+            add(date.fromisoformat(d), *vals)
+        for d, js in pos:
+            data = json.loads(js)
+            add(date.fromisoformat(d), *(v for v in (data.values() if isinstance(data, dict) else ())))
+    repo = settings.path(settings.external_data.repo_path)
+    symbols = sorted({s for v in wanted.values() for s in v})
+    if repo.exists():
+        for sym in symbols:
+            try:
+                rows = read_stock_parquet(repo, sym)
+            except Exception:                # an unreadable file is not a finding
+                rows = None
+            for r in rows or ():
+                add(r["date"], r["open"], r["high"], r["low"], r["close"])
+    return out
+
+
+def doc_leaks(files: dict[str, str], values: Callable[[dict[date, set[str]]], dict[date, set[float]]]) -> list[str]:
+    """Lines of tracked docs that carry a value of the external repo's rows: a number on a line next to a
+    date on which the repo has that value (to the paisa), or a price-like value written right after the
+    word "repo". `values(wanted)` gives the repo's values on the wanted dates (see external_values)."""
+    found = []
+    cands = {name: doc_candidates(text) for name, text in files.items()}
+    wanted: dict[date, set[str]] = {}
+    for rows in cands.values():
+        for _, _, dates, _, syms in rows:
+            for d in dates:
+                wanted.setdefault(d, set()).update(syms)
+    vals = values(wanted) if wanted else {}
+    for name, text in files.items():
+        for n, line in enumerate(text.splitlines(), start=1):
+            if m := REPO_VALUE.search(line):
+                found.append(f"{name}:{n}: value after 'repo': {m.group(1)}")
+        for n, line, dates, nums, _ in cands[name]:
+            hits = sorted({x for d in dates for x in nums if any(abs(x - v) < 0.005 for v in vals.get(d, ()))})
+            if hits:
+                found.append(f"{name}:{n}: value(s) of the repo's rows on {', '.join(d.isoformat() for d in dates)}: "
+                             + ", ".join(f"{x:g}" for x in hits))
+    return sorted(set(found), key=lambda x: (x.split(":")[0], int(x.split(":")[1])))
+
+
+def tracked_docs(root: Path) -> dict[str, str]:
+    """Every tracked text document of the project (git ls-files: *.md, *.txt, *.csv), by path."""
+    names = subprocess.run(["git", "ls-files", "*.md", "*.txt", "*.csv"], cwd=root, capture_output=True, text=True,
+                           check=True).stdout.split()
+    return {n: (root / n).read_text(encoding="utf-8", errors="replace") for n in names if (root / n).exists()}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=f"One-time import from {REPO_NAME} ({LICENCE_NOTE})")
     ap.add_argument("--history-report", action="store_true", help="only report which INSUFFICIENT_HISTORY cases the "
                                                                   "corporate-action adjustment resolves")
+    ap.add_argument("--check-docs", action="store_true", help="only list lines of the tracked docs that carry a value "
+                                                              "of the repo's rows (none may)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = load_settings()
     store = Store(settings.path(settings.storage.db_path_live), live=True)
+    if args.check_docs:
+        leaks = doc_leaks(tracked_docs(settings.path(".")), lambda w: external_values(settings, store, w))
+        print("\n".join(leaks) or "no repo values in the tracked docs")
+        return 1 if leaks else 0
     out_dir = settings.path("data/diagnostics")
     out_dir.mkdir(parents=True, exist_ok=True)
     if not args.history_report:

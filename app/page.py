@@ -142,7 +142,10 @@ DATA_STATUS_HTML = """<!doctype html>
  <div class="card"><h2>Import</h2>
   <p class="mute">Put the files you downloaded in <code>data/inbox/</code> and press the button (or run <code>python -m app.inbox</code>).
   Processed files move to <code>data/inbox/done/</code>; rejected ones to <code>data/inbox/rejected/</code> with a reason file.</p>
-  <label class="mute">Board meetings cover through (optional, YYYY-MM-DD): <input id="through" size="11"></label>
+  <div class="mute">Board meetings export (needed only for a board-meetings file; it is rejected without them):
+  <label>from <input id="bfrom" size="11" placeholder="YYYY-MM-DD"></label>
+  <label>through <input id="through" size="11" placeholder="YYYY-MM-DD"></label>
+  <label><input id="ball" type="checkbox"> I confirm it is the unfiltered all-companies export (no symbol, index or purpose filter)</label></div>
   <button id="inbox" type="button">Import inbox files</button> <span class="mute" id="inboxres"></span>
   <h2 style="margin-top:14px">RBI decision</h2>
   <label class="mute">Date <input id="rdate" size="11" placeholder="YYYY-MM-DD"></label>
@@ -171,7 +174,7 @@ async function load(){
 }
 async function post(u,b){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});return r.json()}
 document.getElementById("inbox").onclick=async()=>{const o=document.getElementById("inboxres");o.textContent="importing...";
- try{const x=await post("/data/import/inbox",{covered_through:document.getElementById("through").value});
+ try{const x=await post("/data/import/inbox",{board_from:document.getElementById("bfrom").value,board_through:document.getElementById("through").value,board_all_companies:document.getElementById("ball").checked});
   o.textContent=x.files&&x.files.length?x.files.map(f=>f.file+": "+(f.ok===false?"REJECTED - "+f.errors.join("; "):(f.kind+", "+(f.added||0)+" added, "+(f.duplicates||0)+" duplicates"))).join(" | "):"No files in data/inbox/";load()}
  catch(e){o.textContent="Import failed"}};
 document.getElementById("rbtn").onclick=async()=>{const o=document.getElementById("rres");

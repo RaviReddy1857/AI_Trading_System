@@ -118,7 +118,10 @@ def option_stats(trades: list, capital: float, min_trades: int) -> dict:
     mtm = mtm_equity(trades)              # drawdown of the daily mark-to-market portfolio equity
     s["equity_basis"] = {"drawdown": "daily mark-to-market portfolio equity (closed trades plus open positions "
                                      "marked at each session's close after estimated closing charges)",
-                         "sessions": mtm["sessions"], "stale_position_days": mtm["stale_position_days"]}
+                         "sessions": mtm["sessions"], "stale_position_days": mtm["stale_position_days"],
+                         "max_mark_age_minutes": mtm["max_mark_age_minutes"],
+                         "five_minute_runs": "marked at the last synchronized 5-minute bar of each session; a "
+                                             "session without one carries the previous mark (stale, with its age)"}
     if not still:
         s.update({"net_incl_open_inr": s["net_pnl_inr"], "max_drawdown_incl_open_inr": mtm["max_drawdown_inr"],
                   "open_at_cutoff": {"positions": 0}})
@@ -147,37 +150,55 @@ def mark_age_minutes(t) -> int:
     return max(0, int((end - at).total_seconds() // 60))
 
 
+def session_end(d: date) -> datetime:
+    """15:30 IST of session d, in UTC."""
+    return datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)
+
+
+def _read_mark(m) -> tuple[date, float, datetime]:
+    """(session, value, time of its prices) of a stored mark; a mark without a price time is of that
+    session's close."""
+    d = m[0] if isinstance(m[0], date) else date.fromisoformat(m[0])
+    at = m[2] if len(m) > 2 else session_end(d)
+    return d, m[1], at if isinstance(at, datetime) else datetime.fromisoformat(at)
+
+
 def mtm_equity(trades: list) -> dict:
     """The portfolio's daily mark-to-market equity: on each session, the net P&L of every trade closed by
-    then plus every open position's mark at that session's close (its last mark when that day has none:
-    counted as stale). Drawdown = the largest fall from a running peak (starting at 0) of this series."""
-    exits, marks, entries = {}, [], []
+    then plus every open position's mark of that session (its last mark when that day has none, or a mark
+    carried from an earlier session: counted as stale). Each open position-day's mark age is the time from
+    its prices to the end of the session (15:30 IST); the largest is reported. Drawdown = the largest fall
+    from a running peak (starting at 0) of this series."""
+    exits, marks = {}, []
     for t in trades:
         x = datetime.fromisoformat(t.exit_time).astimezone(IST).date()
         exits.setdefault(x, []).append(t.net_pnl)
-        m = sorted((date.fromisoformat(a), v) for a, v in (t.marks or []))
+        m = sorted((_read_mark(v) for v in (t.marks or [])), key=lambda v: v[0])
         marks.append((datetime.fromisoformat(t.entry_time).astimezone(IST).date(), x, m))
-    days = sorted(set(exits) | {a for _, _, m in marks for a, _ in m})
+    days = sorted(set(exits) | {a for _, _, m in marks for a, _, _ in m})
     equity = peak = dd = 0.0
-    realised, stale, series = 0.0, 0, []
+    realised, stale, series, max_age = 0.0, 0, [], 0
     for day in days:
         realised += sum(exits.get(day, ()))
         open_value = 0.0
         for start, end, m in marks:
             if not (start <= day < end):
                 continue
-            k = bisect.bisect_right([a for a, _ in m], day)
+            k = bisect.bisect_right([a for a, _, _ in m], day)
             if k == 0:
                 stale += 1                                   # no mark yet for an open position
                 continue
-            if m[k - 1][0] != day:
-                stale += 1
-            open_value += m[k - 1][1]
+            _, value, at = m[k - 1]
+            if at.astimezone(IST).date() != day:
+                stale += 1                                   # carried from an earlier session
+            max_age = max(max_age, int((session_end(day) - at).total_seconds() // 60))
+            open_value += value
         equity = realised + open_value
         peak = max(peak, equity)
         dd = max(dd, peak - equity)
         series.append((day, round(equity, 2)))
-    return {"max_drawdown_inr": round(dd, 2), "sessions": len(series), "stale_position_days": stale}
+    return {"max_drawdown_inr": round(dd, 2), "sessions": len(series), "stale_position_days": stale,
+            "max_mark_age_minutes": max_age}
 
 
 DATA_INCOMPLETE_KEYS = ("DATA_INCOMPLETE_CAMPAIGNS", "DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED",
@@ -328,7 +349,7 @@ class _Position:
     roll_refused: str = ""
     entry_bar: datetime | None = None    # synchronized execution: the actual first synchronized entry bar (its start)
     max_loss_inr: float | None = None    # recomputed from the actual entry fills (None: the signal's estimate)
-    marks: list = field(default_factory=list)   # [(session, mark-to-market net P&L at its close)] while open
+    marks: list = field(default_factory=list)   # [(session, mark-to-market net P&L, time of its prices)] while open
 
 
 class OptionEngine:
@@ -695,7 +716,7 @@ class OptionEngine:
             gross_pnl=float(gross), costs=total.as_dict(), net_pnl=float(gross - total.total),
             price_source=self.prices.label,
             max_loss_inr=pos.max_loss_inr if pos.max_loss_inr is not None else sig.details.get("max_loss_inr"),
-            marks=[[d0.isoformat(), v] for d0, v in pos.marks],
+            marks=[[m[0].isoformat(), m[1], m[2].isoformat()] for m in pos.marks],
             mark_time=(exit_dt or datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)).isoformat()
             if reason == OPEN_AT_CUTOFF else None,
             iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
@@ -704,15 +725,30 @@ class OptionEngine:
             max_profit_inr=sig.details.get("max_profit_inr"), exit_check=exit_check, exit_basis=basis,
             liquidation_costs_inr=liq)
 
-    def _mark(self, pos: _Position, sym: str, d: date, strategy: OptionStrategy) -> None:
-        """The open position's net P&L if it were closed at the legs' daily closes of d (exit slippage and
-        every charge included), for the daily mark-to-market equity. No daily bar for a leg: no mark that
-        day (the equity then carries the last one and counts it as stale; nothing is invented)."""
+    def _mark(self, pos: _Position, sym: str, d: date, strategy: OptionStrategy, sync: bool = False) -> None:
+        """The open position's net P&L if it were closed at the session's mark (exit slippage and every
+        charge included), for the daily mark-to-market equity: (session, value, time of the prices used).
+
+        Five-minute (synchronized) runs: the closes of the LAST synchronized 5-minute bar of d, the same
+        prices the run trades on - never the legs' independent daily closes, which may be of different
+        moments. No synchronized bar that day: the previous mark is carried with its own price time, so
+        its age is recorded (none yet: no mark). Daily runs: the legs' daily closes; a leg without a daily
+        bar gives no mark that day (the equity carries the last one and counts it as stale)."""
+        if sync:
+            bars = self._sync_bars(sym, pos.legs, d)
+            if bars:
+                start, last = bars[-1]
+                at = start + timedelta(minutes=5)
+                t = self._close(pos, sym, d, [b.close for b in last], False, "MARK", strategy, exit_dt=at)
+                pos.marks.append((d, round(t.net_pnl, 2), at))
+            elif pos.marks:
+                pos.marks.append((d, pos.marks[-1][1], pos.marks[-1][2]))
+            return
         bars = self._leg_bars(sym, pos.legs, d)
         if bars is None:
             return
         t = self._close(pos, sym, d, [b.close for b in bars], False, "MARK", strategy)
-        pos.marks.append((d, round(t.net_pnl, 2)))
+        pos.marks.append((d, round(t.net_pnl, 2), session_end(d)))
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -1256,7 +1292,7 @@ class OptionEngine:
                     incomplete.add(pos.campaign_id or pos.sig.signal_id)
             positions = keep
             for pos in positions:                                 # daily mark-to-market of what stays open
-                self._mark(pos, sym, d, strategy)
+                self._mark(pos, sym, d, strategy, sync)
             publish()                                             # today's fills and exits, before any later decision
             if d not in allowed or d >= last_allowed:
                 continue

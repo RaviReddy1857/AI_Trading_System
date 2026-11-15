@@ -238,6 +238,14 @@ ACTIONS = ('"SYMBOL","COMPANY NAME","SERIES","PURPOSE","FACE VALUE","EX-DATE","R
            '"INFY","Infosys","EQ","Bonus 1:1","5","10-Dec-2026","10-Dec-2026"\n'
            '"TCS","Tata","EQ","Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share","2","12-Dec-2026","-"\n'
            '"X","X","EQ","Annual General Meeting","1","12-Dec-2026","-"\n')
+
+
+def full_board(n=150, start=date(2026, 11, 16), days=60, extra=""):
+    """An all-companies board-meetings export: n companies, meetings spread over `days` days from `start`."""
+    rows = [f'"CO{i:04d}","Company {i}","Fund Raising","","{(start + timedelta(days=i % days)):%d-%b-%Y}"' for i in range(n)]
+    return BOARD + "\n".join(rows) + "\n" + extra
+
+
 FII = "Category,Date,Buy Value,Sell Value,Net Value\nFII/FPI,13-Nov-2026,10,20,-10\nDII,13-Nov-2026,20,10,10\nFII/FPI,10-Nov-2026,1,1,999\n"
 
 
@@ -252,18 +260,29 @@ def test_ACCEPTANCE_inbox_imports_each_kind_moves_files_and_never_overwrites_you
     (inbox / "fii.csv").write_text(FII)
     (inbox / "rbi.csv").write_text("date,decision\n2026-12-05,scheduled\n2026-10-01,repo unchanged at 5.25%\n")
     (inbox / "junk.csv").write_text("a,b\n1,2\n")
-    res = {r["file"]: r for r in run_inbox(s, store, m, NOW)}
+    from app.inbox import BoardMeetingsDeclaration
+    decl = BoardMeetingsDeclaration(date(2026, 11, 15), date(2027, 1, 31), all_companies=True)
+    res = {r["file"]: r for r in run_inbox(s, store, m, NOW, board_meetings=decl)}
+    # review fix 2026-11-15: a two-company file cannot be the all-companies list, whatever you declare
+    assert res["board.csv"]["ok"] is False and "only 2 distinct companies" in res["board.csv"]["errors"][0]
     assert res["junk.csv"]["ok"] is False and "not recognised" in res["junk.csv"]["errors"][0]
     rej = list((inbox / "rejected").iterdir())
     assert any(p.name.endswith("junk.csv") for p in rej) and any(p.name.endswith(".reason.txt") for p in rej)
-    assert len(list((inbox / "done").iterdir())) == 4 and not [p for p in inbox.iterdir() if p.is_file()]
-    # board meetings: RESULTS for the results meeting only; COVERAGE for every watchlist stock through the last date
+    assert len(list((inbox / "done").iterdir())) == 3 and not [p for p in inbox.iterdir() if p.is_file()]
+    ev = store.all_events()
+    assert not [e for e in ev if e["type"] in ("COVERAGE", "RESULTS")]          # the rejected file gave nothing
+    # a declared, unfiltered all-companies export: RESULTS for the results meeting only; COVERAGE for every watchlist
+    # stock through the DECLARED end date (2027-01-31), not the latest meeting date in the file (2027-01-25)
+    (inbox / "board_all.csv").write_text(full_board(days=70))
+    got = run_inbox(s, store, m, NOW, board_meetings=decl)[0]
+    assert got["kind"] == "board_meetings" and got["covered_through"] == "2027-01-31" and got["distinct_companies"] == 152
     ev = store.all_events()
     res_ev = [e for e in ev if e["type"] == "RESULTS"]
     assert [(e["symbol"], e["date"]) for e in res_ev] == [("RELIANCE", date(2027, 1, 20))]
     cov = [e for e in ev if e["type"] == "COVERAGE"]
     stocks = [i.symbol for i in s.watchlist if i.kind == "stock"]
-    assert {e["symbol"] for e in cov} == set(stocks) and all("covered_through=2027-01-25" in e["note"] for e in cov)
+    assert {e["symbol"] for e in cov} == set(stocks) and all("covered_through=2027-01-31" in e["note"] for e in cov)
+    assert all("covered_from=2026-11-15" in e["note"] and "all companies, confirmed by you" in e["note"] for e in cov)
     # corporate actions: bonus and split with factors, the meeting ignored, tagged as an inbox file
     ca = {a["symbol"]: a for a in store.corporate_actions()}
     assert set(ca) == {"INFY", "TCS"} and ca["INFY"]["price_factor"] == 0.5 and ca["TCS"]["price_factor"] == pytest.approx(0.2)
@@ -274,8 +293,8 @@ def test_ACCEPTANCE_inbox_imports_each_kind_moves_files_and_never_overwrites_you
     rbi = [e["note"] for e in ev if e["type"] == "RBI_POLICY"]
     assert any(n.startswith("SCHEDULED") for n in rbi) and any("repo unchanged" in n for n in rbi)
     # the same files again: everything is a duplicate
-    (inbox / "board2.csv").write_text(BOARD)
-    again = run_inbox(s, store, m, NOW)[0]
+    (inbox / "board2.csv").write_text(full_board(days=70))
+    again = run_inbox(s, store, m, NOW, board_meetings=decl)[0]
     assert again["added"] == 0 and again["duplicates"] > 0
     # the comment lines of events.csv survive
     assert (tmp_path / "events.csv").read_text().count("COVERAGE") == len(stocks)

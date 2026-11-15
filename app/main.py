@@ -264,15 +264,14 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     @app.post("/data/import/inbox")
     async def data_import_inbox(request: Request):
         """Import every file in data/inbox/ (NSE board meetings, corporate actions, FII/DII, RBI decisions)."""
-        from .inbox import run_inbox
-        from .manual_data import parse_date
+        from .inbox import declaration, run_inbox
         payload = await _json_body(request)
-        through = payload.get("covered_through")
-        try:
-            through_d = parse_date(through) if isinstance(through, str) and through.strip() else None
+        txt = lambda k: payload.get(k) if isinstance(payload.get(k), str) else ""
+        try:     # board meetings: the export's range and your confirmation that it is the all-companies list
+            decl = declaration(txt("board_from"), txt("board_through"), payload.get("board_all_companies") is True)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        results = run_inbox(settings, store, manual, covered_through=through_d)
+        results = run_inbox(settings, store, manual, board_meetings=decl)
         return {"ok": all(r.get("ok", True) for r in results), "files": results,
                 "note": "no files in the inbox" if not results else ""}
 

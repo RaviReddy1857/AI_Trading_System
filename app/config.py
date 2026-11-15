@@ -187,6 +187,10 @@ class DataStatusLimits(StrictModel):
     corporate_actions_max_age_days: int = Field(7, ge=1, le=60)
     rbi_decision_grace_days: int = Field(3, ge=0, le=30)      # a scheduled meeting without a decision row after this
     inbox_dir: str = "data/inbox"
+    # a board-meetings export gives coverage only if it can be the whole list: at least this many companies,
+    # and meetings within this many days of both ends of the declared range
+    board_meetings_min_symbols: int = Field(100, ge=10, le=5000)
+    board_meetings_edge_days: int = Field(7, ge=0, le=60)
 
 
 # ---------------- phase 3: costs, strategies, backtest ----------------
