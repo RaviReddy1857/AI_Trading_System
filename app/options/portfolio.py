@@ -94,8 +94,15 @@ def linked_groups(symbols: Sequence[str], sectors: dict[str, str | None], corr: 
                   threshold: float) -> tuple[list[set[str]], list[str]]:
     """(connected components, problems). A link: same known sector, or correlation >= threshold.
     Problems: an unknown sector, or a pair of different sectors without a measurable correlation."""
+    groups, problems = _components(symbols, sectors, corr, threshold)
+    return groups, [text for _, text in problems]
+
+
+def _components(symbols: Sequence[str], sectors: dict[str, str | None], corr: Callable[[str, str], float | None],
+                threshold: float) -> tuple[list[set[str]], list[tuple[tuple[str, ...], str]]]:
+    """linked_groups with each problem as (the stocks it is about, text)."""
     syms = sorted(set(symbols))
-    problems = [f"{s}: sector not known" for s in syms if not sectors.get(s)]
+    problems = [((s,), f"{s}: sector not known") for s in syms if not sectors.get(s)]
     parent = {s: s for s in syms}
 
     def find(x):
@@ -112,7 +119,7 @@ def linked_groups(symbols: Sequence[str], sectors: dict[str, str | None], corr: 
                 continue
             c = corr(a, b)
             if c is None:
-                problems.append(f"{a}-{b}: correlation not measurable (too little common return history)")
+                problems.append(((a, b), f"{a}-{b}: correlation not measurable (too little common return history)"))
             elif c >= threshold:
                 parent[find(a)] = find(b)
     groups: dict[str, set[str]] = {}
@@ -122,11 +129,20 @@ def linked_groups(symbols: Sequence[str], sectors: dict[str, str | None], corr: 
 
 
 def portfolio_check(symbol: str, risk_inr: float, holdings: Sequence[Holding] | None, sectors: dict[str, str | None],
-                    corr: Callable[[str, str], float | None], cfg, capital_inr: float) -> tuple[str | None, str, dict]:
+                    corr: Callable[[str, str], float | None], cfg, capital_inr: float,
+                    history_verified: bool = False, universe: Sequence[str] = ()) -> tuple[str | None, str, dict]:
     """(code or None, why, facts) for a proposed position next to the open ones (`holdings`, each
-    position on its own; None = not known). The proposed position is included in every limit."""
+    position on its own; None = not known). The proposed position is included in every limit.
+    `history_verified`: the closed and manual-trade history is known and verified too (the per-stock
+    loss limits read it); without it the portfolio is unknown, whatever the open holdings say. In a
+    backtest the simulated history counts as verified; live it stays unknown until the phase 6 journal.
+    `universe`: the stocks the correlated groups are built from (connected components over the whole
+    universe, the same groups as displayed); the holdings and the proposed stock are always included."""
     if holdings is None:
         return PORTFOLIO_UNKNOWN, "open positions are not known: exposure and losses cannot be checked", {}
+    if not history_verified:
+        return (PORTFOLIO_UNKNOWN, "closed and manual-trade history is not verified: losses and exposure cannot be "
+                                   "checked", {})
     hs = list(holdings) + [Holding(symbol, risk_inr)]
     total = sum(h.risk_inr for h in hs)
     facts = {"open_positions_with_this": len(hs), "total_risk_inr": round(total, 2)}
@@ -136,9 +152,23 @@ def portfolio_check(symbol: str, risk_inr: float, holdings: Sequence[Holding] | 
     if total > limit:
         return (CORRELATED_LIMIT, f"total risk Rs {total:,.0f} would be above {cfg.max_total_risk_pct:g}% of capital "
                                   f"(Rs {limit:,.0f})", facts)
-    groups, problems = linked_groups([h.symbol for h in hs], sectors, corr, cfg.correlation_threshold)
-    if problems:
-        return CORRELATION_UNKNOWN, "; ".join(problems[:3]), facts
+    held = {h.symbol for h in hs}
+    groups, problems = _components(sorted(set(universe) | held), sectors, corr, cfg.correlation_threshold)
+    # An unknown sector or link matters when it could change a group holding positions: a held (or the
+    # proposed) stock's own sector unknown, or an unknown link that could join two components which both
+    # hold positions. Unknown links among stocks that could only join an empty component change nothing.
+    comp = {s: k for k, g in enumerate(groups) for s in g}
+    holding = {comp[s] for s in held}
+    relevant = []
+    for who, text in problems:
+        if len(who) == 1:
+            s = who[0]
+            if s in held or (comp[s] in holding and len(holding) > 1):
+                relevant.append(text)
+        elif comp[who[0]] != comp[who[1]] and comp[who[0]] in holding and comp[who[1]] in holding:
+            relevant.append(text)
+    if relevant:
+        return CORRELATION_UNKNOWN, "; ".join(relevant[:3]), facts
     group = next(g for g in groups if symbol in g)
     in_group = [h for h in hs if h.symbol in group]
     g_risk = sum(h.risk_inr for h in in_group)
@@ -157,7 +187,11 @@ class PortfolioGate:
     """The portfolio limits as a gate for OptionEngine.run_portfolio. Counts every check, every refusal
     and the size of the proposed position's group, for the report."""
 
-    def __init__(self, settings, engine):
+    # the simulated trades of a backtest are its whole closed history: verified by construction
+    history_verified = True
+
+    def __init__(self, settings, engine, universe=None):
+        self.universe = list(universe) if universe is not None else None   # None: run_portfolio sets the streams' stocks
         self.cfg = settings.stock_option_selling.portfolio
         self.capital = settings.account.capital_inr
         self.eng = engine
@@ -171,7 +205,8 @@ class PortfolioGate:
         holdings = self.eng.book_holdings(exclude_sig=replacing.sig if replacing is not None else None)
         risk = float(sig.details.get("max_loss_inr") or 0.0)
         code, _, facts = portfolio_check(sym, risk, holdings, self.sectors, lambda a, b: self.corr.at(d, a, b),
-                                         self.cfg, self.capital)
+                                         self.cfg, self.capital, history_verified=self.history_verified,
+                                         universe=self.universe or ())
         self.checks += 1
         if "group_positions" in facts:
             self.group_sizes[facts["group_positions"]] += 1
@@ -185,7 +220,8 @@ class PortfolioGate:
 
 
 def universe_groups(symbols, sectors: dict, corr: Callable[[str, str], float | None], threshold: float) -> dict:
-    """The correlated groups of a set of stocks (same sector or correlation >= threshold), for display."""
+    """The correlated groups of a set of stocks (same sector or correlation >= threshold), for display:
+    the same connected components portfolio_check enforces with `universe=symbols`."""
     groups, problems = linked_groups(symbols, sectors, corr, threshold)
     return {"groups": [sorted(g) for g in groups], "sizes": [len(g) for g in groups], "problems": problems[:20],
             "problem_count": len(problems)}

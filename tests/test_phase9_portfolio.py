@@ -12,12 +12,15 @@ from app.options.option_history import OptionHistory
 from app.options.portfolio import (CORRELATED_LIMIT, CORRELATION_UNKNOWN, PORTFOLIO_UNKNOWN, Correlations, Holding,
                                    PortfolioGate, correlation, daily_returns, linked_groups, portfolio_check)
 from app.options.stock_backtest import variant
+from functools import partial
 from tests.test_phase9_core import engine_for, ist_date, settings, stock_world, weekdays_back
 
 CFG = settings(account={"capital_inr": 1000000.0}).stock_option_selling.portfolio.model_copy(
     update={"max_total_risk_pct": 10.0, "group_max_risk_pct": 5.0})
 CAP = 1000000.0
 SECTORS = {"A": "Banks", "B": "Banks", "C": "IT", "D": "IT", "E": "Energy", "X": None}
+
+pc = partial(portfolio_check, history_verified=True)
 
 
 def none_corr(a, b):
@@ -26,13 +29,13 @@ def none_corr(a, b):
 
 def test_ACCEPTANCE_every_position_counts_toward_the_count_and_total_risk_limits():
     h = [Holding(s, 10000) for s in "ACEACE"[:5]]
-    assert portfolio_check("D", 10000, h[:4], SECTORS, none_corr, CFG, CAP)[0] is None
-    code, why, facts = portfolio_check("D", 10000, h[:4] + [Holding("E", 10000), Holding("A", 1000)], SECTORS, none_corr, CFG, CAP)
+    assert pc("D", 10000, h[:4], SECTORS, none_corr, CFG, CAP)[0] is None
+    code, why, facts = pc("D", 10000, h[:4] + [Holding("E", 10000), Holding("A", 1000)], SECTORS, none_corr, CFG, CAP)
     assert code == CORRELATED_LIMIT and "max_open_spreads 6" in why and facts["open_positions_with_this"] == 7
     # total risk: 10% of Rs 10,00,000 = Rs 1,00,000, the proposed position included; exactly at the limit is allowed
     three = [Holding("A", 25000), Holding("C", 25000), Holding("D", 20000)]
-    assert portfolio_check("E", 30000, three, SECTORS, none_corr, CFG, CAP)[0] is None
-    code, why, facts = portfolio_check("E", 30001, three, SECTORS, none_corr, CFG, CAP)
+    assert pc("E", 30000, three, SECTORS, none_corr, CFG, CAP)[0] is None
+    code, why, facts = pc("E", 30001, three, SECTORS, none_corr, CFG, CAP)
     assert code == CORRELATED_LIMIT and "10% of capital" in why and facts["total_risk_inr"] == 100001
 
 
@@ -43,28 +46,55 @@ def test_ACCEPTANCE_groups_are_connected_components_of_sector_or_correlation_lin
     groups, problems = linked_groups(["A", "B", "C", "D", "E"], SECTORS, f, 0.7)
     assert problems == [] and groups == [{"C", "D", "E"}, {"A", "B"}]        # D-C by sector, C-E by correlation
     # the proposed position is in its group: two IT positions already open, an Energy one linked to them is refused
-    code, why, facts = portfolio_check("E", 5000, [Holding("C", 5000), Holding("D", 5000)], SECTORS, f, CFG, CAP)
+    code, why, facts = pc("E", 5000, [Holding("C", 5000), Holding("D", 5000)], SECTORS, f, CFG, CAP)
     assert code == CORRELATED_LIMIT and "group_max_positions 2" in why and facts["group"] == ["C", "D", "E"]
-    assert portfolio_check("E", 5000, [Holding("C", 5000), Holding("A", 5000)], SECTORS, f, CFG, CAP)[0] is None
+    assert pc("E", 5000, [Holding("C", 5000), Holding("A", 5000)], SECTORS, f, CFG, CAP)[0] is None
     # group risk: 5% of Rs 10,00,000 = Rs 50,000
-    code, why, _ = portfolio_check("B", 26000, [Holding("A", 25000)], SECTORS, f, CFG, CAP)
+    code, why, _ = pc("B", 26000, [Holding("A", 25000)], SECTORS, f, CFG, CAP)
     assert code == CORRELATED_LIMIT and "5% of capital" in why
-    assert portfolio_check("B", 25000, [Holding("A", 25000)], SECTORS, f, CFG, CAP)[0] is None
+    assert pc("B", 25000, [Holding("A", 25000)], SECTORS, f, CFG, CAP)[0] is None
     # two positions in the same stock are two positions of one group
-    assert portfolio_check("A", 1000, [Holding("A", 1000), Holding("A", 1000)], SECTORS, f, CFG, CAP)[0] == CORRELATED_LIMIT
+    assert pc("A", 1000, [Holding("A", 1000), Holding("A", 1000)], SECTORS, f, CFG, CAP)[0] == CORRELATED_LIMIT
 
 
 def test_ACCEPTANCE_unknown_sector_or_correlation_blocks_and_missing_portfolio_is_never_zero():
     f = lambda a, b: None
-    code, why, _ = portfolio_check("C", 5000, [Holding("A", 5000)], SECTORS, f, CFG, CAP)
+    code, why, _ = pc("C", 5000, [Holding("A", 5000)], SECTORS, f, CFG, CAP)
     assert code == CORRELATION_UNKNOWN and "A-C" in why                 # different sectors, correlation not measurable
-    assert portfolio_check("B", 5000, [Holding("A", 5000)], SECTORS, f, CFG, CAP)[0] is None   # same sector: no correlation needed
-    code, why, _ = portfolio_check("X", 5000, [Holding("A", 5000)], SECTORS, none_corr, CFG, CAP)
+    assert pc("B", 5000, [Holding("A", 5000)], SECTORS, f, CFG, CAP)[0] is None   # same sector: no correlation needed
+    code, why, _ = pc("X", 5000, [Holding("A", 5000)], SECTORS, none_corr, CFG, CAP)
     assert code == CORRELATION_UNKNOWN and "X: sector not known" in why
-    assert portfolio_check("X", 5000, [], SECTORS, f, CFG, CAP)[0] == CORRELATION_UNKNOWN
-    code, why, _ = portfolio_check("A", 5000, None, SECTORS, none_corr, CFG, CAP)
+    assert pc("X", 5000, [], SECTORS, f, CFG, CAP)[0] == CORRELATION_UNKNOWN
+    code, why, _ = pc("A", 5000, None, SECTORS, none_corr, CFG, CAP)
     assert code == PORTFOLIO_UNKNOWN and "not known" in why
-    assert portfolio_check("A", 5000, [], SECTORS, f, CFG, CAP)[0] is None       # nothing open: nothing to relate to
+    assert pc("A", 5000, [], SECTORS, f, CFG, CAP)[0] is None       # nothing open: nothing to relate to
+
+
+def test_ACCEPTANCE_portfolio_unknown_without_verified_closed_and_manual_history():
+    """Review fix 2026-11-15: known open holdings are not enough; the closed and manual-trade history must be
+    verified too. A backtest's simulated history counts as verified; live it stays unknown (no phase 6 journal)."""
+    code, why, _ = portfolio_check("A", 5000, [], SECTORS, none_corr, CFG, CAP)            # history not verified
+    assert code == PORTFOLIO_UNKNOWN and "history is not verified" in why
+    assert portfolio_check("A", 5000, [], SECTORS, none_corr, CFG, CAP, history_verified=True)[0] is None
+    assert PortfolioGate.history_verified is True
+
+
+def test_ACCEPTANCE_groups_are_components_of_the_whole_universe_and_the_same_as_displayed():
+    """Review fix 2026-11-15: A (Banks) and D (IT) are linked only through stocks nobody holds (A-E and C-E
+    correlated, C and D in one sector). Built from the holdings alone they are separate groups; built from the
+    universe they are one group, so a third position in it is refused, and the display shows that group."""
+    from app.options.portfolio import universe_groups
+    corr = {("A", "E"): 0.8, ("C", "E"): 0.8}
+    f = lambda a, b: corr.get(tuple(sorted((a, b))), 0.1)
+    held = [Holding("A", 5000), Holding("D", 5000)]
+    assert pc("E", 5000, held, SECTORS, f, CFG, CAP)[0] is None                          # holdings only: {A, E} and {D}
+    code, why, facts = pc("E", 5000, held, SECTORS, f, CFG, CAP, universe=["A", "B", "C", "D", "E"])
+    assert code == CORRELATED_LIMIT and facts["group"] == ["A", "B", "C", "D", "E"] and facts["group_positions"] == 3
+    shown = universe_groups(["A", "B", "C", "D", "E"], SECTORS, f, 0.7)["groups"]
+    assert shown == [facts["group"]]
+    # an unknown link that cannot join two groups holding positions changes nothing
+    g = lambda a, b: None if {a, b} == {"B", "E"} else f(a, b)
+    assert pc("A", 1000, [], SECTORS, g, CFG, CAP, universe=["A", "B", "C", "D", "E"])[0] is None
 
 
 def bars_of(sym, closes, days):
@@ -154,30 +184,32 @@ def live_setup():
 def test_ACCEPTANCE_a_signal_is_actionable_only_with_live_fresh_known_inputs():
     from app.options.actionable import actionable_check
     cfg, ctx, sig, now, exp = live_setup()
+    codes = lambda w: [x.split(":")[0] for x in w]
     sectors = {"RELIANCE": "Oil Gas & Consumable Fuels"}
     fresh = {exp: now - timedelta(minutes=2)}
-    ok, why = actionable_check(cfg, sig, ctx, now, fresh, [], sectors, none_corr)
+    ok, why = actionable_check(cfg, sig, ctx, now, fresh, [], sectors, none_corr, history_verified=True)
     assert ok is True and why == []
-    codes = lambda w: [x.split(":")[0] for x in w]
+    # known open positions but no verified closed / manual history (live, before phase 6): unknown
+    assert codes(actionable_check(cfg, sig, ctx, now, fresh, [], sectors, none_corr)[1]) == ["PORTFOLIO_UNKNOWN"]
     # the portfolio is not known (no position records yet): never actionable
     ok, why = actionable_check(cfg, sig, ctx, now, fresh, None, sectors, none_corr)
     assert ok is False and codes(why) == ["PORTFOLIO_UNKNOWN"]
     # a stale chain, after the close, a stale price, no bid/ask, no margin
-    assert codes(actionable_check(cfg, sig, ctx, now, {exp: now - timedelta(minutes=20)}, [], sectors, none_corr)[1]) == ["DATA_STALE"]
-    assert codes(actionable_check(cfg, sig, ctx, now, {}, [], sectors, none_corr)[1]) == ["DATA_STALE"]
+    assert codes(actionable_check(cfg, sig, ctx, now, {exp: now - timedelta(minutes=20)}, [], sectors, none_corr, history_verified=True)[1]) == ["DATA_STALE"]
+    assert codes(actionable_check(cfg, sig, ctx, now, {}, [], sectors, none_corr, history_verified=True)[1]) == ["DATA_STALE"]
     after = now + timedelta(hours=6)                                  # 17:30 IST
-    assert "outside market hours" in actionable_check(cfg, sig, ctx, after, {exp: after}, [], sectors, none_corr)[1][0]
+    assert "outside market hours" in actionable_check(cfg, sig, ctx, after, {exp: after}, [], sectors, none_corr, history_verified=True)[1][0]
     from dataclasses import replace
-    assert "STALE" in actionable_check(cfg, sig, replace(ctx, status="STALE"), now, fresh, [], sectors, none_corr)[1][0]
+    assert "STALE" in actionable_check(cfg, sig, replace(ctx, status="STALE"), now, fresh, [], sectors, none_corr, history_verified=True)[1][0]
     from app.options.base import ChainQuotes, OptionQuote
     short = sig.legs[0]
     bare = ChainQuotes(ctx.spot, {exp: [OptionQuote(short.strike, short.right, None, None, 5.0, 1e6)]})
-    assert any("no bid and ask" in w for w in actionable_check(cfg, sig, replace(ctx, quotes=bare), now, fresh, [], sectors, none_corr)[1])
+    assert any("no bid and ask" in w for w in actionable_check(cfg, sig, replace(ctx, quotes=bare), now, fresh, [], sectors, none_corr, history_verified=True)[1])
     nomargin = replace(sig, details={**sig.details, "margin_inr": None})
-    assert codes(actionable_check(cfg, nomargin, ctx, now, fresh, [], sectors, none_corr)[1]) == ["MARGIN_UNKNOWN"]
+    assert codes(actionable_check(cfg, nomargin, ctx, now, fresh, [], sectors, none_corr, history_verified=True)[1]) == ["MARGIN_UNKNOWN"]
     full = [Holding(s, 1000) for s in ("TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "LT")]
     sec = {**sectors, "TCS": "IT", "INFY": "IT", "HDFCBANK": "Fin", "ICICIBANK": "Fin", "SBIN": "Fin", "LT": "Cap"}
-    assert codes(actionable_check(cfg, sig, ctx, now, fresh, full, sec, none_corr)[1]) == ["CORRELATED_LIMIT"]
+    assert codes(actionable_check(cfg, sig, ctx, now, fresh, full, sec, none_corr, history_verified=True)[1]) == ["CORRELATED_LIMIT"]
     assert actionable_check(cfg, None, ctx, now, fresh, [], sectors, none_corr)[0] is False
 
 

@@ -544,7 +544,9 @@ def test_ACCEPTANCE_market_weak_blocks_put_selling_and_unknown_market_data_block
     down = stock_bars(start=1200, drift=-1.0)
     calls = build_stock_selling(settings(stock_option_selling={"min_credit_to_max_loss": 0.05}))
     sig = calls.evaluate(ctx_for(s, down, chain(down[-1].close), market={"breadth_pct": 10.0}))
-    assert sig and sig[0].details["side"] == "CE"
+    assert sig and sig[0].details["side"] == "CE"                    # a known weak market: call selling goes ahead
+    assert calls.evaluate(ctx_for(s, down, chain(down[-1].close), market={})) == []      # unknown: no call spread either
+    assert any(r.startswith(MARKET_UNKNOWN) for r in calls.last_no_trade)
     # open-position guidance: MARKET_WEAK is reported for a put spread on the session it begins
     k = lambda prev, now, right="PE": [a["kind"] for a in alert_kinds(prev, now, right)]
     assert k(snap(market_weak=False), snap(date(2026, 11, 13), market_weak=True)) == ["MARKET_WEAK"]
@@ -569,8 +571,14 @@ def test_backtest_market_block_uses_breadth_known_at_each_close(world):
     sessions = [x for x in base.session_dates() if date(2025, 6, 2) <= x < date(2025, 10, 1)]
     blocked = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:PE", sk)
     assert blocked == [] and sk["NO_SIGNAL:MARKET_UNKNOWN"] >= 3     # unknown breadth blocks every scheduled put spread
-    calls = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:CE", Counter())
-    assert calls                                                     # call spreads are not blocked by the market block
+    # review fix 2026-11-15: MARKET_UNKNOWN blocks call spreads too (this test used to assert they passed);
+    # a KNOWN weak market still blocks put selling only (test above: a CE signal with breadth 10%)
+    ck = Counter()
+    calls = eng2.run_stream(variant(thin, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:CE", ck)
+    assert calls == [] and ck["NO_SIGNAL:MARKET_UNKNOWN"] >= 3
+    eng.set_expiry_floor(date(2025, 3, 1))
+    known = eng.run_stream(variant(cfg, baseline_rules=("market_block",)), "RELIANCE", sessions, "baseline:CE", Counter())
+    assert known                                                     # breadth known: call spreads are not blocked
 
 
 def test_ACCEPTANCE_support_is_a_confirmed_pivot_used_only_after_its_five_later_sessions():

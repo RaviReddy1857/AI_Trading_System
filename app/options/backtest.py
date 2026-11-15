@@ -103,6 +103,8 @@ EXIT_CHECK_LABEL = {
                 "synchronized bar's open; a campaign with a session lacking such a bar is data-incomplete and left out",
 }
 OPEN_AT_CUTOFF = "OPEN_AT_CUTOFF"
+# phase 9 strategies sized in whole lots by max_risk_per_position_pct: re-sized at the actual entry fill
+RISK_SIZED_STRATEGIES = ("stock_option_selling", "reversal_put_spread", "reversal_bull_call_spread")
 
 
 def option_stats(trades: list, capital: float, min_trades: int) -> dict:
@@ -113,26 +115,73 @@ def option_stats(trades: list, capital: float, min_trades: int) -> dict:
     closed = [t for t in trades if t.exit_reason != OPEN_AT_CUTOFF]
     still = [t for t in trades if t.exit_reason == OPEN_AT_CUTOFF]
     s = stats(closed, capital, min_trades)
+    mtm = mtm_equity(trades)              # drawdown of the daily mark-to-market portfolio equity
+    s["equity_basis"] = {"drawdown": "daily mark-to-market portfolio equity (closed trades plus open positions "
+                                     "marked at each session's close after estimated closing charges)",
+                         "sessions": mtm["sessions"], "stale_position_days": mtm["stale_position_days"]}
     if not still:
-        s.update({"net_incl_open_inr": s["net_pnl_inr"], "max_drawdown_incl_open_inr": s["max_drawdown_inr"],
+        s.update({"net_incl_open_inr": s["net_pnl_inr"], "max_drawdown_incl_open_inr": mtm["max_drawdown_inr"],
                   "open_at_cutoff": {"positions": 0}})
         return s
     eq = stats(trades, capital, min_trades)
-    s.update({"net_incl_open_inr": eq["net_pnl_inr"], "max_drawdown_incl_open_inr": eq["max_drawdown_inr"],
+    s.update({"net_incl_open_inr": eq["net_pnl_inr"], "max_drawdown_incl_open_inr": mtm["max_drawdown_inr"],
               "open_at_cutoff": {
                   "positions": len(still),
                   "unrealised_inr": round(sum(t.net_pnl for t in still), 2),
                   "estimated_liquidation_costs_inr": round(sum(t.liquidation_costs_inr or 0.0 for t in still), 2),
-                  "mark_time": max(t.exit_time for t in still),
-                  "age_days": sorted((datetime.fromisoformat(t.exit_time) - datetime.fromisoformat(t.entry_time)).days
-                                     for t in still),
+                  "mark_time": max(t.mark_time or t.exit_time for t in still),
+                  # how old the price behind each mark is at the end of the cutoff session (minutes) ...
+                  "mark_age_minutes": sorted(mark_age_minutes(t) for t in still),
+                  # ... kept apart from how long each position had been held at the cutoff (days)
+                  "holding_days": sorted((datetime.fromisoformat(t.mark_time or t.exit_time)
+                                          - datetime.fromisoformat(t.entry_time)).days for t in still),
                   "note": "marked at the last tested close after estimated liquidation costs; excluded from the trade "
                           "count, win rate and profit factor; included in the equity and drawdown figures"}})
     return s
 
 
+def mark_age_minutes(t) -> int:
+    """Minutes between the price an open-at-cutoff mark uses and the end (15:30 IST) of that session."""
+    at = datetime.fromisoformat(t.mark_time or t.exit_time).astimezone(IST)
+    end = datetime.combine(at.date(), time(15, 30), IST)
+    return max(0, int((end - at).total_seconds() // 60))
+
+
+def mtm_equity(trades: list) -> dict:
+    """The portfolio's daily mark-to-market equity: on each session, the net P&L of every trade closed by
+    then plus every open position's mark at that session's close (its last mark when that day has none:
+    counted as stale). Drawdown = the largest fall from a running peak (starting at 0) of this series."""
+    exits, marks, entries = {}, [], []
+    for t in trades:
+        x = datetime.fromisoformat(t.exit_time).astimezone(IST).date()
+        exits.setdefault(x, []).append(t.net_pnl)
+        m = sorted((date.fromisoformat(a), v) for a, v in (t.marks or []))
+        marks.append((datetime.fromisoformat(t.entry_time).astimezone(IST).date(), x, m))
+    days = sorted(set(exits) | {a for _, _, m in marks for a, _ in m})
+    equity = peak = dd = 0.0
+    realised, stale, series = 0.0, 0, []
+    for day in days:
+        realised += sum(exits.get(day, ()))
+        open_value = 0.0
+        for start, end, m in marks:
+            if not (start <= day < end):
+                continue
+            k = bisect.bisect_right([a for a, _ in m], day)
+            if k == 0:
+                stale += 1                                   # no mark yet for an open position
+                continue
+            if m[k - 1][0] != day:
+                stale += 1
+            open_value += m[k - 1][1]
+        equity = realised + open_value
+        peak = max(peak, equity)
+        dd = max(dd, peak - equity)
+        series.append((day, round(equity, 2)))
+    return {"max_drawdown_inr": round(dd, 2), "sessions": len(series), "stale_position_days": stale}
+
+
 DATA_INCOMPLETE_KEYS = ("DATA_INCOMPLETE_CAMPAIGNS", "DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED",
-                        "DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION")
+                        "DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION", "DATA_INCOMPLETE:MISSING_LEG_BAR")
 ELIGIBILITY_NOTE = ("Backtest results exclude the margin and bid/ask eligibility checks: past margins are not known and "
                     "option history has traded prices only (no bid/ask). A live signal still needs a current margin "
                     "entry and a bid and an ask within the width limit on every traded strike.")
@@ -173,6 +222,9 @@ class OptionTrade:
     liquidation_costs_inr: float | None = None
     exit_check: str = "daily"     # daily | intraday: how target and stop were checked for this trade
     exit_basis: str = ""          # what decided this exit: 5-minute bar | daily close | rule at the close
+    # daily mark-to-market while open: [session, net P&L if closed at that session's leg closes, after all charges]
+    marks: list = field(default_factory=list)
+    mark_time: str | None = None  # OPEN_AT_CUTOFF only: time of the prices the mark uses
 
 
 def synchronized_bars(leg_bars: list[list]) -> list[tuple[datetime, list]]:
@@ -274,6 +326,9 @@ class _Position:
     pending_roll: Signal | None = None   # the spread to open when this one is closed (exit policies with rolls)
     last_bar: datetime | None = None     # synchronized execution: start of the bar this position was opened on
     roll_refused: str = ""
+    entry_bar: datetime | None = None    # synchronized execution: the actual first synchronized entry bar (its start)
+    max_loss_inr: float | None = None    # recomputed from the actual entry fills (None: the signal's estimate)
+    marks: list = field(default_factory=list)   # [(session, mark-to-market net P&L at its close)] while open
 
 
 class OptionEngine:
@@ -401,7 +456,10 @@ class OptionEngine:
             sector = next((x.sector for x in self.s.watchlist if x.symbol == sym), None)
             peers = [x.symbol for x in self.s.watchlist if x.kind == "stock" and x.symbol != sym and sector and x.sector == sector]
             floor = self.s.backtest.test_start.get("1day")
-            self._score_in[key] = {"iv_window": tuple(window), "stock_ret_pct": ret(sym),
+            from .score import history_fall_pct
+            fall = history_fall_pct(self.base.daily(sym), d, floor, self.base.breaks(sym), sos.score) \
+                if self.kinds.get(sym) == "stock" else {"PE": None, "CE": None}
+            self._score_in[key] = {"hist_fall_pct": fall, "iv_window": tuple(window), "stock_ret_pct": ret(sym),
                                    "index_ret_pct": ret(self.s.regime.index_symbol),
                                    "peer_rets_pct": tuple(r for r in (ret(x) for x in peers) if r is not None),
                                    "stats_floor": daily_start(floor) if floor else None}
@@ -498,7 +556,32 @@ class OptionEngine:
             skipped["NO_OPTION_BAR_AT_ENTRY"] += 1
             return None
         fills = self._try_fill(sig, [b.open for b in bars], skipped)
-        return None if fills is None else _Position(sig, list(sig.legs), fills, d, i, variant)
+        return None if fills is None else self._sized(_Position(sig, list(sig.legs), fills, d, i, variant), skipped)
+
+    def _sized(self, pos: _Position, skipped: Counter) -> _Position | None:
+        """Phase 9 (signals sized by the risk budget): after the actual slipped entry fills, recompute the
+        cost-inclusive maximum loss; above max_risk_per_position_pct of capital the position is cut in
+        whole lots, and with zero lots left it is not entered (ZERO_SIZE). Never more lots than signalled.
+        The recomputed maximum loss is what the position and the portfolio book carry."""
+        sig = pos.sig
+        if sig.strategy_id not in RISK_SIZED_STRATEGIES or len(pos.legs) != 2:
+            return pos
+        from .payoff import OptionLeg
+        from .sizing import ZERO_SIZE, size_spread
+        lots = pos.legs[0].lots
+        one = [OptionLeg(leg.action, leg.right, leg.strike, leg.expiry, 1, float(f), leg.lot_size)
+               for leg, f in zip(pos.legs, pos.fills)]
+        kind = "credit" if sig.direction == "SPREAD" else "debit"
+        budget = self.s.account.capital_inr * self.s.stock_option_selling.max_risk_per_position_pct / 100.0
+        n, legs_n, pay = size_spread(kind, one, pos.legs[0].lot_size, self.costs, budget, max_lots=lots)
+        if n == 0:
+            skipped[ZERO_SIZE + "_AT_FILL"] += 1
+            return None
+        if n < lots:
+            skipped["RESIZED_AT_FILL"] += 1
+            pos.legs = [replace(leg, lots=n) for leg in pos.legs]
+        pos.max_loss_inr = float(pay.max_loss_inr)
+        return pos
 
     def _enter_sync(self, sig: Signal, sym: str, d: date, i: int, variant: str, skipped: Counter) -> _Position | None:
         """Synchronized execution: enter at the open of the session's FIRST 5-minute bar in which every
@@ -521,8 +604,8 @@ class OptionEngine:
         if fills is None:
             return None
         pos = _Position(sig, list(sig.legs), fills, d, i, variant)
-        pos.last_bar = start
-        return pos
+        pos.last_bar = pos.entry_bar = start
+        return self._sized(pos, skipped)
 
     def _try_fill(self, sig: Signal, opens: list[float], skipped: Counter) -> list[Decimal] | None:
         """Entry fills (after slippage) at the given opening prices, or None when the price has already
@@ -583,15 +666,29 @@ class OptionEngine:
             structure=sig.details["structure"], expiry=pos.legs[0].expiry.isoformat(), legs=legs_out,
             lot_size=pos.legs[0].lot_size, lots=pos.legs[0].lots, signal_id=sig.signal_id,
             signal_time=sig.created_at.isoformat(), regime=sig.regime,
-            entry_time=daily_start(pos.entry_d).isoformat(), entry_net=float(entry_net),
+            entry_time=(pos.entry_bar or daily_start(pos.entry_d)).isoformat(), entry_net=float(entry_net),
             exit_time=t_exit.isoformat(), exit_net=float(exit_net), exit_reason=reason,
             gross_pnl=float(gross), costs=total.as_dict(), net_pnl=float(gross - total.total),
-            price_source=self.prices.label, max_loss_inr=sig.details.get("max_loss_inr"),
+            price_source=self.prices.label,
+            max_loss_inr=pos.max_loss_inr if pos.max_loss_inr is not None else sig.details.get("max_loss_inr"),
+            marks=[[d0.isoformat(), v] for d0, v in pos.marks],
+            mark_time=(exit_dt or datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)).isoformat()
+            if reason == OPEN_AT_CUTOFF else None,
             iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
             entry_conditions=dict(sig.details.get("entry_conditions") or {}),
             campaign_id=pos.campaign_id or sig.signal_id, roll_no=pos.roll_no,
             max_profit_inr=sig.details.get("max_profit_inr"), exit_check=exit_check, exit_basis=basis,
             liquidation_costs_inr=liq)
+
+    def _mark(self, pos: _Position, sym: str, d: date, strategy: OptionStrategy) -> None:
+        """The open position's net P&L if it were closed at the legs' daily closes of d (exit slippage and
+        every charge included), for the daily mark-to-market equity. No daily bar for a leg: no mark that
+        day (the equity then carries the last one and counts it as stale; nothing is invented)."""
+        bars = self._leg_bars(sym, pos.legs, d)
+        if bars is None:
+            return
+        t = self._close(pos, sym, d, [b.close for b in bars], False, "MARK", strategy)
+        pos.marks.append((d, round(t.net_pnl, 2)))
 
     def _exit_days(self, strategy: OptionStrategy, sym: str) -> int:
         p = strategy.params
@@ -612,6 +709,21 @@ class OptionEngine:
             per.append(bars)
         return synchronized_bars(per)
 
+    def _leg_gaps(self, sym: str, legs, d: date) -> list[datetime]:
+        """Bar starts of session d at which SOME leg traded but not every leg: the spread's value at
+        that moment is not known. Empty when the bars are not stored (that case is _sync_bars' None)."""
+        if self.intraday is None:
+            return []
+        starts = []
+        for leg in legs:
+            bars = self.intraday.session(sym, leg.expiry, leg.strike, leg.right, d)
+            if bars is None:
+                return []
+            starts.append({b.start for b in bars})
+        if not starts:
+            return []
+        return sorted(set.union(*starts) - set.intersection(*starts))
+
     def _sync_exit(self, pos: _Position, sym: str, d: date, i: int, sync: list, k: int, reason: str,
                    strategy: OptionStrategy):
         """Close at the open of synchronized bar k. With a roll pending, the old spread is closed and the
@@ -627,8 +739,10 @@ class OptionEngine:
                     continue
                 fills = self._try_fill(new, [x.open for x in b4[len(pos.legs):]], Counter())
                 if fills is not None:
-                    rolled = _Position(new, list(new.legs), fills, d, i, pos.variant)
-                    rolled.last_bar, start, bars = s4, s4, b4[:len(pos.legs)]
+                    rolled = self._sized(_Position(new, list(new.legs), fills, d, i, pos.variant), Counter())
+                    if rolled is not None:            # re-sized at its actual fill; zero lots: no roll
+                        rolled.last_bar = rolled.entry_bar = s4
+                        start, bars = s4, b4[:len(pos.legs)]
                 break
         done = self._close(pos, sym, d, [b.open for b in bars], False, "ROLLED" if rolled is not None else reason,
                            strategy, "intraday", pos.pending_basis, exit_dt=start)
@@ -692,11 +806,37 @@ class OptionEngine:
         if sync is None:
             skipped["DATA_INCOMPLETE:5_MINUTE_BARS_NOT_STORED"] += 1
             return ("incomplete",)
+        gaps = self._leg_gaps(sym, pos.legs, d)
         opened_here = pos.entry_d == d and pos.last_bar is not None
         if opened_here:
-            sync = [x for x in sync if x[0] > pos.last_bar]
-        if not sync and not opened_here:
-            skipped["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] += 1
+            # the entry bar's own close is judged too (filled at its open); only earlier bars are left out
+            sync = [x for x in sync if x[0] >= pos.last_bar]
+            gaps = [g for g in gaps if g > pos.last_bar]
+        signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
+        policy = getattr(strategy, "exit_policy", "stop")
+        never_stop = policy == "roll_always"
+        missing_leg = False
+        if sync and gaps:
+            # A leg without a bar while the position is open: the spread's value at that moment is unknown.
+            # What the bars BEFORE the first such moment decide still stands (an exit filled before it);
+            # otherwise the campaign is data-incomplete (review fix, 2026-11-15).
+            usable = [x for x in sync if x[0] < gaps[0]]
+            if pos.pending_exit and usable:
+                return self._sync_exit(pos, sym, d, i, usable, 0, pos.pending_exit, strategy)
+            hit = None if pos.pending_exit else sync_decision(usable, signs, sig.target, sig.stop, use_stop=not never_stop)
+            if hit is not None and hit[1] + 1 < len(usable):
+                reason, k, cost = hit
+                pos.pending_exit, pos.pending_basis = reason, "synchronized 5-minute bar"
+                if reason == "STOP" and policy == "roll_rules":
+                    self._sync_roll_decision(pos, sym, d, usable[k][0], usable[k][1], cost, strategy, ctx_prev)
+                return self._sync_exit(pos, sym, d, i, usable, k + 1, reason, strategy)
+            skipped["DATA_INCOMPLETE:MISSING_LEG_BAR"] += 1
+            if not self.sync_missing_at_daily_close:
+                return ("incomplete",)
+            missing_leg = True                               # sensitivity run: judged at the daily closes below
+        if (not sync and not opened_here) or missing_leg:
+            if not missing_leg:
+                skipped["DATA_INCOMPLETE:NO_SYNCHRONIZED_BAR_IN_SESSION"] += 1
             if not self.sync_missing_at_daily_close:
                 return ("incomplete",)
             # sensitivity run: the session is judged at the legs' daily closes; an exit decided there is still
@@ -714,9 +854,6 @@ class OptionEngine:
             elif (expiry - nxt).days <= self._exit_days(strategy, sym):
                 pos.pending_exit, pos.pending_basis = "TIME", "rule at the close"
             return ("hold",)
-        signs = [1 if leg.action == "SELL" else -1 for leg in pos.legs]
-        policy = getattr(strategy, "exit_policy", "stop")
-        never_stop = policy == "roll_always"
         if pos.pending_exit and sync:                      # decided earlier: the first synchronized bar's open
             return self._sync_exit(pos, sym, d, i, sync, 0, pos.pending_exit, strategy)
         hit = sync_decision(sync, signs, sig.target, sig.stop, use_stop=not never_stop)
@@ -907,6 +1044,8 @@ class OptionEngine:
         (a new entry is refused before it is taken; a roll's replacement likewise). `record` / `replay`:
         per stream key, as in run_stream."""
         import heapq
+        if getattr(gate, "universe", ()) is None:          # the correlated groups: built over every tested stock
+            gate.universe = sorted({s for s, _ in streams})
         self._gate, self._book = gate, {}
         gens, out = {}, []
         try:
@@ -935,11 +1074,11 @@ class OptionEngine:
         """The positions open or pending in every stream (portfolio.Holding), each on its own."""
         from .portfolio import Holding
         out = []
-        for key, sigs in (self._book or {}).items():
-            for s in sigs:
+        for key, rows in (self._book or {}).items():
+            for s, risk in rows:
                 if exclude_sig is not None and s is exclude_sig:
                     continue
-                out.append(Holding(s.symbol, float(s.details.get("max_loss_inr") or 0.0)))
+                out.append(Holding(s.symbol, risk))
         return out
 
     def iter_stream(self, strategy: OptionStrategy, sym: str, sessions: list[date], variant: str,
@@ -988,10 +1127,15 @@ class OptionEngine:
             log_rows.append(row)
             return row
 
+        def est(s: Signal) -> float:
+            return float(s.details.get("max_loss_inr") or 0.0)
+
         def publish() -> None:
+            # open positions carry their maximum loss recomputed at the actual fill; pending ones the estimate
             if self._book is not None:
-                self._book[key] = [p.sig for p in positions] + [p.pending_roll for p in positions if p.pending_roll] \
-                    + [s for s, _ in pending]
+                self._book[key] = [(p.sig, p.max_loss_inr if p.max_loss_inr is not None else est(p.sig)) for p in positions] \
+                    + [(p.pending_roll, est(p.pending_roll)) for p in positions if p.pending_roll] \
+                    + [(s, est(s)) for s, _ in pending]
 
         for i, bar in enumerate(bars):
             d = bar_date(bar)
@@ -1080,6 +1224,9 @@ class OptionEngine:
                 elif r[0] == "incomplete":
                     incomplete.add(pos.campaign_id or pos.sig.signal_id)
             positions = keep
+            for pos in positions:                                 # daily mark-to-market of what stays open
+                self._mark(pos, sym, d, strategy)
+            publish()                                             # today's fills and exits, before any later decision
             if d not in allowed or d >= last_allowed:
                 continue
             if replay is not None:                               # the same entries as a recorded run

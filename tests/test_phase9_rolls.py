@@ -389,6 +389,10 @@ def test_synchronized_roll_every_month_fills_all_four_legs_in_one_bar_or_just_ex
     cfg, eng, dev = setup_policy(slide_world)
     always = policy_runs(cfg, eng, "RELIANCE", dev, "intraday")["baseline"]["roll_always"]
     assert always and all(t.exit_reason not in ("STOP", "STRIKE_BREACHED") for t in always)
+    # review fix 2026-11-15: the test means nothing unless a synchronized roll actually happened
+    rolled = [t for t in always if t.exit_reason == "ROLLED"]
+    assert rolled, "no synchronized roll occurred: the checks below would pass vacuously"
+    assert all(any(x.campaign_id == t.campaign_id and x.roll_no == t.roll_no + 1 for x in always) for t in rolled)
     for t in always:
         assert ist_date(t.exit_time) <= date.fromisoformat(t.expiry)                 # never held past expiry
         if t.exit_reason == "ROLLED":

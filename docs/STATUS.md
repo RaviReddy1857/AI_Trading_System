@@ -1307,6 +1307,50 @@ the user on 2026-11-15 before this commit.
   data-incomplete, the sensitivity run is reported too; the decision uses the main run.
 - Adopting the preferred variant as the strategy is a change of the specification and needs the user's approval.
 
+## Phase 9 review fixes (Codex re-review of 782e870), 2026-11-15
+
+Correctness fixes, not tuning: no variant definition (pre-registration 6fa73df) and no default changed; variants A-D will
+be evaluated on this engine. Each fix has a test that fails on the old engine and passes now (checked by running the new
+and corrected tests against the stashed old `app/`). Whole suite: **567 passing**. M3 and Phase 5 not started.
+
+| # | Fix | Code | Test |
+|---|---|---|---|
+| 1 | A leg without a 5-minute bar while the position is open (other legs trading at that moment) makes the campaign data-incomplete; an exit decided and filled on bars before that moment still stands (`DATA_INCOMPLETE:MISSING_LEG_BAR`; the sensitivity run judges such a session at the daily closes) | `OptionEngine._leg_gaps`, `_manage_sync` | corrected `test_ACCEPTANCE_synchronized_stop_is_decided_on_a_bar_close...` |
+| 2 | The entry bar's own close is checked (was: only later bars); a stop there exits at the next synchronized open; the same for a roll's replacement | `_manage_sync` | `test_ACCEPTANCE_a_stop_on_the_entry_bars_close_exits_at_the_next_synchronized_open` |
+| 3 | After the actual slipped entry fill the cost-inclusive max loss is recomputed; above the 2.5% budget the lots are cut (whole lots), zero lots = not entered (`ZERO_SIZE_AT_FILL`); the trade and the portfolio book carry the recomputed max loss (pending signals: the estimate); rolls too | `OptionEngine._sized`, `publish`, `book_holdings` | `test_ACCEPTANCE_max_loss_is_recomputed_from_the_slipped_fill...`, `test_the_portfolio_book_carries_the_recomputed_max_loss...` |
+| 4 | PORTFOLIO_UNKNOWN also when the closed and manual-trade history is not verified (`history_verified`); a backtest's simulated history is verified; live it stays unknown until the phase 6 journal | `portfolio_check`, `PortfolioGate.history_verified`, `actionable_check` | `test_ACCEPTANCE_portfolio_unknown_without_verified_closed_and_manual_history`, actionable test |
+| 5 | Correlated groups are connected components of the whole universe (backtest: every tested stock; live: the watchlist stocks), the same groups as displayed; an unknown sector or link counts only where it could change a group holding positions | `portfolio_check(universe=)`, `_components`, `run_portfolio` | `test_ACCEPTANCE_groups_are_components_of_the_whole_universe...` |
+| 6 | MARKET_UNKNOWN blocks put and call spreads; MARKET_WEAK stays put-only | `StockOptionSelling.assess` | market tests in `test_phase9_rules.py` (the backtest test used to assert calls passed) |
+| 7 | Closing charges on each closing leg's own premium (buy back the sold leg, sell the bought leg), never on the net spread value; unknown leg price = unknown charges | `closing_charges`, `roll_choices`, `exit_calls(costs=, leg_px=)` | `test_ACCEPTANCE_closing_charges_are_on_each_legs_premium...` |
+| 8 | Entry time = the actual first synchronized entry bar, for entries and roll replacements | `_Position.entry_bar`, `_close` | `test_ACCEPTANCE_entry_time_is_the_first_synchronized_bar_actually_used` |
+| 9 | Drawdown (`max_drawdown_incl_open_inr`, the pre-registered measure) from a daily mark-to-market portfolio equity series (every open position marked at each session's leg closes after exit slippage and charges; a missing mark carries the last one and is counted as stale); open at the cutoff: `mark_age_minutes` apart from `holding_days` | `OptionEngine._mark`, `mtm_equity`, `option_stats` | `test_ACCEPTANCE_drawdown_is_from_the_daily_mark_to_market_equity`, `..._mark_age_apart_from_holding_days` |
+| 10 | The 90th-percentile fall reads every daily close since 2019-01-22 up to the decision day (was: the last 1,300 bars), windows across a price break left out; backtest and live shortlist alike | `score.history_fall_pct`, `score_inputs`, `score_inputs_from_store` | `test_ACCEPTANCE_fall_percentile_uses_all_daily_history...` |
+| 11 | The synchronized-roll test first asserts that a roll occurred | `tests/test_phase9_rolls.py` | the test itself |
+
+Why the test of item 1 was changed: it asserted that a 10:00 bar of the sold leg alone changed nothing. That treated
+a moment at which the spread had no price as harmless; the stop could have been reached then. Unknown is never a pass,
+so the campaign is now left out of the primary results and counted.
+
+### Rerun on stored data after the fixes (same runs as before; low sample; nothing tuned)
+| Run | Execution | Strategy before -> after | Baseline before -> after |
+|---|---|---|---|
+| 16 stocks, 2025-01..2026-06 | synchronized | 19 trades -16,085 -> **17 trades -19,050** (PF 0.39) | 91 trades +2,382 -> **73 trades -11,283** (PF 0.82) |
+| same | daily | 19 trades -20,933 -> 19 trades -20,933 | 88 trades -16,107 -> 88 trades -13,152 |
+| 30 stocks, 2026-01..2026-06 | synchronized | 12 trades -7,779 -> **11 trades -9,145** (PF 0.45) | 50 trades -15,951 -> **50 trades -13,350** (PF 0.74) |
+| same | daily | 12 trades -14,309 -> 12 trades -14,309 | 41 trades -79,291 -> 41 trades -76,118 |
+
+- What changed most: item 1. Data-incomplete campaigns: 16 stocks strategy 0 -> 2 of 21 (9.5%), baseline 1 -> 19 of 92
+  (20.7%; under 30%, no sensitivity run); 30 stocks strategy 0 -> 1 of 14, baseline 0. The baseline's synchronized
+  result went from +2,382 to -11,283 because the 18 campaigns now left out had been priced across moments without a
+  price for a leg. Item 3 cut lots at the fill in the baseline (RESIZED_AT_FILL 1 in each synchronized run). The daily
+  baselines changed with the same trade counts (-16,107 -> -13,152; -79,291 -> -76,118); lots cut at the fill (item 3)
+  are the likely cause, not checked trade by trade.
+- Verdicts unchanged: no edge versus the baseline (low sample).
+- CORRELATED_LIMIT: still no strategy entry refused (22 and 16 checks). Baseline with the portfolio limits: 40 blocked
+  (16 stocks; 43 trades -1,508) and 30 (30 stocks; 21 trades +3,361). Groups unchanged: 12, 2, 1, 1 and 19, 3, 3, 1, 1, 1, 1, 1.
+- Strategy without the market block: 16 stocks 19 trades -25,189; 30 stocks 14 trades +260.
+- Reports: `data/diagnostics/stock_report_2026-11-15_review_fixes_fix_2025_2026.txt`, `..._fix_2026.txt`.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |

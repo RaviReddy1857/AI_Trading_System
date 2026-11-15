@@ -245,7 +245,12 @@ def score_inputs_from_store(settings: Settings, store: Store, source: str, sym: 
     sector = next((x.sector for x in settings.watchlist if x.symbol == sym), None)
     peers = [x.symbol for x in settings.watchlist if x.kind == "stock" and x.symbol != sym and sector and x.sector == sector]
     floor = settings.backtest.test_start.get("1day")
-    return {"iv_window": tuple(window), "stock_ret_pct": ret(sym), "index_ret_pct": ret(settings.regime.index_symbol),
+    from .score import history_fall_pct
+    every = store.history_bars("bars_1d", sym, source)          # all of it: the fall percentile reads every window since the floor
+    fall = history_fall_pct(every, session, floor, gap_breaks([b.open for b in every], [b.close for b in every],
+                                                              settings.history.max_overnight_gap_pct), sos.score)
+    return {"hist_fall_pct": fall, "iv_window": tuple(window), "stock_ret_pct": ret(sym),
+            "index_ret_pct": ret(settings.regime.index_symbol),
             "peer_rets_pct": tuple(r for r in (ret(x) for x in peers) if r is not None),
             "stats_floor": daily_start(floor) if floor else None}
 

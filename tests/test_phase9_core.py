@@ -977,8 +977,11 @@ def test_stock_backtest_is_deterministic(world):
 
 def test_ACCEPTANCE_synchronized_stop_is_decided_on_a_bar_close_and_filled_at_the_next_synchronized_open():
     """A stop touched at 10:00 on one day and gone again by the close. With only the sold leg trading at
-    10:00 there is no synchronized bar and nothing happens; once both legs trade at 10:00 and 10:05
-    the stop is decided at the 10:00 close and filled at the 10:05 open. The daily check never sees it."""
+    10:00 the spread's value at 10:00 is unknown while the position is open, so the campaign is
+    data-incomplete and left out of the primary results (review fix 2026-11-15: this test used to assert
+    that nothing changed, which treated an unpriced moment as harmless). Once both legs trade at 10:00
+    and 10:05 the stop is decided at the 10:00 close and filled at the 10:05 open. The daily check never
+    sees it."""
     w = stock_world()
     cfg, store, _, _ = w
     before = run_bt(w)
@@ -999,7 +1002,10 @@ def test_ACCEPTANCE_synchronized_stop_is_decided_on_a_bar_close_and_filled_at_th
     assert datetime.fromisoformat(first["entry_time"]).astimezone(IST).time() == time(9, 15)      # the first synchronized bar
     add(sell["strike"], [(10, 0, stop + 1.0), (10, 5, stop + 1.5)])       # the sold leg alone: not a synchronized bar
     mid = run_bt(w)
-    assert same(mid, "intraday") == first
+    assert not [t for t in mid["trades"] if t["exit_check"] == "intraday" and t["signal_id"] == pick["signal_id"]]
+    inc = mid["report"]["exit_check_comparison"]["intraday"]["data_incomplete"]["baseline"]
+    assert inc["DATA_INCOMPLETE:MISSING_LEG_BAR"] >= 1 and inc["DATA_INCOMPLETE_CAMPAIGNS"] >= 1
+    assert same(mid, "daily") == same(before, "daily")                              # the daily run is untouched
     add(buy["strike"], [(10, 0, 1.0), (10, 5, 1.1)])                      # now both legs trade in those bars
     after = run_bt(w)
     hit, daily = same(after, "intraday"), same(after, "daily")

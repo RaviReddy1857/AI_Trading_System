@@ -24,7 +24,7 @@ Entry rules (StockOptionSelling.assess; every number is computed here, none by a
   (DOWNTREND_BLOCK); mirrored for call selling in a strong uptrend (UPTREND_BLOCK).
 - market block (`market_block`): no put selling when NIFTY is below its 200-day average or fewer than 40% of
   the watchlist stocks are above their 50-session average (MARKET_WEAK); unknown market data blocks too
-  (MARKET_UNKNOWN). Call selling is not blocked by a weak market.
+  (MARKET_UNKNOWN), for put and call selling alike. Call selling is not blocked by a weak market.
 - per-stock campaign limit (`campaign_limit`): after 2 stopped trades or a set net loss in one stock
   within 90 days, no new signal in it for the cooling-off period (STOCK_LOSS_LIMIT). The context's
   `closed_trades` carries signals and manual positions alike.
@@ -64,7 +64,7 @@ from .campaign import after_roll
 from .score import candidate_score
 from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (DOWNTREND_BLOCK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, MARKET_UNKNOWN, MARKET_WEAK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -318,11 +318,12 @@ class StockOptionSelling(CreditSpread):
         if self.below_base_low and not ctx.no_filter and below is None:
             self.no("NO_REVERSAL", "no confirmed reversal with a base low for this stock")
             return stop()
-        if right == "PE" and self.applies("market_block", ctx):
-            # put selling is the side a weak market hurts; unknown market state blocks as well
+        if self.applies("market_block", ctx):
+            # MARKET_WEAK: put selling only (the side a weak market hurts). MARKET_UNKNOWN: both sides -
+            # an unknown market state is never read as "not weak" (review fix, 2026-11-15)
             code, why_mkt = market_weak(ctx.index_daily, ctx.market.get("breadth_pct"), p.market_block,
                                         p.sma_long, p.sma_mid)
-            if code:
+            if code == MARKET_UNKNOWN or (code == MARKET_WEAK and right == "PE"):
                 self.no(code, "; ".join(why_mkt))
                 return stop()
         if self.applies("campaign_limit", ctx):
@@ -528,17 +529,23 @@ def strike_breached(right: str, short_strike: float, stock_close: float) -> bool
 
 
 def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, close_cost: float | None,
-               stock_close: float | None, trend: str | None) -> list[dict]:
+               stock_close: float | None, trend: str | None, costs=None,
+               leg_px: tuple[float | None, float | None] | None = None) -> list[dict]:
     """Every exit or adjustment call that applies to an open spread right now, most urgent first.
     `close_cost` = cost per share to buy the spread back (sold leg's price minus bought leg's price);
-    None = unknown, which is itself reported, never treated as "no exit". The caller repeats the calls
-    until the position is closed (phase 6)."""
+    None = unknown, which is itself reported, never treated as "no exit". With `costs` and `leg_px`
+    (the sold and bought legs' premiums) a stop or target also shows the closing charges, each leg on
+    its own premium, and the P&L after them. The caller repeats the calls until the position is closed
+    (phase 6)."""
     out = []
     target, stop = exit_levels(pos.credit, p)
     days = (pos.expiry - today).days
+    charges = closing_charges(costs, pos, *leg_px) if costs is not None and leg_px is not None else None
 
-    def pnl(cost: float) -> float:
-        return round((pos.credit - cost) * pos.shares, 2)
+    def pnl(cost: float) -> dict:
+        before = round((pos.credit - cost) * pos.shares, 2)
+        return {"pnl_before_costs_inr": before, "closing_charges_inr": None if charges is None else round(charges, 2),
+                "pnl_after_closing_charges_inr": None if charges is None else round(before - charges, 2)}
 
     left = trading_days_to(today, pos.expiry)
     if left <= p.forced_exit_trading_days_before_expiry:
@@ -556,12 +563,12 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
             out.append({"kind": "STOP", "action": "Exit: stop reached",
                         "reason": f"cost to close {fmt(close_cost)} is at or above {fmt(stop)} "
                                   f"({p.stop_spread_value_multiple:g}x the credit {fmt(pos.credit)})",
-                        "pnl_before_costs_inr": pnl(close_cost)})
+                        **pnl(close_cost)})
         elif close_cost <= target:
             out.append({"kind": "TARGET", "action": "Exit: profit target reached",
                         "reason": f"cost to close {fmt(close_cost)} is at or below {fmt(target)} "
                                   f"({p.profit_target_pct_of_credit:g}% of the credit {fmt(pos.credit)} kept)",
-                        "pnl_before_costs_inr": pnl(close_cost)})
+                        **pnl(close_cost)})
     if stock_close is not None and strike_breached(pos.right, pos.short_strike, stock_close):
         out.append({"kind": "STRIKE_BREACHED", "action": "Threat: exit or roll",
                     "reason": f"{pos.underlying} closed at {fmt(stock_close)}, beyond the sold strike {pos.short_strike:g}"})
@@ -570,6 +577,25 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
         out.append({"kind": "TREND_FLIP", "action": "Threat: exit or roll",
                     "reason": f"the trend turned {against.lower()}, against this {SIDE_NAME[pos.right]}"})
     return out
+
+
+def closing_charges(costs, pos: SpreadPosition, short_px: float | None, long_px: float | None) -> float | None:
+    """Estimated charges to close the spread, each leg on its own actual premium: buying back the sold
+    leg at `short_px` and selling the bought leg at `long_px` (per share). Never on the net spread
+    value. None when a leg's premium is unknown."""
+    if short_px is None or long_px is None:
+        return None
+    total = CostBreakdown()
+    add_costs(total, costs.options(pos.lots, max(short_px, 0.0) * pos.shares, 0.0))
+    add_costs(total, costs.options(pos.lots, 0.0, max(long_px, 0.0) * pos.shares))
+    return float(total.total)
+
+
+def leg_prices(ctx: OptionContext, pos: SpreadPosition) -> tuple[float | None, float | None]:
+    """(sold leg, bought leg) premiums of the open spread from the context's quotes, None when unknown."""
+    qs = ctx.quotes.quote(pos.expiry, pos.short_strike, pos.right)
+    ql = ctx.quotes.quote(pos.expiry, pos.long_strike, pos.right)
+    return (qs.price(ctx.historical) if qs is not None else None, ql.price(ctx.historical) if ql is not None else None)
 
 
 def roll_money(costs, pos: SpreadPosition, old_short: float, old_long: float, replacement: Signal,
@@ -673,13 +699,17 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
     structure rules alone, with none of the conditions above; it never reaches a live signal."""
     p = strategy.params
     today = today or ctx.asof.astimezone(IST).date()
-    exit_costs = float(round_trip_costs(ctx.costs, [
-        OptionLeg("BUY", pos.right, pos.short_strike, pos.expiry, pos.lots, max(close_cost, 0.05), pos.lot_size)]).total) / 2
-    realised = round((pos.credit - close_cost) * pos.shares - exit_costs, 2)
+    # closing charges on each leg's own premium (buy back the sold leg, sell the bought leg), never on
+    # the net spread value; a leg without a price leaves the charges and the realised figure unknown
+    exit_costs = closing_charges(ctx.costs, pos, *leg_prices(ctx, pos))
+    realised = None if exit_costs is None else round((pos.credit - close_cost) * pos.shares - exit_costs, 2)
     out = {"action": "EXIT",
            "exit": {"cost_to_close_per_share": round(close_cost, 2), "cost_to_close_inr": round(close_cost * pos.shares, 2),
-                    "realised_pnl_inr": realised, "campaign_pnl_inr": round(realised_so_far_inr + realised, 2),
-                    "note": "after estimated closing charges"},
+                    "closing_charges_inr": None if exit_costs is None else round(exit_costs, 2),
+                    "realised_pnl_inr": realised,
+                    "campaign_pnl_inr": None if realised is None else round(realised_so_far_inr + realised, 2),
+                    "note": "after estimated closing charges on each leg's premium" if exit_costs is not None
+                            else "closing charges unknown: a leg has no usable price"},
            "roll": None, "roll_note": "", "roll_signal": None, "refused_by": None}
 
     def exit_only(code: str, why: str) -> dict:
@@ -745,7 +775,8 @@ def roll_choices(strategy: StockOptionSelling, ctx: OptionContext, pos: SpreadPo
         "new_credit_per_share": d["net_credit"], "hedge_cost_inr": d["hedge_cost_inr"],
         **(money or {}),
         "new_max_loss_inr": d["max_loss_inr"], "new_breakevens": d["breakevens"], "margin_inr": d["margin_inr"],
-        "campaign_after_roll": after_roll(realised_so_far_inr, realised, d["max_profit_inr"])}})
+        "campaign_after_roll": (after_roll(realised_so_far_inr, realised, d["max_profit_inr"]) if realised is not None
+                                else None)}})
     return out
 
 

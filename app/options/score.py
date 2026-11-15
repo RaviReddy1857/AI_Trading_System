@@ -26,8 +26,10 @@ the candidate is ranked after every fully scored one. Unknown never becomes zero
 """
 from __future__ import annotations
 
+import bisect
 import math
 import statistics
+from datetime import date
 from collections.abc import Sequence
 
 from ..indicators import percentile
@@ -64,11 +66,19 @@ def rel_strength_points(stock_ret: float | None, index_ret: float | None, peer_r
     return _clamp(50.0 + 5.0 * rel) if right == "PE" else _clamp(50.0 - 5.0 * rel)
 
 
-def fall_percentile(closes: Sequence[float], sessions: int, pct: float, right: str) -> float | None:
+def fall_percentile(closes: Sequence[float], sessions: int, pct: float, right: str,
+                    breaks: Sequence[int] = ()) -> float | None:
     """The `pct` percentile of the stock's `sessions`-session falls (rises for a call spread), in %
-    of the starting price, over every window that ends on or before the last close given."""
+    of the starting price, over every window that ends on or before the last close given. `breaks`:
+    indexes of closes that start a new price series (an unadjusted split or bonus); a window across one
+    is left out."""
+    brk = sorted(set(breaks))
     moves = []
     for i in range(len(closes) - sessions):
+        if brk:
+            k = bisect.bisect_right(brk, i)
+            if k < len(brk) and brk[k] <= i + sessions:
+                continue                                  # the window spans a price break
         a, b = closes[i], closes[i + sessions]
         if a > 0:
             m = (b / a - 1) * 100
@@ -76,6 +86,19 @@ def fall_percentile(closes: Sequence[float], sessions: int, pct: float, right: s
     if len(moves) < 30:
         return None
     return percentile(moves, pct)
+
+
+def history_fall_pct(bars: Sequence, upto: date, floor: date | None, breaks: Sequence[int], cfg) -> dict:
+    """{"PE": .., "CE": ..}: fall_percentile over ALL the stock's daily closes from `floor`
+    (backtest.test_start, 2019-01-22) up to and including `upto`, windows across a price break left
+    out. `bars`: the stock's whole daily history, oldest first; `breaks`: indexes into it."""
+    from ..history import bar_date
+    dates = [bar_date(b) for b in bars]
+    lo = 0 if floor is None else bisect.bisect_left(dates, floor)
+    hi = bisect.bisect_right(dates, upto)
+    closes = [b.close for b in bars[lo:hi]]
+    brk = [k - lo for k in breaks if lo < k < hi]
+    return {r: fall_percentile(closes, cfg.hist_fall_sessions, cfg.hist_fall_percentile, r, brk) for r in ("PE", "CE")}
 
 
 def strike_distance_points(distance_pct: float | None, em_pct: float | None, fall_pct: float | None) -> float | None:
@@ -119,13 +142,16 @@ def candidate_score(ctx, right: str, short_strike: float, oi_lots: float | None,
     distance = abs(ctx.spot - short_strike) / ctx.spot * 100 if ok(ctx.spot) else None
     em = expected_move(ctx.spot, ctx.iv_reference_pct, dte_days)
     em_pct = None if em is None else em / ctx.spot * 100
-    floor_closes = [b.close for b in ctx.daily if m.get("stats_floor") is None or b.start >= m["stats_floor"]]
+    if "hist_fall_pct" in m:            # the whole history since the statistics floor (backtest and live inputs)
+        fall = m["hist_fall_pct"].get(right)
+    else:                               # a bare context: only the bars it carries
+        floor_closes = [b.close for b in ctx.daily if m.get("stats_floor") is None or b.start >= m["stats_floor"]]
+        fall = fall_percentile(floor_closes, cfg.hist_fall_sessions, cfg.hist_fall_percentile, right)
     points = {
         "iv_rank": None if ctx.iv_rank is None else _clamp(ctx.iv_rank),
         "iv_falling": iv_falling_points(ctx.iv_reference_pct, m.get("iv_window") or (), cfg.iv_falling_ratio),
         "rel_strength": rel_strength_points(m.get("stock_ret_pct"), m.get("index_ret_pct"), m.get("peer_rets_pct") or (), right),
-        "strike_distance": strike_distance_points(distance, em_pct,
-                                                  fall_percentile(floor_closes, cfg.hist_fall_sessions, cfg.hist_fall_percentile, right)),
+        "strike_distance": strike_distance_points(distance, em_pct, fall),
         "range_profile": range_profile_points(
             breach_frequency(closes[-504:], distance, right, sos.profile.holding_sessions)["breached_pct"]
             if distance is not None else None),

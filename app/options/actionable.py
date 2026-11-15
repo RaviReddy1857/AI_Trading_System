@@ -11,7 +11,8 @@ An actionable signal additionally needs, at the moment it is shown:
 - the open positions known and within the portfolio limits (PORTFOLIO_UNKNOWN, CORRELATED_LIMIT,
   CORRELATION_UNKNOWN);
 - and every other hard block passing at that moment (the strategy's own evaluation of the live context).
-Until positions are recorded (phase 6) the portfolio is unknown, so nothing is actionable yet.
+The portfolio is known only with the open positions AND a verified closed and manual-trade history;
+until the phase 6 journal exists it is unknown (PORTFOLIO_UNKNOWN), so nothing is actionable yet.
 """
 from __future__ import annotations
 
@@ -24,10 +25,13 @@ RESEARCH_LABEL = "research candidate"
 
 
 def actionable_check(settings, signal, ctx, now: datetime, chain_as_of: dict, holdings, sectors: dict, corr,
-                     holidays=()) -> tuple[bool, list[str]]:
+                     holidays=(), history_verified: bool = False, universe=None) -> tuple[bool, list[str]]:
     """(actionable, reasons it is not). `signal`: the strategy's signal for `ctx` (None = no complete
     setup). `chain_as_of`: expiry -> time of the stored chain snapshot. `holdings`: the open positions
-    (portfolio.Holding), or None when they are not known. `corr(a, b)`: correlation known now."""
+    (portfolio.Holding), or None when they are not known. `history_verified`: the closed and manual-trade
+    history is verified (live: never before the phase 6 journal exists, so PORTFOLIO_UNKNOWN).
+    `universe`: the stocks the correlated groups are built from (default: the watchlist stocks, the
+    groups the page shows). `corr(a, b)`: correlation known now."""
     why: list[str] = []
     if signal is None:
         return False, ["no complete setup passes the rules"]
@@ -52,8 +56,11 @@ def actionable_check(settings, signal, ctx, now: datetime, chain_as_of: dict, ho
     if (signal.details or {}).get("margin_inr") is None:
         why.append("MARGIN_UNKNOWN: no current margin entry for the complete spread")
     risk = float((signal.details or {}).get("max_loss_inr") or 0.0)
+    if universe is None:
+        universe = [i.symbol for i in settings.watchlist if i.kind == "stock"]
     code, text, _ = portfolio_check(signal.symbol, risk, holdings, sectors, corr,
-                                    settings.stock_option_selling.portfolio, ctx.capital_inr)
+                                    settings.stock_option_selling.portfolio, ctx.capital_inr,
+                                    history_verified=history_verified, universe=universe)
     if code:
         why.append(f"{code}: {text}")
     return not why, why
