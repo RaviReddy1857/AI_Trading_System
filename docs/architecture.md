@@ -298,7 +298,8 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   (from a card, manual or UNHEDGED), escalating alerts from E-7 (NOTICE near the money, WARNING in the money, URGENT from
   E-5 or past an ICICI cut-off, URGENT "price unknown" when spot or expiry is not known; the level never drops while
   open), a delivery and expiry-week margin estimate ("margin unknown" when a rule or the margin base is missing, never
-  zero), and a planned-exit deadline = the earliest of the forced exit (close of E-5) and ICICI's own times, with a red
+  zero; bought legs in the money are allocated once across the position, the most exposed sold legs first, and sold
+  quantity without a bought share is fully deliverable), and a planned-exit deadline = the earliest of the forced exit (close of E-5) and ICICI's own times, with a red
   alert on every evaluation after it until the position is marked closed. Unconfirmed ICICI rules are named "ICICI rule
   not confirmed". Trading days come from the holiday calendar; when it has no row for a year the expiry month touches,
   the count is weekdays less one (one session earlier) and the alert says so. Pure functions: nothing closes or changes
@@ -424,6 +425,10 @@ bar's close and the management of open positions at the session's close, (2) new
 (3) fills at a bar's open. Within one of these, truly simultaneous events of different stocks run in the order the
 stocks are given (most liquid first): that is the only place the order of the stocks matters. A roll decided inside a
 session uses correlations of completed sessions before that day only; a decision at the close may use that day.
+An accepted entry RESERVES its estimated maximum loss in the portfolio book from the acceptance of its signal until it
+fills (the position then carries the maximum loss recomputed at the fill) or is not made (the reservation is
+released), including while it waits for its first synchronized 5-minute bar. Every gate, roll decisions included,
+counts the reservations.
 
 Option backtests are labelled "payoff simulation" unless real historical option quotes are stored, and always show a
 no-filter baseline beside the strategy. Backtests do not test sessions before 2019-01-22 (Breeze history before that is unreliable).

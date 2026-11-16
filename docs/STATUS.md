@@ -17,6 +17,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
+| - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Not started | | |
@@ -1820,6 +1821,22 @@ price" kept as built. Whole suite: **647 passing**.
   does for the page note). holidays.csv has rows for 2026 only, so every expiry from January 2027 on is counted
   conservatively until the 2027 list is added; the page card says so from 70 days before.
 
+## Review fixes (Codex review of 2e3e2c4..42784c7, two HIGH findings), 2026-11-16
+
+No default changed; variants A-D unchanged. Whole suite: **655 passing**. Each new test fails on the code before the fix.
+
+| # | Finding | Fix | Code | Tests |
+|---|---|---|---|---|
+| 1 | HIGH: on synchronized 5-minute bars an accepted entry left the portfolio book at 09:15 of its session and came back only when it filled (its first synchronized bar may be hours later). A roll decided in between was judged without it | An accepted entry RESERVES its estimated maximum loss from the acceptance of its signal until it fills (the position then carries the maximum loss recomputed at the fill) or is not made (released). Every gate reads the book, so new signals and roll decisions count the reservations | `OptionEngine.iter_stream` (`entering`, `publish`) | `tests/test_phase9_reservation.py`: RELIANCE holds a spread, INFY's entry accepted on 1 July fills at 12:00 on 2 July, RELIANCE's roll is decided at 10:05 with the total-risk limit at 18% of capital: refused (`CORRELATED_LIMIT`), in either stock order; controls: allowed with room, and allowed when INFY's entry is not made (released at 09:15); the book holds the estimate until the fill and the recomputed maximum loss after it |
+| 2 | HIGH: the delivery estimate reused the same bought leg for every sold leg, and computed cash from the first bought leg only | Bought legs that would settle in the money are allocated ONCE across the whole position (same underlying, right and expiry): sold legs most exposed first (highest strike for puts, lowest for calls), bought legs deepest in the money first. Shares and cash are computed for every allocated portion (`netted_with`); sold quantity without a bought share is fully deliverable. Bought quantity in the money that nets nothing is listed on its own (`bought_in_the_money_not_netted`) | `settlement.allocate_hedges`, `_delivery` | `tests/test_phase9_settlement.py`, hand calculations in each test: two sold puts and one hedge (100 shares remain deliverable; before: 0); one sold leg and two hedges (200 netted, Rs 2,500 net paid, Rs 17,500 received from both; before: Rs 1,000); an uneven manual position with puts and calls; an unhedged short put and call |
+
+- **Rerun on stored data: no change.** The full Phase 9 report (16 stocks 2025-2026 and 30 stocks 2026, both
+  executions, with baselines, the exit-policy comparison and the score bands) is identical, value for value, to the
+  rerun after the time-ordering fixes. This also covers the forced exit added in the M3 follow-ups, whose baselines and
+  full reports had not been rerun. In the stored data no roll or signal is decided while another stock's accepted entry
+  is waiting for its first synchronized bar near a limit.
+- **Not tested here:** the live path (no positions are recorded before phase 6).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -1901,6 +1918,7 @@ price" kept as built. Whole suite: **647 passing**.
 | 88 | review | Backtest ran each stock's whole session before the next stock's; intraday roll gate read that day's close | Fixed 2026-11-15 (time-ordering fixes); rerun: one trade changed |
 | 86 | 9 M3 | The rupee amount of the expiry-week margin needs ICICI's VaR + ELM + adhoc margin for the position; the system does not have it | Open: shown as "margin unknown" with the schedule's percentage until the phase 6 position form takes the figure |
 | 87 | 9 M3 | Settlement day counts use weekdays in the tests; phase 6 must pass the holiday calendar | Fixed 2026-11-15: counted with the holiday calendar; a calendar that does not cover the expiry month counts one session earlier and says so. Phase 6 still has to pass the calendar when it sends alerts |
+| 90 | review | Pending entries dropped out of the portfolio book until their first synchronized bar; settlement estimate reused one hedge for several sold legs and counted cash from the first hedge only | Fixed 2026-11-16; rerun on stored data identical |
 | 89 | data | holidays.csv has 2026 only: settlement alerts for expiries from January 2027 are counted conservatively (one session earlier) | Waiting for user: add the 2027 NSE holidays when published |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
@@ -2010,3 +2028,5 @@ price" kept as built. Whole suite: **647 passing**.
 | 2026-11-15 | A decision inside a session uses correlations of completed sessions before that day; a decision at the session's close may use that day |
 | 2026-11-15 | Settlement trading days come from the holiday calendar; a year of the expiry month (31 days to expiry) without any holiday row, or no calendar, means weekdays less one: one session earlier, shown in red on the card (user) |
 | 2026-11-15 | Backtest: forced exit at the first session inside the last 5 trading days (FORCED_EXPIRY_EXIT), after the time exit; the time exit can be switched off on the strategy object for tests, the forced exit cannot |
+| 2026-11-16 | Backtest: an accepted entry reserves its estimated maximum loss in the portfolio book until it fills (then the maximum loss recomputed at the fill) or is not made (released); every gate counts reservations |
+| 2026-11-16 | Delivery estimate: bought legs in the money are allocated once across the position, to the most exposed sold legs first (puts: highest strike; calls: lowest), deepest bought leg first; unallocated sold quantity is fully deliverable (user) |

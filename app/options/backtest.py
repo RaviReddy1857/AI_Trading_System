@@ -1236,6 +1236,10 @@ class OptionEngine:
         trades: list[OptionTrade] = []
         positions: list[_Position] = []
         pending: list[tuple[Signal, dict | None]] = []      # (signal, its schedule row for a baseline attempt)
+        # Synchronized execution: accepted entries of this session still waiting for their first synchronized
+        # bar. Each keeps its risk reservation in the portfolio book until it fills (the position then carries
+        # the maximum loss recomputed at the fill) or is not made (the reservation is released).
+        entering: list[Signal] = []
         used_expiries: set[date] = set()
         start = 0
         needs_daily = getattr(strategy, "needs_daily", False)
@@ -1271,11 +1275,12 @@ class OptionEngine:
             return float(s.details.get("max_loss_inr") or 0.0)
 
         def publish() -> None:
-            # open positions carry their maximum loss recomputed at the actual fill; pending ones the estimate
+            # open positions carry their maximum loss recomputed at the actual fill; an accepted entry that has
+            # not filled yet (pending, or waiting for its first synchronized bar) reserves its estimate
             if self._book is not None:
                 self._book[key] = [(p.sig, p.max_loss_inr if p.max_loss_inr is not None else est(p.sig)) for p in positions] \
                     + [(p.pending_roll, est(p.pending_roll)) for p in positions if p.pending_roll] \
-                    + [(s, est(s)) for s, _ in pending]
+                    + [(s, est(s)) for s, _ in pending] + [(s, est(s)) for s in entering]
 
         for i, bar in enumerate(bars):
             d = bar_date(bar)
@@ -1369,7 +1374,8 @@ class OptionEngine:
                 # next step; the earliest runs next (ties: decisions before fills, then the order started).
                 # A step is run only after its moment has been yielded, so run_portfolio can run the other
                 # stocks' earlier steps first.
-                starting = [(self._sync_entry(sig, sym, d, i, variant, skipped, row), None) for sig, row in pending]
+                starting = [(self._sync_entry(sig, sym, d, i, variant, skipped, row), sig) for sig, row in pending]
+                entering = [sig for sig, _ in pending]         # reserved until each fills or is not made
                 starting += [(self._manage_sync(pos, sym, d, i, last_allowed, strategy, skipped, bar.close, alerts,
                                                 ctx_now, ctx_prev), pos) for pos in positions]
                 pending = []
@@ -1390,7 +1396,8 @@ class OptionEngine:
                         order += 1
                         heapq.heappush(waiting, (moment, order, gen, pos))
                         continue
-                    if pos is None:                            # a pending entry: filled, or not made
+                    if isinstance(pos, Signal):                # a pending entry: filled, or not made
+                        entering = [s for s in entering if s is not pos]   # the position's own risk now, or released
                         if r is not None:
                             positions.append(r)
                             starting.append((self._manage_sync(r, sym, d, i, last_allowed, strategy, skipped, bar.close,

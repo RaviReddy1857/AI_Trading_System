@@ -592,7 +592,9 @@ their tests are built in M3. New settings in `stock_option_selling.settlement` (
    A level only goes up while the position is open; an unknown spot or expiry gives URGENT "price unknown", never silence.
 2. **Delivery and margin estimate** (computed by code, one lot and the whole position): the delivery value if the leg
    settled at the last price (short put: shares to buy = lots x lot size x strike; short call: shares to deliver, and the
-   cost to buy them at spot if not held), netted with the bought leg only when that leg would also settle in the money;
+   cost to buy them at spot if not held), netted with bought legs only when they would also settle in the money. Bought
+   quantity is allocated ONCE across the whole position (same underlying, right and expiry; the most exposed sold legs
+   first), shares and cash are computed for every allocated portion, and unallocated sold quantity is fully deliverable;
    and the expiry-week margin from the rules in `settlement.broker` below. A rule not filled in gives "margin unknown"
    in red, never zero. Rupee figures are also shown as % of capital.
 3. **Planned-exit deadline.** Every such position gets a planned exit by `exit_days_before_expiry` (already in config)

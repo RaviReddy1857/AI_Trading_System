@@ -154,7 +154,7 @@ def test_ACCEPTANCE_delivery_estimate_of_a_short_put_matches_a_hand_calculation(
     leg = e["position"]["legs"][0]
     assert leg["if_assigned"] == {"shares_to_buy": 500, "cash_needed_inr": 500000.0, "cash_pct_of_capital": 50.0}
     assert leg["at_last_price"] == {"settles": True, "shares_to_buy": 500, "netted_with_bought_leg_shares": 0,
-                                    "net_cash_paid_on_netted_shares_inr": 0.0, "delivery_value_inr": 500000.0,
+                                    "net_cash_paid_on_netted_shares_inr": 0.0, "netted_with": [], "delivery_value_inr": 500000.0,
                                     "delivery_value_pct_of_capital": 50.0, "shares_worth_at_spot_inr": 495000.0}
     one = e["one_lot"]["legs"][0]
     assert one["if_assigned"]["shares_to_buy"] == 250 and one["if_assigned"]["cash_needed_inr"] == 250000.0
@@ -181,7 +181,7 @@ def test_ACCEPTANCE_delivery_estimate_of_a_short_call_matches_a_hand_calculation
     leg = delivery_estimate(pos, 1110.0, 3, SOS, CAP)["position"]["legs"][0]
     assert leg["if_assigned"] == {"shares_to_deliver": 500, "cash_received_inr": 550000.0, "cash_pct_of_capital": 55.0}
     assert leg["at_last_price"] == {"settles": True, "shares_to_deliver": 500, "netted_with_bought_leg_shares": 0,
-                                    "net_cash_paid_on_netted_shares_inr": 0.0, "delivery_value_inr": 550000.0,
+                                    "net_cash_paid_on_netted_shares_inr": 0.0, "netted_with": [], "delivery_value_inr": 550000.0,
                                     "delivery_value_pct_of_capital": 55.0,
                                     "cost_to_buy_shares_at_spot_if_not_held_inr": 555000.0, "cost_pct_of_capital": 55.5}
     both = delivery_estimate(pos, 1130.0, 3, SOS, CAP)["position"]["legs"][0]["at_last_price"]
@@ -394,3 +394,118 @@ def test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card():
     assert rules_view(SOS)["calendar"] is None                                        # no date given: nothing claimed
     from app.page import SHORTLIST_HTML
     assert "sr.calendar.note" in SHORTLIST_HTML and "CALENDAR:" in SHORTLIST_HTML
+
+
+# ---------------- bought legs are allocated once across the whole position (review fix 2026-11-16) ----------------
+def held(*legs, label="manual"):
+    """legs: (action, right, strike, shares) - one lot of that many shares each."""
+    return HeldPosition("RELIANCE", EXP, tuple(HeldLeg(a, r, float(k), 1, n) for a, r, k, n in legs), label)
+
+
+def at_last(pos, spot, part="position"):
+    """{sold leg name: its at_last_price} and the whole estimate part."""
+    est = delivery_estimate(pos, spot, 3, SOS, CAP)[part]
+    return {row["leg"]: row["at_last_price"] for row in est["legs"]}, est
+
+
+def test_ACCEPTANCE_one_hedge_is_not_reused_across_two_sold_legs():
+    """Sold 100 puts at 100 and 100 puts at 95, bought 100 puts at 90; spot 80: all three in the money.
+    The 100 bought shares are allocated once, to the most exposed sold leg (strike 100):
+      sold 100 put: 100 shares netted with the 90 put: buy at 100, sell at 90: Rs 10 x 100 = Rs 1,000 paid
+                    (Rs 9,000 comes back from the bought put); 0 shares to buy.
+      sold 95 put:  no bought share left: 100 shares to buy for 95 x 100 = Rs 9,500, worth 80 x 100 = Rs 8,000.
+    100 shares remain deliverable. (Before the fix the same 100 bought shares netted BOTH sold legs: 0 shares.)"""
+    pos = held(("SELL", "PE", 100, 100), ("SELL", "PE", 95, 100), ("BUY", "PE", 90, 100))
+    legs, est = at_last(pos, 80.0)
+    top, low = legs["sold 100 PE"], legs["sold 95 PE"]
+    assert (top["shares_to_buy"], top["netted_with_bought_leg_shares"], top["net_cash_paid_on_netted_shares_inr"]) == (0, 100, 1000.0)
+    assert top["netted_with"] == [{"leg": "bought 90 PE", "shares": 100, "cash_received_from_bought_leg_inr": 9000.0,
+                                   "net_cash_paid_inr": 1000.0}]
+    assert (low["shares_to_buy"], low["netted_with_bought_leg_shares"], low["netted_with"]) == (100, 0, [])
+    assert (low["delivery_value_inr"], low["shares_worth_at_spot_inr"], low["net_cash_paid_on_netted_shares_inr"]) == (9500.0, 8000.0, 0.0)
+    assert sum(x["shares_to_buy"] for x in legs.values()) == 100                    # 100 shares remain deliverable
+    assert sum(x["netted_with_bought_leg_shares"] for x in legs.values()) == 100    # never more than was bought
+    assert "bought_in_the_money_not_netted" not in est
+    # the order the legs are held in does not matter: the most exposed sold leg is served first
+    swapped, _ = at_last(held(("BUY", "PE", 90, 100), ("SELL", "PE", 95, 100), ("SELL", "PE", 100, 100)), 80.0)
+    assert swapped["sold 100 PE"] == top and swapped["sold 95 PE"] == low
+
+
+def test_ACCEPTANCE_cash_is_computed_for_every_hedge_of_one_sold_leg():
+    """Sold 200 puts at 100, bought 100 puts at 90 and 100 at 85; spot 80: all in the money.
+    All 200 sold shares are netted, 100 with each bought leg (the 90 put is used first):
+      with the 90 put: Rs 10 x 100 = Rs 1,000 paid; Rs 90 x 100 = Rs 9,000 received from it;
+      with the 85 put: Rs 15 x 100 = Rs 1,500 paid; Rs 85 x 100 = Rs 8,500 received from it.
+    Net cash paid Rs 2,500 = Rs 20,000 (200 shares bought at 100) less Rs 17,500 received from both hedges.
+    (Before the fix only the first bought leg was counted, on 100 shares: Rs 1,000.)"""
+    pos = held(("SELL", "PE", 100, 200), ("BUY", "PE", 90, 100), ("BUY", "PE", 85, 100))
+    legs, est = at_last(pos, 80.0)
+    a = legs["sold 100 PE"]
+    assert (a["shares_to_buy"], a["netted_with_bought_leg_shares"], a["delivery_value_inr"]) == (0, 200, 0.0)
+    assert a["netted_with"] == [
+        {"leg": "bought 90 PE", "shares": 100, "cash_received_from_bought_leg_inr": 9000.0, "net_cash_paid_inr": 1000.0},
+        {"leg": "bought 85 PE", "shares": 100, "cash_received_from_bought_leg_inr": 8500.0, "net_cash_paid_inr": 1500.0}]
+    assert a["net_cash_paid_on_netted_shares_inr"] == 2500.0 == 200 * 100 - (9000.0 + 8500.0)
+    assert "bought_in_the_money_not_netted" not in est
+    # spot 88: the 85 put is out of the money and nets nothing: 100 netted with the 90 put, 100 shares to buy
+    b = at_last(pos, 88.0)[0]["sold 100 PE"]
+    assert (b["shares_to_buy"], b["netted_with_bought_leg_shares"], b["net_cash_paid_on_netted_shares_inr"],
+            b["delivery_value_inr"], [x["leg"] for x in b["netted_with"]]) == (100, 100, 1000.0, 10000.0, ["bought 90 PE"])
+
+
+def test_an_uneven_manual_position_is_allocated_share_by_share():
+    """Entered by hand, quantities that do not match; spot 80.
+    Puts: sold 300 at 100, sold 100 at 95; bought 150 at 92, bought 100 at 70 (out of the money at 80: nets nothing).
+      sold 100 put: 150 of its 300 shares netted with the 92 put: Rs 8 x 150 = Rs 1,200 paid (Rs 13,800 received);
+                    150 shares to buy for Rs 15,000, worth Rs 12,000 at 80.
+      sold 95 put:  nothing left for it: 100 shares to buy for Rs 9,500.
+    Calls: sold 100 at 60; bought 250 at 65 (both in the money at 80).
+      sold 60 call: all 100 shares netted: deliver at 60, buy at 65: Rs 5 x 100 = Rs 500 paid (Rs 6,500 paid on the
+                    bought call for its shares); 0 shares to deliver.
+      150 bought 65-call shares are in the money and net nothing: reported on their own.
+    A put never nets a call."""
+    pos = held(("SELL", "PE", 100, 300), ("SELL", "PE", 95, 100), ("BUY", "PE", 92, 150), ("BUY", "PE", 70, 100),
+               ("SELL", "CE", 60, 100), ("BUY", "CE", 65, 250))
+    legs, est = at_last(pos, 80.0)
+    a, b, c = legs["sold 100 PE"], legs["sold 95 PE"], legs["sold 60 CE"]
+    assert (a["shares_to_buy"], a["netted_with_bought_leg_shares"], a["net_cash_paid_on_netted_shares_inr"],
+            a["delivery_value_inr"], a["shares_worth_at_spot_inr"]) == (150, 150, 1200.0, 15000.0, 12000.0)
+    assert a["netted_with"] == [{"leg": "bought 92 PE", "shares": 150, "cash_received_from_bought_leg_inr": 13800.0,
+                                 "net_cash_paid_inr": 1200.0}]
+    assert (b["shares_to_buy"], b["netted_with"], b["delivery_value_inr"]) == (100, [], 9500.0)
+    assert (c["shares_to_deliver"], c["netted_with_bought_leg_shares"], c["net_cash_paid_on_netted_shares_inr"],
+            c["cost_to_buy_shares_at_spot_if_not_held_inr"]) == (0, 100, 500.0, 0.0)
+    assert c["netted_with"] == [{"leg": "bought 65 CE", "shares": 100, "cash_paid_on_bought_leg_inr": 6500.0,
+                                 "net_cash_paid_inr": 500.0}]
+    spare = est["bought_in_the_money_not_netted"]
+    assert [(x["leg"], x["shares"]) for x in spare] == [("bought 65 CE", 150)] and "delivery itself" in spare[0]["note"]
+    # the allocation itself: every bought share is used at most once
+    alloc, left = sm.allocate_hedges(pos, 80.0)
+    used = {}
+    for parts in alloc.values():
+        for leg, q in parts:
+            used[leg] = used.get(leg, 0) + q
+    assert all(q <= leg.shares for leg, q in used.items()) and sum(used.values()) == 250
+    assert [(leg.strike, q) for leg, q in left] == [(65.0, 150)]
+    # one lot (here: every quantity divided by the largest sold lot count, 1): the same figures
+    assert at_last(pos, 80.0, "one_lot")[0] == legs
+
+
+def test_an_unhedged_short_is_fully_deliverable():
+    """Sold 100 puts at 100, nothing bought; spot 80: 100 shares to buy for Rs 10,000, worth Rs 8,000.
+    Sold 100 calls at 60, nothing bought; spot 80: 100 shares to deliver; buying them costs Rs 8,000.
+    A bought leg of the OTHER right, or one out of the money, changes nothing."""
+    put = at_last(held(("SELL", "PE", 100, 100), label="UNHEDGED"), 80.0)[0]["sold 100 PE"]
+    assert put == {"settles": True, "shares_to_buy": 100, "netted_with_bought_leg_shares": 0,
+                   "net_cash_paid_on_netted_shares_inr": 0.0, "netted_with": [], "delivery_value_inr": 10000.0,
+                   "delivery_value_pct_of_capital": 1.0, "shares_worth_at_spot_inr": 8000.0}
+    call = at_last(held(("SELL", "CE", 60, 100), label="UNHEDGED"), 80.0)[0]["sold 60 CE"]
+    assert (call["shares_to_deliver"], call["netted_with"], call["delivery_value_inr"],
+            call["cost_to_buy_shares_at_spot_if_not_held_inr"]) == (100, [], 6000.0, 8000.0)
+    # a bought call (in the money) and a bought put out of the money next to the sold put: still 100 shares to buy
+    mixed, est = at_last(held(("SELL", "PE", 100, 100), ("BUY", "CE", 70, 100), ("BUY", "PE", 75, 100)), 80.0)
+    assert mixed["sold 100 PE"] == put
+    assert [(x["leg"], x["shares"]) for x in est["bought_in_the_money_not_netted"]] == [("bought 70 CE", 100)]
+    # price unknown: nothing is allocated and nothing is assumed
+    assert at_last(held(("SELL", "PE", 100, 100), ("BUY", "PE", 90, 100)), None)[0]["sold 100 PE"] is None
+

@@ -16,8 +16,10 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
      cut-off; and whenever the spot price or the expiry is not known ("price unknown": never silence).
    A position's level only goes up while it is open (`escalate`).
 2. Delivery and margin estimate (`delivery_estimate`): what settling at the last price would mean, for the
-   whole position and for one lot, netted with a bought leg only when that leg would settle in the money
-   too; and the expiry-week delivery margin from ICICI's schedule. A rule that is not filled in gives
+   whole position and for one lot. Bought legs that would settle in the money too are allocated ONCE across
+   the whole position (same right; the most exposed sold legs first, see `allocate_hedges`): shares and cash
+   are computed for every allocated portion, and sold quantity without a bought share is fully deliverable.
+   Also the expiry-week delivery margin from ICICI's schedule. A rule that is not filled in gives
    "margin unknown", never zero.
 3. Planned-exit deadline (`exit_deadline`): the stricter (earlier) of the forced exit and ICICI's own
    times. A position still open after it gets a red alert on every call until it is closed (`overdue`).
@@ -239,12 +241,51 @@ def _pct(x: float | None, capital: float) -> float | None:
     return None if x is None or not capital > 0 else round(x / capital * 100.0, 2)
 
 
+def allocate_hedges(pos: HeldPosition, spot: float, scale: float = 1.0) -> tuple[dict[int, list], list]:
+    """Which bought quantity nets which sold quantity if the position settled at `spot`.
+
+    A position is one underlying and one expiry; within it only legs of the same right net each other,
+    and only when both would settle in the money. Every bought share is allocated ONCE:
+    - sold legs are served most exposed first (deepest in the money: the highest strike for puts, the
+      lowest for calls; equal strikes in the order held);
+    - bought legs are used deepest in the money first (the highest strike for puts, the lowest for
+      calls; equal strikes in the order held);
+    - a bought leg is spread over as many sold legs as its quantity covers, and a sold leg may be
+      covered by several bought legs.
+    Sold quantity left without a bought share is fully deliverable. Returns
+    ({index of the sold leg in pos.legs: [(bought leg, shares)]}, [(bought leg, shares not allocated)]),
+    quantities multiplied by `scale`."""
+    out: dict[int, list] = {}
+    spare: list = []
+    for right in ("PE", "CE"):
+        deep = (lambda x: -x[1].strike) if right == "PE" else (lambda x: x[1].strike)
+        live = [(n, x) for n, x in enumerate(pos.legs) if x.right == right and in_the_money(x, spot)]
+        sold = sorted((x for x in live if x[1].action == "SELL"), key=deep)
+        have = [[x, x.shares * scale] for _, x in sorted((x for x in live if x[1].action == "BUY"), key=deep)]
+        for n, leg in sold:
+            need = leg.shares * scale
+            for h in have:
+                take = min(need, h[1])
+                if take > 0:
+                    out.setdefault(n, []).append((h[0], take))
+                    h[1] -= take
+                    need -= take
+        spare += [(x, q) for x, q in have if q > 1e-9]
+    return out, spare
+
+
 def _delivery(pos: HeldPosition, spot: float | None, scale: float, capital: float) -> dict:
     """Settlement of the position at the last price, each quantity multiplied by `scale` (1 = the whole
     position). For each sold leg: what it obliges if assigned (known without a price), and what would
-    happen at the last price, netted with bought legs of the same right that would settle in the money."""
+    happen at the last price. Bought legs that would settle in the money too are allocated once across
+    the whole position (`allocate_hedges`); each allocated portion is netted (no shares change hands,
+    the difference of the two strikes is paid) and the rest of the sold quantity is delivered in full."""
+    known = spot is not None and spot > 0
+    alloc, spare = allocate_hedges(pos, spot, scale) if known else ({}, [])
     rows = []
-    for leg in pos.shorts:
+    for n, leg in enumerate(pos.legs):
+        if leg.action != "SELL":
+            continue
         sh = leg.shares * scale
         put = leg.right == "PE"
         row = {"leg": f"sold {leg.strike:g} {leg.right}", "shares": round(sh, 4),
@@ -252,7 +293,7 @@ def _delivery(pos: HeldPosition, spot: float | None, scale: float, capital: floa
                "if_assigned": {"shares_to_buy" if put else "shares_to_deliver": round(sh, 4),
                                "cash_needed_inr" if put else "cash_received_inr": round(sh * leg.strike, 2),
                                "cash_pct_of_capital": _pct(sh * leg.strike, capital)}}
-        if spot is None or not spot > 0:
+        if not known:
             row["at_last_price"] = None                     # unknown: never assumed out of the money
             rows.append(row)
             continue
@@ -260,15 +301,19 @@ def _delivery(pos: HeldPosition, spot: float | None, scale: float, capital: floa
             row["at_last_price"] = {"settles": False, "note": "out of the money at the last price: no delivery"}
             rows.append(row)
             continue
-        hedge = [x for x in pos.longs if x.right == leg.right and in_the_money(x, spot)]
-        netted = min(sh, sum(x.shares for x in hedge) * scale)
-        # cash per netted share: a put pair buys at the sold strike and sells at the bought one; a call pair the reverse
-        net_cash = sum(min(sh, x.shares * scale) * ((leg.strike - x.strike) if put else (x.strike - leg.strike))
-                       for x in hedge[:1]) if hedge else 0.0
+        # each allocated portion: a put pair buys at the sold strike and sells at the bought one (cash comes
+        # back from the bought put); a call pair delivers at the sold strike and buys at the bought one
+        parts = [{"leg": f"bought {x.strike:g} {x.right}", "shares": round(q, 4),
+                  "cash_received_from_bought_leg_inr" if put else "cash_paid_on_bought_leg_inr": round(q * x.strike, 2),
+                  "net_cash_paid_inr": round(q * ((leg.strike - x.strike) if put else (x.strike - leg.strike)), 2)}
+                 for x, q in alloc.get(n, [])]
+        netted = sum(q for _, q in alloc.get(n, []))
+        net_cash = sum(q * ((leg.strike - x.strike) if put else (x.strike - leg.strike)) for x, q in alloc.get(n, []))
         left = sh - netted
         at = {"settles": True, "shares_to_buy" if put else "shares_to_deliver": round(left, 4),
               "netted_with_bought_leg_shares": round(netted, 4),
               "net_cash_paid_on_netted_shares_inr": round(net_cash, 2),
+              "netted_with": parts,
               "delivery_value_inr": round(left * leg.strike, 2),
               "delivery_value_pct_of_capital": _pct(left * leg.strike, capital)}
         if put:
@@ -278,7 +323,14 @@ def _delivery(pos: HeldPosition, spot: float | None, scale: float, capital: floa
             at["cost_pct_of_capital"] = _pct(left * spot, capital)
         row["at_last_price"] = at
         rows.append(row)
-    return {"legs": rows}
+    out = {"legs": rows}
+    if spare:
+        # a bought option in the money is exercised too: more bought than sold leaves a delivery of its own
+        out["bought_in_the_money_not_netted"] = [
+            {"leg": f"bought {x.strike:g} {x.right}", "shares": round(q, 4),
+             "note": "in the money and not netted with a sold leg: it settles by delivery itself "
+                     + ("(shares to deliver)" if x.right == "PE" else "(shares to buy at the strike)")} for x, q in spare]
+    return out
 
 
 def delivery_margin(pos: HeldPosition, spot: float | None, left: int | None, sos,
