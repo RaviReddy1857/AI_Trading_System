@@ -53,6 +53,7 @@ PAGE_HTML = """<!doctype html>
   <table><thead><tr><th>Symbol</th><th>Last</th><th>Change %</th><th>Bid</th><th>Ask</th><th>Age (s)</th><th>Status</th></tr></thead>
   <tbody id="rows"></tbody></table></div>
  <div class="card"><h2>Account settings (from config.yaml)</h2><div class="kv" id="cfg"></div></div>
+ <div class="card"><h2>Risk engine</h2><div class="kv" id="risk">loading...</div><ul id="riskwhy"></ul></div>
  <div class="card"><h2>Data quality</h2><div class="kv" id="qstats"></div>
   <table style="margin-top:8px"><thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Reason</th><th>Last</th></tr></thead>
   <tbody id="qrows"></tbody></table></div>
@@ -109,7 +110,16 @@ async function dstatus(){
   el.innerHTML=`Data status: <b class="up">${c.green} OK</b> &middot; <b style="color:var(--warn)">${c.amber} need attention</b> &middot; <b class="down">${c.red} missing or blocking</b>`+(bad.length?` <span class="mute">(${esc(bad.join(", "))})</span>`:"")+` <span class="mute">&rarr; details</span>`;
  }catch(e){el.textContent="Data status: not available"}
 }
-cfg();tick();regime();dstatus();setInterval(tick,2000);setInterval(regime,15000);setInterval(dstatus,60000);
+async function risk(){
+ try{const r=await j("/api/risk");const k=r.kill_switch;
+  document.getElementById("risk").innerHTML=`<span>Kill switch: <b class="${k.on?"down":"up"}">${k.on?"ON - all signals stop":"off"}</b></span>
+   <span>Positions known: <b class="${r.portfolio.known?"up":"down"}">${r.portfolio.known?"yes":"no - every live signal is NO TRADE"}</b></span>
+   <span>Pool usable: <b>&#8377;${f(r.limits_inr.capital_pool_usable,0)}</b></span><span>Position value cap: <b>&#8377;${f(r.limits_inr.position_value_cap,0)}</b></span>
+   <span>Deposits logged: <b>&#8377;${f(r.capital_log.deposits_inr,0)}</b></span>`;
+  document.getElementById("riskwhy").innerHTML=k.reasons.concat(r.portfolio.problems).map(x=>`<li class="mute">${esc(x)}</li>`).join("");
+ }catch(e){document.getElementById("risk").textContent="Risk status not available"}
+}
+cfg();tick();regime();dstatus();risk();setInterval(risk,15000);setInterval(tick,2000);setInterval(regime,15000);setInterval(dstatus,60000);
 </script></body></html>
 """
 

@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS data_imports (
     dataset TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, imported_utc TEXT NOT NULL,
     rows INTEGER NOT NULL, note TEXT
 );
+CREATE TABLE IF NOT EXISTS capital_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL,
+    note TEXT, logged_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS quality_events_at ON quality_events (at_utc);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -199,6 +204,32 @@ class Store:
     def quality_event_count(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM quality_events").fetchone()[0]
+
+    def quality_event_count_since(self, at: datetime) -> int:
+        """Quarantined ticks recorded at or after `at` (phase 5 kill switch)."""
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM quality_events WHERE at_utc >= ?",
+                                    (at.isoformat(),)).fetchone()[0]
+
+    # ---------------- capital log (phase 5): deposits and withdrawals, never profit ----------------
+    def add_capital_entry(self, day: date, kind: str, amount: float, note: str, at: datetime) -> int:
+        if kind not in ("DEPOSIT", "WITHDRAWAL"):
+            raise ValueError("type must be DEPOSIT or WITHDRAWAL")
+        with self._lock:
+            cur = self._db.execute("INSERT INTO capital_log (date,type,amount,note,logged_utc) VALUES (?,?,?,?,?)",
+                                   (day.isoformat(), kind, float(amount), note, at.isoformat()))
+            self._db.commit()
+            return cur.lastrowid
+
+    def capital_log(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT id,date,type,amount,note,logged_utc FROM capital_log ORDER BY date, id").fetchall()
+        return [dict(zip(["id", "date", "type", "amount", "note", "logged_utc"], r)) for r in rows]
+
+    def capital_flows(self) -> list[tuple[date, float]]:
+        """(date, amount): deposits positive, withdrawals negative."""
+        return [(date.fromisoformat(r["date"]), r["amount"] if r["type"] == "DEPOSIT" else -r["amount"])
+                for r in self.capital_log()]
 
     # ---------------- history (bars_1d, bars_5m) ----------------
     def save_history_bars(self, table: str, bars: list[Bar], source: str) -> int:

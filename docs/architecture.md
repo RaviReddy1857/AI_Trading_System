@@ -66,6 +66,19 @@ K is outside the application. The only writes the user can make are journal entr
 
 Anything unknown at any step (stale price, missing lot size, unknown margin) produces `NO_TRADE`, never a guess.
 
+**Risk engine (phase 5, `app/risk/`).** `decide(signal, account, market, settings, costs, corr, sectors)` is pure and
+evaluates every check, adding a code for each one that fails: inputs known (capital, positions, P&L, equity history,
+costs, lot size, sector, correlation, margin of anything with a sold leg); kill switch (index not LIVE, outside market
+hours, quarantine spike); the signal's price LIVE, not expired, regime allowed; daily stop and monthly pause on realised
++ open P&L; drawdown from peak equity with deposits excluded (deposit-neutral index: halve at 10%, pause at 15%); size
+(cash: floor(capital x 1% / stop distance), position value cap, charges and slippage included; options: floor(capital x
+2.5% / one lot's cost-inclusive max loss), recomputed for n lots); capital pool (25% uncommitted), index selling spreads,
+sector (2 per sector) and correlation above 0.8 (a correlated group shares one position's budget). A limit is reached at
+equality. Stock option spreads (phase 9) use the phase 9 rules instead of the pool, sector and correlation: capital-fit
+label (advisory), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
+approval whose risk exceeds the budget. Live inputs come from `RiskService`; open positions are not known until the
+phase 6 journal, so live decisions are NO_TRADE (PORTFOLIO_UNKNOWN) until then.
+
 ## 4. Technology
 
 | Layer | Choice | Reason |
@@ -158,16 +171,19 @@ class Signal:          # phase 3 (app/models.py; validated on creation, see sign
     entry_zone: (low, high) | None # phase 3: optional acceptable fill range
     # entry = the signal bar's close (reference only); fills happen at the next bar's open at the earliest
 
-@dataclass
-class RiskDecision:    # phase 5
+@dataclass(frozen=True)
+class RiskDecision:    # phase 5 (app/models.py; built by app/risk/engine.py decide())
     status: str                    # APPROVED | NO_TRADE
-    reason_codes: list[str]
-    quantity: int | None; lots: int | None
-    risk_inr: float | None; risk_pct: float | None
+    reason_codes: tuple[str, ...]  # NO_TRADE: at least one; APPROVED: none
+    quantity: int | None; lots: int | None        # set only when APPROVED (options: quantity = lots x lot size)
+    risk_inr: float | None; risk_pct: float | None              # costs included
     est_profit_inr: float | None; est_loss_inr: float | None; costs_inr: float | None
-    margin_inr: float | None
+    margin_inr: float | None       # cash in the position or margin blocked
     capital_fit: str | None        # FITS | TIGHT | NEEDS_MORE_CAPITAL
-    warnings: list[str]
+    warnings: tuple[str, ...]
+    reasons: tuple[str, ...]       # "CODE: text with the values" for every reason code
+    size_factor: float             # 1.0, or 0.5 while the drawdown rule halves sizes
+    facts: dict                    # the figures behind the decision (sizing, pool, loss stops, drawdown)
 
 class Strategy(ABC):               # phase 3 (app/strategies/base.py)
     id: str; version: str          # version = base version + hash of its config thresholds
@@ -203,11 +219,14 @@ A strategy must be a pure function of its context: same input, same output, no n
 - **Price status:** `LIVE`, `STALE`, `NO_DATA`, `CLOSED` (only `LIVE` is usable)
 - **NO_TRADE reason codes:** `DATA_STALE`, `DATA_MISSING`, `OUTSIDE_REGIME`, `ZERO_SIZE`, `RISK_BUDGET_USED`,
   `DAILY_STOP`, `MONTHLY_PAUSE`, `DRAWDOWN_PAUSE`, `MARGIN_UNKNOWN`, `LOT_SIZE_UNKNOWN`, `UNHEDGED_SHORT`,
-  `EVENT_BEFORE_EXPIRY`, `EXPIRY_WEEK`, `KILL_SWITCH`, `SIGNAL_EXPIRED`
+  `EVENT_BEFORE_EXPIRY`, `EXPIRY_WEEK`, `KILL_SWITCH`, `SIGNAL_EXPIRED`; phase 5 adds `CAPITAL_UNKNOWN`,
+  `PORTFOLIO_UNKNOWN` (positions, P&L or equity history not known), `SECTOR_LIMIT` (blocks, except for stock option
+  spreads), `CORRELATED_LIMIT` and `CORRELATION_UNKNOWN` (also used by the phase 9 portfolio limits)
 - **Option NO_TRADE reason codes (phase 4):** `IV_RANK_UNKNOWN`, `IV_RANK_TOO_HIGH`, `IV_RANK_TOO_LOW`, `NO_TRIGGER`,
   `NO_EXPIRY`, `NO_STRIKE`, `NO_CREDIT`, `CREDIT_TOO_SMALL`, `ILLIQUID`, `PREMIUM_TOO_SMALL`, `NO_WEEKLY_OPTIONS`,
   `STOCK_OPTION_SELLING_NOT_ALLOWED` (phase 4: stock options are buy-only)
-- **Warnings (do not block):** `NEEDS_MORE_CAPITAL`, `TIGHT_CAPITAL`, `SECTOR_LIMIT`, `MAX_SPREADS`, `UNPROVEN`, `LOW_SAMPLE`
+- **Warnings (do not block):** `NEEDS_MORE_CAPITAL`, `TIGHT_CAPITAL`, `SECTOR_LIMIT`, `MAX_SPREADS`, `UNPROVEN`, `LOW_SAMPLE`,
+  `SIZE_HALVED` (phase 5: the drawdown rule halved the size)
 
 ## 7. Data model (SQLite)
 
@@ -235,7 +254,7 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `shortlist` | 9 | session_date, stock, expiry, side, rank, status (SHORTLISTED/CANDIDATE/EXCLUDED), score, scores (IV rank, trend clarity, distance to S/R, liquidity), reasons |
 | `campaigns` | 9 | campaign_id (the original signal's id), stock, summary: positions and rolls, realised P&L, hedge cost, charges, best possible outcome, message |
 | `request_budget` | 9 | day (IST), kind, requests: option-history requests sent to Breeze that day, across runs |
-| `capital_log` | 7 | date, type (DEPOSIT/WITHDRAWAL), amount |
+| `capital_log` | 5 | date, type (DEPOSIT/WITHDRAWAL), amount, note, logged_utc (written by `POST /capital/log`; never profit; phase 7 reports return on it) |
 | `strategy_state` | 7 | strategy_id, regime, enabled, size_factor, changed_at, changed_by |
 | `llm_calls` | 8 | at_utc, task, tokens/cost if known, ok, latency |
 
@@ -264,7 +283,10 @@ Phase 9 M3 (2026-11-15; read by `app/options/settlement.py`) adds `stock_option_
 E-5 (never later than `forced_exit_trading_days_before_expiry`), near the money = 5% of spot, and `broker` - ICICI
 Direct's physical-settlement rules (`delivery_margin`, `auto_close`, `fresh_position_block`, `obligation`), each with
 its own `confirmed` flag; alert deadlines use the earliest stated auto-close time for the legs held.
-Later phases add: `position_cap_pct` (default 25), `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9 remainder: universe filters
+Phase 5 (2026-11-16) adds to `risk`: `max_trades_per_sector` (2), `correlation_window` (60), `correlation_threshold`
+(0.8, strictly above links), `correlation_min_overlap` (50) and `kill_switch` (`quarantine_window_minutes` 5,
+`quarantine_max_events` 20); sector tags on NIFTY and BANKNIFTY ("Index"). Cash sizing uses `backtest.position_cap_pct`.
+Later phases add: `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9 remainder: universe filters
 min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
 max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,
 exit_days_before_expiry, recommended_capital_inr), `cutback`, `ladder`, `llm`, `go_live_gate`.
@@ -340,7 +362,7 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, `/api/config` (phase 1);
 `/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options`,
 `/api/options/{underlying}` and the page `/options` (4);
-`/api/risk` (5); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
+`/api/risk` (5: limits in rupees, kill switch, what is not known); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
 `/api/stock-option-selling/shortlist`, `/api/stock-option-selling/profile/{stock}`,
 `/api/stock-option-selling/reversals`, `/api/stock-option-selling/campaigns`,
 `/api/stock-option-selling/settlement` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
@@ -348,7 +370,7 @@ Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
 `POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
 6; option legs and the UNHEDGED flag, 9), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries (`margins`, phase 4),
-`POST /capital/log`. Route names avoid the forbidden word list (for example `alert-switches`, never `trade/`).
+`POST /capital/log` (5: `{"date", "type": DEPOSIT|WITHDRAWAL, "amount", "note"}`). Route names avoid the forbidden word list (for example `alert-switches`, never `trade/`).
 
 Forbidden in any path: `order`, `execute`, `square`, `submit`, `trade/`. The safety test checks every route.
 

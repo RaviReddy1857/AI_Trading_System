@@ -1,4 +1,4 @@
-# Trading Research System - Phases 1-4 and the core of phase 9: data feed, quality gate, market regime, strategies, backtests, options and stock option selling
+# Trading Research System - Phases 1-5 and the core of phase 9: data feed, quality gate, market regime, strategies, backtests, options, risk engine and stock option selling
 
 Research and suggestions only. **This app cannot place, change or close orders**,
 and a test fails the build if such code is ever added. You trade manually in ICICI Direct.
@@ -23,7 +23,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 584 passed
+python -m pytest -q          # should say 848 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -421,6 +421,49 @@ entry; and every confirmed reversal with its 10, 20 and 40-session outcome and b
 **Thresholds** are all in `config.yaml` under `stock_option_selling`, named as in section 2 of the Phase 9 specification; docs/implementation.md has the full table (value, unit, lookback, comparison, what happens when data is missing).
 Reversal candidates stay silent until you set `stock_option_selling.reversal.alerts_approved: true`.
 
+## Phase 5: risk engine (sizes every signal or says NO TRADE)
+
+The risk engine (`app/risk/`) is the only part allowed to approve a signal. For each signal it returns **APPROVED**
+with the quantity (cash) or lots (options), the rupee risk including charges and slippage, the estimated profit at the
+target, the loss at the stop (spreads: the maximum loss), the costs, the cash or margin needed and a capital-fit label;
+or **NO_TRADE** with every reason code that applies. All numbers are computed by code.
+
+| Rule | Setting in `config.yaml` (`risk`) | At Rs 2,00,000 |
+|---|---|---|
+| Cash: shares = floor(capital x 1% / (entry - stop)), position value at most 25% of capital, charges included | `max_loss_per_trade_pct`, `backtest.position_cap_pct` | Rs 2,000 risk, Rs 50,000 position |
+| Options: lots = floor(capital x 2.5% / max loss of one lot), cost-inclusive; 0 lots = ZERO_SIZE | `max_loss_per_option_pct` | Rs 5,000 |
+| Capital pool: 25% of capital stays uncommitted | `uncommitted_cash_pct` | Rs 1,50,000 usable |
+| At most 2 open index selling spreads | `max_open_selling_spreads` | - |
+| At most 2 open trades per sector (watchlist sector tags; NIFTY and BANKNIFTY are sector "Index") | `max_trades_per_sector` | - |
+| Correlation of 60-session daily returns above 0.8: one position (their risk together within one budget) | `correlation_window`, `correlation_threshold`, `correlation_min_overlap` | - |
+| Daily stop and monthly pause on realised + open P&L | `daily_loss_stop_pct`, `monthly_loss_pause_pct` | Rs 4,000 / Rs 12,000 |
+| Drawdown from peak equity (deposits excluded): sizes halved at 10%, new signals paused at 15% | `drawdown_halve_pct`, `drawdown_pause_pct` | - |
+| Kill switch: NIFTY not LIVE, outside market hours, or 20+ quarantined ticks in 5 minutes | `kill_switch` | - |
+
+A limit is reached when the value equals it (exactly 2% lost today = stopped). Correlation needs to be strictly above
+0.8. Change `account.capital_inr` and every rupee limit and size rescales.
+
+**Unknown is never assumed.** Unknown capital, open positions, P&L, equity history, margin, lot size, cost rates,
+sector, correlation or kill-switch input gives NO_TRADE with a code (`CAPITAL_UNKNOWN`, `PORTFOLIO_UNKNOWN`,
+`MARGIN_UNKNOWN`, `LOT_SIZE_UNKNOWN`, `DATA_MISSING`, `CORRELATION_UNKNOWN`, `KILL_SWITCH`, ...).
+**Your open positions are recorded by the phase 6 journal, so until phase 6 is built every live decision is NO_TRADE
+(`PORTFOLIO_UNKNOWN`).** Phase 5 itself issues no signals and sends nothing.
+
+Stock option spreads (phase 9) keep their own rules: capital is advisory (label FITS / TIGHT / NEEDS_MORE_CAPITAL with
+the shortfall, never a block), size within `stock_option_selling.max_risk_per_position_pct` and never more lots than
+the signal, the phase 9 portfolio limits; unknown data or margin, the kill switch, the loss stops and the drawdown pause
+still block them.
+
+See it: start the app and open http://127.0.0.1:8000 - the "Risk engine" card shows the kill switch, whether positions
+are known, the usable pool, the position value cap and logged deposits. The JSON is at `GET /api/risk`.
+
+**Deposits and withdrawals** are logged separately and never count as profit or loss (they are taken out of the
+drawdown calculation). From the command line (Windows PowerShell, app running):
+```
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/capital/log -ContentType application/json `
+  -Body '{"date": "2026-11-16", "type": "DEPOSIT", "amount": 50000, "note": "top-up"}'
+```
+
 ## Status values
 | Status | Meaning |
 |---|---|
@@ -455,17 +498,24 @@ Reversal candidates stay silent until you set `stock_option_selling.reversal.ale
 - `app/options/sizing.py`, `portfolio.py`, `actionable.py`, `score.py` - phase 9 M1/M2: whole-lot sizing, portfolio and
   correlation limits, research versus actionable, the candidate score
 - `app/options/settlement.py` - phase 9 M3: settlement-readiness alerts, delivery and margin estimate, exit deadline
+- `app/risk/` - phase 5: `sizing.py` (shares and lots; reuses `app/backtest.py`'s formula and `app/options/sizing.py`),
+  `portfolio.py` (positions, capital pool, capital fit, selling-spread count), `limits.py` (sector, correlation, loss
+  stops, drawdown, kill switch), `engine.py` (`decide()` -> RiskDecision, and the live inputs for `/api/risk`)
 - `app/options/stock_selling.py`, `stock_profile.py`, `campaign.py`, `reversal.py`, `shortlist.py`, `stock_backtest.py` -
   phase 9 core: stock option selling rules, rolls and alerts; profile, scenario history and blocks; campaign tracking;
   reversal detector and its two candidates; the shortlist and views; the download and the report
 - `app/main.py` - web server and API: `/health`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`,
   `/api/config`, `/api/regime`, and `POST /data/import/{fii_dii|events|holidays}` (writes only your data files;
   JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`, `/api/options`, `/api/options/{underlying}` and
-  the page `/options`; `POST /data/import/margins` for your margin entries
+  the page `/options`; `POST /data/import/margins` for your margin entries; `GET /api/risk` and
+  `POST /capital/log` (phase 5)
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Risk engine on real positions.** Phase 5 is tested on fixtures only. Open positions, P&L and the equity history come
+  from the phase 6 journal, so no live signal has been sized for real yet (every live decision is NO_TRADE until then).
+  The kill switch's quarantine spike threshold (20 in 5 minutes) is a starting value, not tuned on live ticks.
 - **Stock option selling.** Only Jan-Jun 2026 of 9 stocks is downloaded, so every result is low sample. The shortlist
   command and the views have not been run against live Breeze chains. See docs/STATUS.md, "Phase 9 core".
 - **Options, live.** The option chain loader, the 5-minute background refresh and live option signals have not been seen

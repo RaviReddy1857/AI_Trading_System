@@ -23,7 +23,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
-| 5 | Risk engine | Not started | | |
+| 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions | 848 passing (whole suite) | 2026-11-16 |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
@@ -1938,6 +1938,107 @@ Scenario history (50 stocks, summed): unchanged - FII streak 840 cases of 850 tr
 RBI decision 823 of 1,100, own results no data. The stored FII rows start 2026-01-14 (none before the floor), and no
 FII row or VIX spike lies after a stock's last bar, so the bound changes nothing on this data.
 
+## Phase 5: risk engine (2026-11-16)
+
+
+### Requirement-to-code/test table (written before the code)
+
+| Req | Requirement (docs/implementation.md phase 5) | Code | Test (`tests/test_phase5_*.py`) |
+|---|---|---|---|
+| S1 / P5.1 | Cash quantity = floor(capital x max_loss_per_trade_pct / (entry - stop)), capped at position value `backtest.position_cap_pct`, charges at the stop included | `app/risk/sizing.py` `cash_quantity` (reuses `app.backtest.position_size` for the formula and the cap) | `test_phase5_sizing.py`: hand calculations; just under / at / over the budget and the cap |
+| S1 | Options: lots = floor(max_loss_per_option / max loss per lot), cost-inclusive; zero lots = NO_TRADE (ZERO_SIZE) | `app/risk/sizing.py` `option_lots` (two-leg spreads through `app.options.sizing.size_spread`; long options and condors with the same floor-then-check rule on `app.options.payoff`) | `test_phase5_sizing.py`: one lot's loss just under / at / over the budget, 2 lots exactly at the budget |
+| S2 / P5.2 | Track open paper and manual positions, capital committed, margin blocked, cash free; enforce `uncommitted_cash_pct` | `app/risk/portfolio.py` `OpenPosition`, `AccountState`, `pool_check` | `test_phase5_limits.py`: committed + new just under / at / over capital x (1 - 25%) |
+| S2 | Enforce `max_open_selling_spreads` (index option selling) | `app/risk/portfolio.py` `selling_spread_check` | `test_phase5_limits.py`: 1 open -> allowed, 2 open -> blocked; limit 0 |
+| S3 / P5.3 | Sector tags on the watchlist; at most `max_trades_per_sector` (2) open trades per sector | `config.yaml` (sector on NIFTY, BANKNIFTY), `app/risk/limits.py` `sector_check` | `test_phase5_limits.py`: 1 -> second allowed, 2 -> third blocked (SECTOR_LIMIT); unknown sector blocks |
+| S3 | Symbols with 60-day return correlation above 0.8 count as one position (their risk together within one position's budget) | `app/risk/limits.py` `correlation_check` (reuses `app.options.portfolio` correlation, groups and unknown-link logic) | `test_phase5_limits.py`: 0.8 exactly not linked, 0.8001 linked; combined risk just under / at / over; unmeasurable -> CORRELATION_UNKNOWN |
+| S4 / P5.4 | `daily_loss_stop_pct` and `monthly_loss_pause_pct` on realised + open P&L | `app/risk/limits.py` `loss_stops` | `test_phase5_limits.py`: loss just under / at / over 2% (DAILY_STOP) and 6% (MONTHLY_PAUSE); unknown P&L blocks |
+| S5 / P5.5 | Drawdown from peak equity, deposits excluded; halve sizes at 10%, pause at 15% | `app/risk/limits.py` `drawdown_state` (deposit-neutral equity index) | `test_phase5_limits.py`: 9.99 / 10 / 10.01 and 14.99 / 15 / 15.01 %; a deposit never hides a drawdown; halved quantities by hand |
+| S6 / P5.6 | Kill switch: index feed STALE, quarantined ticks spike, outside market hours | `app/risk/limits.py` `kill_switch` (`risk.kill_switch` in config) | `test_phase5_limits.py`: each trigger; spike count just under / at / over |
+| S7 / P5.7 | APPROVED with quantity and rupee risk, or NO_TRADE with reason codes | `app/models.py` `RiskDecision`; `app/risk/engine.py` `decide` | `test_phase5_engine.py`: every code produced in a table; every NO_TRADE has a code |
+| S8 | Changing capital_inr rescales everything; deposits logged separately, never profit | `app/risk/engine.py` (all rupee limits from capital at call time); `capital_log` table, `POST /capital/log` | `test_phase5_engine.py`: capital doubled -> every limit and quantity rescales; `test_phase5_api.py`: deposit stored, not counted as profit |
+| A1 | Table-driven tests for each rule | - | each rule above |
+| A2 | No code path can raise risk above the configured percentages | `decide` (risk only reduced) | `test_phase5_engine.py`: property test (hypothesis) over random signals and states |
+| A3 | Unknown inputs always produce NO_TRADE | `decide` | `test_phase5_engine.py`: one row per unknown input (capital, positions, P&L, equity, margin, lot size, costs, price status, regime, sector, correlation, kill-switch inputs) |
+| U1 | User: unknown capital, margin or position data blocks the signal | `decide` | as A3 |
+| U2 | User: reuse app/options/sizing.py and portfolio.py; do not change the Phase 9 backtest loop, variants A-D or any Phase 9 default | imports only; `store_correlations` gets optional window arguments (defaults unchanged) | whole suite unchanged; `test_phase5_engine.py` checks the Phase 9 defaults |
+| P9-8 | Phase 9 step 8 (risk engine for stock option spreads): capital advisory (capital-fit label), blocks on unknown data or margin, portfolio limits of the Phase 9 specification | `decide` stock-spread path: `capital_fit`, `app.options.portfolio.portfolio_check` | `test_phase5_engine.py`: NEEDS_MORE_CAPITAL at Rs 2,00,000 with the shortfall, FITS at Rs 10,00,000, TIGHT between; never hidden for capital |
+| R1 | `/api/risk` (architecture section 10) and a risk strip on the dashboard | `app/main.py`, `app/page.py`, `app/risk/engine.py` `RiskService` | `test_phase5_api.py` |
+
+### Built
+- `app/risk/sizing.py`: `cash_quantity` (the phase 3 formula `app.backtest.position_size` with its position value cap,
+  then the largest quantity whose loss at the stop plus estimated charges and slippage stays within the budget, exact in
+  Decimal), `option_lots` and `lots_within` (floor(budget / one lot's cost-inclusive max loss), then lowered while the
+  n-lot loss with n lots' charges is above the budget; two-leg spreads through `app.options.sizing.size_spread`, long
+  options and iron condors through `app.options.payoff`).
+- `app/risk/portfolio.py`: `OpenPosition` (paper or manual: risk, capital committed, open P&L today and this month),
+  `AccountState`, `position_problems`, `committed_inr`, `capital_fit` (FITS / TIGHT / NEEDS_MORE_CAPITAL with the
+  shortfall), `pool_check` (uncommitted_cash_pct), `selling_spread_check` (max_open_selling_spreads, index selling).
+- `app/risk/limits.py`: `sector_check`, `correlated_group` (connected components with `app.options.portfolio`'s
+  `_components`; a link needs correlation strictly above 0.8; an unmeasurable link blocks only if it could join the
+  proposed symbol to a held one), `loss_stops`, `drawdown_state` (deposit-neutral equity index), `kill_switch`.
+- `app/risk/engine.py`: `decide(signal, account, market, ...)` -> `RiskDecision` (every failing check adds its code; a
+  final guard refuses any approval whose risk is above the budget) and `RiskService` (live inputs: capital from
+  config.yaml, kill switch from the hub and `quality_events`, deposits from `capital_log`; positions NOT KNOWN).
+- `app/models.py`: `RiskDecision` (architecture contract, plus `reasons`, `size_factor`, `facts`); a NO_TRADE without a
+  code or an APPROVED without a positive size and risk cannot be constructed.
+- `config.yaml` / `app/config.py`: `risk.max_trades_per_sector` 2, `correlation_window` 60, `correlation_threshold` 0.8,
+  `correlation_min_overlap` 50, `kill_switch` (5 minutes, 20 events); validated (halve below pause, overlap within the
+  window). NIFTY and BANKNIFTY tagged sector "Index".
+- `app/store.py`: `capital_log` table (date, DEPOSIT/WITHDRAWAL, amount, note), `quality_event_count_since`.
+- `GET /api/risk`, `POST /capital/log` (local Host/Origin and JSON rules as every write), a "Risk engine" card on the
+  dashboard.
+- `app/options/shortlist.py` `store_correlations`: optional window and minimum-overlap arguments (defaults unchanged).
+- Not changed: the Phase 9 backtest loop, variants A-D (pre-registration), every Phase 9 default, `app/backtest.py`.
+
+### Tested (176 new tests in `tests/test_phase5_sizing.py`, `test_phase5_limits.py`, `test_phase5_engine.py`, `test_phase5_api.py`; whole suite 848 passing)
+- Every sizing, limit and loss-stop rule with its hand calculation written in the test and the boundary just under,
+  exactly at and just over: cash budget and position cap, costs included, size factor; long option, credit spread and
+  iron condor lots; capital pool; capital fit (the phase 9 acceptance: NEEDS_MORE_CAPITAL with Rs 30,000 short at
+  Rs 2,00,000, FITS at Rs 10,00,000, TIGHT between); selling spreads; sector (third trade blocked); correlation 0.7999 /
+  0.8 / 0.8001 and the correlated budget; daily stop at 3,999.99 / 4,000 / 4,000.01; monthly pause; drawdown 9.99 / 10 /
+  10.01 and 14.99 / 15 / 15.01 %; kill-switch spike 19 / 20 / 21.
+- Every reason code produced by `decide` in a table, each with its text; all codes reported together.
+- Unknown inputs: capital (None, NaN, 0), positions, a position's risk / margin / open P&L, realised P&L, equity history,
+  a deposit amount, price status, decision time, regime, index status, market hours, quarantine count, cost rates,
+  sector, correlation, margin, lot size: each gives NO_TRADE.
+- Property tests (hypothesis, 500 random cases a run, hundreds of approvals across cash, index and stock options, with
+  zero, flat and the config.yaml cost rates): an approval never carries more risk than the configured percentage (with
+  the correlated group), never breaks the position cap or the capital pool, and the drawdown rule never adds size.
+- Capital doubled: every limit, share quantity and lot count doubles; the daily stop moves with it.
+- Deposits: never profit, never hide a drawdown; a withdrawal is not a loss. `/capital/log` stores entries and rejects
+  bad ones (type, negative, text, boolean, date format, future date, foreign Host).
+- The live service: quarantine window count, kill switch on at 20 in 5 minutes, outside market hours, stale index; a live
+  decision is NO_TRADE (PORTFOLIO_UNKNOWN) without positions.
+- Determinism; Phase 9 defaults unchanged; safety tests pass (the new write route is under `/capital/`).
+- App run in simulated mode (port 8765, separate database): `/api/risk` returned the limits at Rs 2,00,000, kill switch
+  off at 11:39 IST, portfolio not known; `POST /capital/log` stored a deposit; the dashboard shows the Risk engine card.
+
+### Not tested / known gaps
+- No real position has been sized: open positions, P&L and the equity history come from the phase 6 journal and paper
+  trader. Until then `RiskService` reports them as not known and every live decision is NO_TRADE.
+- The engine is not yet called by anything that produces live signals (phase 6 wires strategies -> risk -> cards).
+- The quarantine spike threshold (20 ticks in 5 minutes) is a starting value, not measured on live ticks.
+- Cost-inclusive cash sizing uses the cost model's estimate at the stop; real fills and contract notes may differ.
+- Margin for spreads must still be entered by hand (issue 46); without it every spread is MARGIN_UNKNOWN.
+
+### Decisions made in this phase (yours to change)
+- Cash risk includes the estimated round-trip charges and slippage at the stop, so the rupee risk never exceeds the
+  limit (the formula of the specification gives an upper bound and is applied first).
+- "At the limit" counts as reached: exactly 2% lost today stops, exactly 10% drawdown halves, exactly 15% pauses, the
+  20th quarantined tick in the window trips the kill switch. The capital pool allows committing exactly 75%.
+- "Correlation above 0.8 = one position": the held risk of the proposed symbol's correlated group is taken off the
+  proposed trade's budget (a correlated pair together risks no more than one trade); the same symbol always counts as
+  one position. Correlation exactly 0.8 is not linked.
+- NIFTY and BANKNIFTY share the sector "Index", so at most two open index trades at a time (any type). Change the tag in
+  config.yaml if you want each index counted on its own.
+- Halving sizes halves the risk budget and the position value cap (capital x 0.5 for sizing).
+- Stock option spreads (phase 9) skip the phase 5 capital pool, sector and correlation rules (the Phase 9
+  specification's capital-fit label and portfolio limits apply instead), but the kill switch, the daily stop, the monthly
+  pause and the drawdown pause and halving apply to them, because each only reduces risk.
+- Drawdown excludes deposits with a deposit-neutral index: a flow dated after one close and on or before the next is
+  taken out of that period's change.
+- The kill switch checks market hours in sim mode too (the hub does not); outside 09:15-15:30 IST it is on.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2022,7 +2123,11 @@ FII row or VIX spike lies after a stock's last bar, so the bound changes nothing
 | 90 | review | Pending entries dropped out of the portfolio book until their first synchronized bar; settlement estimate reused one hedge for several sold legs and counted cash from the first hedge only | Fixed 2026-11-16; rerun on stored data identical |
 | 89 | data | holidays.csv has 2026 only: settlement alerts for expiries from January 2027 are counted conservatively (one session earlier) | Waiting for user: add the 2027 NSE holidays when published |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
-| 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | For phase 5: sizing will give zero lots unless the width or the limit changes |
+| 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | Confirmed by phase 5 (2026-11-16): such a spread gets ZERO_SIZE at Rs 2,00,000. Waiting for user: narrower width, lower limit or more capital |
+| 91 | 5 | Every live risk decision is NO_TRADE (PORTFOLIO_UNKNOWN) because open positions, P&L and equity history are recorded by the phase 6 journal | Open: phase 6 |
+| 92 | 5 | NIFTY and BANKNIFTY share the sector tag "Index": at most two open index trades together | Waiting for user: keep, or give each index its own tag |
+| 93 | 5 | Kill-switch quarantine spike (20 ticks in 5 minutes) is a starting value | Open: check against a live market day (phase 6) |
+| 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Waiting for user: confirm |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -2134,4 +2239,8 @@ FII row or VIX spike lies after a stock's last bar, so the bound changes nothing
 | 2026-11-16 | Scenario history: every trigger date that is not a case is counted by reason (before the floor, no session within 5 days, same starting session, horizon not passed); the breach history counts its incomplete start days |
 | 2026-11-16 | Statistics floor: the breach history a decision reads is the last 504 closes on or after 2019-01-22; India VIX spikes are computed from VIX bars on or after 2019-01-22 only (older Breeze VIX is wrong-scale) |
 | 2026-11-16 | Reversal study baselines: the matching baseline is every washed-out session without a confirmation (same stocks, same sessions, same measurement; reference low = that day's 52-week low); every session is shown as a reference; differences are evidence only when neither side is LOW SAMPLE |
+| 2026-11-16 | Phase 5: cash risk includes estimated charges and slippage at the stop; a limit is reached at equality; correlation strictly above 0.8 links symbols, and a correlated group shares one position's risk budget; sizes halved = budget and position cap halved |
+| 2026-11-16 | Phase 5: NIFTY and BANKNIFTY tagged sector "Index"; unknown sector, correlation, positions, P&L, equity, margin, lot size, costs or kill-switch input = NO_TRADE |
+| 2026-11-16 | Phase 5: stock option spreads keep the phase 9 rules (capital advisory, phase 9 portfolio limits, never more lots than signalled) and also stop on the kill switch, loss stops and drawdown pause |
+| 2026-11-16 | Phase 5: deposits and withdrawals in `capital_log` (`POST /capital/log`); drawdown uses a deposit-neutral equity index |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

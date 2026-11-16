@@ -23,6 +23,13 @@ class Account(StrictModel):
     mode: Literal["paper", "live_manual"] = "paper"
 
 
+class KillSwitch(StrictModel):
+    """Phase 5 kill switch: all signals stop on a quarantined-tick spike (also on a stale index feed and
+    outside market hours, which need no setting)."""
+    quarantine_window_minutes: int = Field(5, ge=1, le=120)
+    quarantine_max_events: int = Field(20, ge=1, le=100_000)   # this many or more in the window = spike
+
+
 class Risk(StrictModel):
     max_loss_per_trade_pct: float = Field(gt=0, le=5)
     max_loss_per_option_pct: float = Field(gt=0, le=10)
@@ -32,6 +39,20 @@ class Risk(StrictModel):
     max_open_selling_spreads: int = Field(ge=0, le=10)
     drawdown_halve_pct: float = Field(gt=0, le=50)
     drawdown_pause_pct: float = Field(gt=0, le=50)
+    # phase 5: sector and correlation limits (counts and ratios, no rupee amounts)
+    max_trades_per_sector: int = Field(2, ge=1, le=20)           # open trades per sector, the proposed one included
+    correlation_window: int = Field(60, ge=20, le=252)           # sessions of daily returns, completed sessions only
+    correlation_threshold: float = Field(0.8, gt=0, lt=1)        # ABOVE this = one position (risk counted together)
+    correlation_min_overlap: int = Field(50, ge=10, le=252)      # common returns needed, else CORRELATION_UNKNOWN
+    kill_switch: KillSwitch = KillSwitch()
+
+    @model_validator(mode="after")
+    def ordered(self) -> "Risk":
+        if self.drawdown_halve_pct >= self.drawdown_pause_pct:
+            raise ValueError("risk.drawdown_halve_pct must be below risk.drawdown_pause_pct")
+        if self.correlation_min_overlap > self.correlation_window:
+            raise ValueError("risk.correlation_min_overlap cannot exceed risk.correlation_window")
+        return self
 
 
 class Feed(StrictModel):

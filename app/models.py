@@ -194,3 +194,46 @@ def signal_problems(s: "Signal") -> list[str]:
             out.append(f"{UNHEDGED_SHORT}: a sold option has no bought option of the same underlying, right "
                        f"and expiry further out of the money")
     return out
+
+
+# ---------------- phase 5: risk decisions ----------------
+APPROVED, NO_TRADE = "APPROVED", "NO_TRADE"
+
+
+@dataclass(frozen=True)
+class RiskDecision:
+    """The risk engine's answer for one signal (architecture.md section 6). APPROVED carries the quantity
+    (cash) or lots (options) and the rupee risk; NO_TRADE carries at least one reason code. Every number
+    is computed by code. `reasons` are the plain-language texts with the values that decided."""
+    status: str                          # APPROVED | NO_TRADE
+    reason_codes: tuple[str, ...]
+    quantity: int | None                 # cash: shares; options: lots x lot size
+    lots: int | None                     # options only
+    risk_inr: float | None               # loss at the stop or max loss, costs included
+    risk_pct: float | None               # of capital
+    est_profit_inr: float | None         # if the target is hit, after costs: an estimate, not a forecast
+    est_loss_inr: float | None           # if the stop is hit (spreads: maximum loss), costs included
+    costs_inr: float | None
+    margin_inr: float | None             # cash in the position or margin blocked
+    capital_fit: str | None              # FITS | TIGHT | NEEDS_MORE_CAPITAL
+    warnings: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+    size_factor: float = 1.0             # 0.5 while the drawdown rule halves sizes
+    facts: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.status not in (APPROVED, NO_TRADE):
+            raise ValueError(f"status {self.status!r} must be APPROVED or NO_TRADE")
+        if self.status == NO_TRADE and not self.reason_codes:
+            raise ValueError("a NO_TRADE decision needs at least one reason code")
+        if self.status == APPROVED and (self.reason_codes or not self.risk_inr or self.risk_inr <= 0
+                                        or not (self.quantity or 0) > 0):
+            raise ValueError("an APPROVED decision needs a positive quantity and risk and no reason codes")
+
+    def to_dict(self) -> dict:
+        return {"status": self.status, "reason_codes": list(self.reason_codes), "quantity": self.quantity,
+                "lots": self.lots, "risk_inr": self.risk_inr, "risk_pct": self.risk_pct,
+                "est_profit_inr": self.est_profit_inr, "est_loss_inr": self.est_loss_inr,
+                "costs_inr": self.costs_inr, "margin_inr": self.margin_inr, "capital_fit": self.capital_fit,
+                "warnings": list(self.warnings), "reasons": list(self.reasons), "size_factor": self.size_factor,
+                "facts": self.facts}

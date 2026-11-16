@@ -307,6 +307,42 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         result = import_margins(settings, store, text) if kind == "margins" else manual.import_text(kind, text)
         return JSONResponse(result, status_code=200 if result["ok"] else 400)
 
+    # ---- phase 5: risk engine (read-only status) and the capital log (deposits never count as profit) ----
+    from .risk.engine import RiskService
+    risk_service = RiskService(settings, store, hub, calendar)
+
+    @app.get("/api/risk")
+    def risk_status():
+        return risk_service.status(utcnow())
+
+    @app.post("/capital/log")
+    async def capital_log_entry(request: Request):
+        """Body: {"date": "YYYY-MM-DD", "type": "DEPOSIT" | "WITHDRAWAL", "amount": rupees, "note": "..."}.
+        Logged separately from trading results: never counted as profit or loss."""
+        import math
+        from datetime import date as _date
+        payload = await _json_body(request)
+        errors = []
+        try:
+            day = _date.fromisoformat(str(payload.get("date", "")))
+            if day > utcnow().astimezone(IST).date():
+                errors.append("date is in the future")
+        except ValueError:
+            errors.append("date must be YYYY-MM-DD")
+        kind = payload.get("type")
+        if kind not in ("DEPOSIT", "WITHDRAWAL"):
+            errors.append("type must be DEPOSIT or WITHDRAWAL")
+        amount = payload.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
+            errors.append("amount must be a positive number of rupees")
+        note = payload.get("note", "")
+        if not isinstance(note, str) or len(note) > 200:
+            errors.append("note must be text of at most 200 characters")
+        if errors:
+            return JSONResponse({"ok": False, "errors": errors}, status_code=400)
+        entry_id = store.add_capital_entry(day, kind, float(amount), note, utcnow())
+        return {"ok": True, "id": entry_id, "entries": len(store.capital_log())}
+
     @app.get("/", response_class=HTMLResponse)
     def home():
         return PAGE_HTML

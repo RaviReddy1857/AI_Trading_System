@@ -187,6 +187,10 @@ Data rules added 2026-11-13: option backtests use Breeze's historical option pri
 
 **Outcome:** Quantity and rupee risk on every signal, or NO TRADE with a reason
 
+**Status (2026-11-16):** built and tested on fixtures (`app/risk/`, `tests/test_phase5_*.py`). The requirement-to-code/test
+table, the decisions taken and what is not tested are in docs/STATUS.md, "Phase 5". Live decisions stay NO_TRADE
+(PORTFOLIO_UNKNOWN) until the phase 6 journal records open positions.
+
 ### Scope
 
 The risk engine. It is the only component allowed to approve a signal, and it can always say NO TRADE.

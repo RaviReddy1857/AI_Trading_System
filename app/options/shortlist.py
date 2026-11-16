@@ -208,8 +208,10 @@ def stock_view(settings: Settings, store: Store, source: str, sym: str, now: dat
     return out
 
 
-def store_correlations(settings: Settings, store: Store, source: str) -> Correlations:
-    """Daily-return correlations from the stored daily bars (completed sessions only)."""
+def store_correlations(settings: Settings, store: Store, source: str, window: int | None = None,
+                       min_overlap: int | None = None) -> Correlations:
+    """Daily-return correlations from the stored daily bars (completed sessions only). `window` and
+    `min_overlap` default to the phase 9 portfolio settings (phase 5 passes its own)."""
     cfg = settings.stock_option_selling.portfolio
     sessions = [bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source)]
     cache: dict = {}
@@ -223,7 +225,8 @@ def store_correlations(settings: Settings, store: Store, source: str) -> Correla
         bars = daily(sym)
         return gap_breaks([b.open for b in bars], [b.close for b in bars], settings.history.max_overnight_gap_pct)
 
-    return Correlations(daily, sessions, breaks, cfg.correlation_window, cfg.correlation_min_overlap)
+    return Correlations(daily, sessions, breaks, window or cfg.correlation_window,
+                        min_overlap or cfg.correlation_min_overlap)
 
 
 def correlation_groups(settings: Settings, store: Store, source: str) -> dict:
