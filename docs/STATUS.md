@@ -2383,6 +2383,49 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 - Pre-market plan only between 09:00 and 09:15 (not sent after the open); summary from 15:45.
 - Telegram is send-only; nothing reads incoming messages (the user asked to ignore other chats: none is read at all).
 
+
+## Stock option history download and report rerun (2026-11-16, after phase 6)
+
+`python -m app.options.stock_backtest --download` with a fresh Breeze login: **3,500 of 3,500 requests used**
+(today's budget), newest year first and the most liquid stock first; stopped on "request budget used", no Breeze
+error; no index contract missing. **20 stock-years completed:** 2026 HDFCBANK, BSE, BAJFINANCE, KOTAKBANK; 2025
+HDFCBANK, RELIANCE, BSE, BAJFINANCE, KOTAKBANK, SHRIRAMFIN, MARUTI, BEL, TATASTEEL, ITC, SUNPHARMA, HINDALCO,
+COALINDIA, ADANIENT, ONGC, HCLTECH. ADANIPORTS 2025 started (2 requests) and is still incomplete; the next run
+resumes there. 2025-2026 is now complete for 26 stocks; the report still wants 112 contracts that are not stored.
+
+The command then reran every report on what is stored. All at Rs 10,00,000: the command runs the Phase 4 reports
+with the stock-option capital too (`phase9_settings`), so these Phase 4 figures are NOT the Rs 2,00,000 rerun that
+issue 96 waits for. Standard cost rates, not yet verified against a contract note. Nothing was tuned; **no rule or
+default was changed because of these results (user).**
+
+| Report (run id) | Period | Strategy | Baseline | Verdict |
+|---|---|---|---|---|
+| `long_option` 1/556436ff (`long_option-20261116T101951Z-f95e38`) | 2019-01-22 .. 2026-06-05 | 79 trades, win 36.7%, net Rs 9,618.72, PF 1.03, Rs 121.76 a trade | 151 trades, net Rs 5,816.86, PF 1.01, Rs 38.52 a trade | beats baseline after costs (not a sample warning; PF barely above 1) |
+| `credit_spread` 1/15406561 | 2019-01-22 .. 2026-06-05 | 6 trades, net Rs -2,307.12, PF 0.51 | 265 trades, net Rs -1,26,716.04, PF 0.56 | no edge (low sample) |
+| `iron_condor` 1/156d148e | 2024-01-01 .. 2026-06-05 | 1 trade, net Rs 672.61 | 107 trades, net Rs -18,110.85, PF 0.75 | ahead on one trade (low sample) |
+| `stock_option_selling` 1/9714a6d2, 5-minute exits (`...-20261116T121621Z-3cdd9b`) | 2025-01-01 .. 2026-06-05, 26 stocks | 28 trades, win 53.6%, net Rs -26,799.00, PF 0.42, Rs -957.11 a trade | 137 trades, win 67.2%, net Rs -45,429.24, PF 0.67, Rs -331.60 a trade | no edge vs baseline (low sample) |
+| same, daily-close exits | same | 36 trades, Rs -568.90 a trade, PF 0.62 | 185 trades, Rs -399.71 a trade, PF 0.71 | no edge |
+| `reversal_put_spread` | 2025-01-01 .. 2026-06-05 | 0 trades | 80 trades, net Rs -84,819.64, PF 0.48 | no trades: no evidence |
+| `reversal_bull_call_spread` | same | 0 trades | 161 trades, net Rs -4,79,204.50, PF 0.62 | no trades: no evidence |
+
+Stock option selling: entries were mostly refused as ILLIQUID (124), UPTREND_BLOCK (73), MARKET_WEAK (62),
+CREDIT_TOO_SMALL (31); 8 campaigns data-incomplete. Reversal study: 27 confirmations in 19 stocks, LOW SAMPLE (26
+completed windows); the confirmations trail the matching washed-out baseline at 10, 20 and 40 sessions.
+
+**Holdout check (requested by the user).** The daily holdout starts 2026-06-08 (`backtest.holdout_start.1day`).
+1. Every saved run above reports period end 2026-06-05 and holdout "untouched"; every date in all their stored trades
+   (entries, exits, marks of positions open at the cutoff) is on or before 2026-06-05. The engines stop at the last
+   development session (`OptionEngine.last_session`, `liquid_stocks(before=holdout start)`); the reversal study
+   excludes any window whose horizon passes the tested period (counted as "horizon past the tested period").
+2. Stronger check for the three Phase 4 reports: on a copy of the live database from which every price row on or
+   after 2026-06-08 was deleted (bars_1m, bars_1d, bars_5m, option_bars, external bars, FII/DII, positioning, regime
+   log: 562,209 rows), `long_option`, `credit_spread` and `iron_condor` were rerun at the same capital: **strategy and
+   baseline identical** to the saved runs in trades, win rate, net, costs, drawdown and profit factor. So no holdout
+   price affected them. (A first attempt at Rs 2,00,000 gave zero trades for both spreads - every width ZERO_SIZE, as
+   recorded in phase 5 - which showed the saved runs used Rs 10,00,000; it was not a holdout effect.)
+3. Not rerun on the truncated copy (they take about 1.5 hours): `stock_option_selling` and the two reversal reports.
+   For these the evidence is item 1 only (trade dates and the code's cut-off), not the truncation test.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2431,7 +2474,7 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 52 | review | Phase 4 review: unequal-width condor reported a breakeven that is not real | Fixed 2026-11-13 |
 | 53 | review | Phase 4 review: baseline retried failed days and waited for the previous position | Fixed 2026-11-13: one fixed scheduled attempt per expiry; baselines rerun (no verdict change) |
 | 54 | review | After the schedule fix the phase 4 baselines want 31 contracts that are not stored | Fixed 2026-11-14: downloaded (12 requests), index backtests rerun, no verdict changed |
-| 55 | 9 | Stock option history is only partly downloaded (9 stocks, Jan-Jun 2026); every stock result is LOW SAMPLE | Open: run `python -m app.options.stock_backtest --download` each day with a fresh Breeze login (3,500 requests a day) |
+| 55 | 9 | Stock option history is only partly downloaded; every stock result is LOW SAMPLE | Open: 2025-2026 complete for 26 stocks after the 2026-11-16 download (112 contracts still wanted; ADANIPORTS 2025 next). Run `python -m app.options.stock_backtest --download` each day with a fresh Breeze login (3,500 requests a day) |
 | 56 | 9 | Today's last download run was stopped by the system because the machine was low on memory; about 1,900 of the day's requests were not used | Waiting for user: rerun the download command (close other programs first) |
 | 57 | 9 | Scenario history has no FII/DII, RBI or results dates | Waiting for user: fill `data/fii_dii.csv` and `data/events.csv` (table above) |
 | 58 | 9 | The roll-by-rules policy made no roll in the downloaded period; not yet checked which rule refused each of the 13 stopped baseline trades | Closed 2026-11-14: traced (7 falling-stock block, 4 too little history after a price break, 2 no qualifying replacement, 2 approved but not fillable); refusals are now recorded on every trade |
@@ -2473,7 +2516,7 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 93 | 5 | Kill-switch quarantine spike (20 ticks in 5 minutes) is a starting value | Open: check against a live market day (phase 6) |
 | 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Closed 2026-11-16: confirmed (user) |
 | 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Decided 2026-11-16 (user): two pools - stock options, and cash plus index. Each pool's daily stop, monthly pause and drawdown (halve and pause) count only that pool's P&L and equity, as % of that pool's capital. Built 2026-11-16 (phase 6 M1): the journal keeps P&L and equity per pool and `decide` receives the signal's pool (test: a loss in one pool never stops or halves the other) |
-| 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun later (user, 2026-11-16) |
+| 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun later (user, 2026-11-16). The 2026-11-16 download reran them at Rs 10,00,000 (the stock-option capital), not at account.capital_inr Rs 2,00,000 |
 | 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
 | 98 | review | Negative commitment or risk was summed into the pool and limits | Fixed 2026-11-16: refused (PORTFOLIO_UNKNOWN) |
 | 99 | review | NaN or infinite correlation, open interest, IV rank, margin, risk or budget passed limit checks | Fixed 2026-11-16: unknown everywhere (table in "Review fixes: Codex review of d7581e7..0f908c2") |
@@ -2493,6 +2536,7 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 105 | 6 | Market depth is not recorded (quote stream subscribed without depth; the chain has none) | Open: subscribing with depth is a later change if wanted |
 | 106 | 6 | With the default stock-spread stop (buy back at 2x credit) the risk equals the credit, so no 1.5R trailing call can arise for a stock spread | Closed 2026-11-16: left as is (user) |
 | 107 | 6 | Phase 9 portfolio check needs `history_verified`, which stays False live: stock option selling signals would be PORTFOLIO_UNKNOWN | Open: phase 9 remainder (stock option selling signals are not generated in phase 6) |
+| 108 | data | `python -m app.options.stock_backtest` runs the Phase 4 option reports (long_option, credit_spread, iron_condor) at the stock-option capital Rs 10,00,000, not account.capital_inr | Reported 2026-11-16; nothing changed |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
 ## Decisions log
