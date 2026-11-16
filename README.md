@@ -501,6 +501,15 @@ why, with the numbers, and repeats every 15 minutes (`alerts.exit_call_repeat_mi
 closed. Thresholds are in `exits` in config.yaml. A stale price pauses the price checks; it never triggers or
 silences a call.
 
+**Telegram alerts are OFF until you switch them on.** To switch on: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+(your own chat with the bot) in `.env`, set `alerts.telegram_enabled: true` in config.yaml and restart. The app only
+sends to that chat and never reads incoming messages. Then, per trade type, switch alerts on at `/signals` (or
+`POST /journal/alert-switches`). A signal alert also needs its strategy's `strategies.status` entry to say
+`alerts: true`; today every strategy says `false` (their backtests show no edge), so only exit calls, settlement
+alerts, the kill switch, the daily stop, the pre-market plan (09:00) and the end-of-day summary (15:45) are sent.
+Every alert and its delivery state is listed under "Alerts" on `/signals` (`GET /api/alerts`); a failed send is
+retried and shown as "not delivered" if it expires first.
+
 A sold option without a bought option of the same right and expiry is stored and flagged **UNHEDGED** (its maximum
 loss is shown as not known for a call, strike-based for a put). The six alert switches start OFF.
 
@@ -552,6 +561,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 - `app/engine.py`, `app/cards.py`, `app/scoring.py`, `app/track.py`, `app/paper.py`, `app/execution.py`,
   `app/positions.py` - phase 6: the live loop, signal cards, the score, track records, the paper trader, execution
   records and the slippage report, exit calls
+- `app/telegram.py`, `app/alerts.py`, `app/schedule.py` - phase 6: the send-only Telegram client, the alert log
+  and what is sent, the pre-market plan and end-of-day summary
 - `app/journal.py`, `app/pricing.py`, `app/switches.py` - phase 6: signals, decisions, positions, paper trades and the
   account state of each capital pool; quotes with their status; the trade-type alert switches
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside

@@ -189,7 +189,7 @@ class SignalEngine:
         self.j.set_state("last_bar_utc", b.isoformat(), now)
         if self.notifier is not None:
             try:
-                self.notifier.on_bar(rank(approved), due, now)
+                self.notifier.on_bar(rank(approved), due, now, self.kill_reasons(now))
             except Exception:
                 log.exception("alerts failed (signals and paper trading carry on)")
         self.last_summary = {"bar_utc": b.isoformat(), "regime": regime, "signals": len(stored),

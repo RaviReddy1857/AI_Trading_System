@@ -24,7 +24,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
-| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) and M2 (signal loop, cards, score, paper trader, execution records, exit calls) built and tested | 1054 passing (whole suite) | |
+| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) M2 (signal loop, cards, score, paper trader, execution records, exit calls) and M3 (Telegram, switches, scheduled messages, settlement alert sending) built and tested | 1070 passing (whole suite) | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2299,6 +2299,35 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
   recorded (the feed is subscribed without it). Index option buying never triggers live: the cash strategies do not
   run on indices (same as the backtests).
 
+### M3: Telegram, the trade-type selector, scheduled messages, settlement alert sending (built)
+- `app/telegram.py` `TelegramSender`: send-only. One Bot API method (sendMessage), to `TELEGRAM_CHAT_ID` only; it
+  never asks for incoming updates and runs no webhook, so messages from any other chat are never read. The token and
+  chat id are read from the environment at send time; every error text is redacted; a missing setting is named,
+  never shown. **Nothing is sent while `alerts.telegram_enabled` is false (the shipped value).**
+- `app/alerts.py`: `alert_log` (key, channel, kind, text, attempts, sent_at, error, status PENDING / SENT /
+  NOT_DELIVERED / OFF); one row per key, never sent twice; retries with back-off (30 s doubling to 10 minutes) until
+  delivered or expired, then NOT_DELIVERED; while Telegram is off every alert is logged as OFF and never sent later.
+  `Notifier`: approved signals whose switch is on AND whose `strategies.status` allows alerts, the 3 best scores of a
+  bar, at most 10 a day, never after valid-until; every exit call due (whatever the switches), settlement alerts
+  repeating by level (`alerts.settlement_repeat_minutes`); the kill switch once per episode; each pool's daily stop
+  once a day.
+- `app/schedule.py`: the pre-market plan (09:00 to 09:15 IST: regime, bias, events, previous-session levels, open
+  positions) and the end-of-day summary (from 15:45: signals given, taken, skipped, paper and realised P&L by pool,
+  open positions with their stops), once a trading day; `GET /api/plan`.
+- `GET /api/alerts` (log, pending, not delivered, whether Telegram is configured - never the values);
+  `GET /api/alert-switches` now carries each type's track record and label (UNPROVEN or the status labels).
+- Tested (16 new tests, `test_phase6_telegram.py`, `test_phase6_switches.py`; whole suite 1070 passing): sendMessage
+  only, to the configured chat; the token and chat id never in an error, a log line or an alert_log row; no code
+  reads incoming messages; OFF until switched on; retry and back-off timings, never twice, NOT_DELIVERED at expiry;
+  **switch off = paper only, no alert; switch on with `alerts: false` = no alert; switch on with `alerts: true` = one
+  alert** (end to end through the live loop); top 3 per bar and the daily cap; an expired signal is not sent; exit
+  calls always sent (UNHEDGED named); kill switch once per episode; daily stop once per pool and day; the
+  settlement alert sent and repeated at the URGENT interval; the pre-market plan inside its window only, the summary
+  once.
+- Not tested here: a real message to your phone. Every strategy's `strategies.status` is `alerts: false` today, so even
+  with a switch on no signal alert is sent until you change a status in config.yaml (exit calls and system alerts do not
+  depend on it).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2329,7 +2358,7 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 24 | 3 | Options IPFT rate empty (sources disagree) | Fixed 2026-11-13: NSE circular NSE/FA/73061 (user) - Rs 3,553/crore of premium each side including IPFT; IPFT set to 0 so it is not counted twice |
 | 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Fixed 2026-11-13: rerun at Prime 4999 rates; all still negative after costs |
 | 35 | 3b | Backtest start-up wrote holidays to the database and failed while the app held the write lock | Fixed 2026-11-13: holidays read from the CSV, nothing written |
-| 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Waiting for user (default: both) |
+| 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Built 2026-11-16 with the default (both); waiting for user to confirm. Today every strategy's status has alerts: false |
 | 37 | plan | Meaning of "stop at 2x credit" for stock spreads | Waiting for user (default: buy-back cost reaches 2x credit) |
 | 38 | plan | Whether Breeze provides historical option prices | Fixed 2026-11-13: yes (expired contracts too, to at least 2017, daily/5-minute/1-minute, volume and OI; trades only, no bid/ask). Option backtests use them |
 | 39 | review | Engine validated the raw open, not the slipped fill, against stop/target | Fixed 2026-11-13: fill after slippage checked (`FILL_BEYOND_STOP_OR_TARGET`); no real trade affected |

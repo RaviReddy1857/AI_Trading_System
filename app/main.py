@@ -199,12 +199,25 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                           execbook=execbook, paper=paper, exits=exitbook, now_fn=utcnow)
     engine_info = {"started_utc": utcnow().isoformat(), "restored": engine.restore(utcnow())}
 
+    # ---- phase 6: alerts (Telegram send-only; OFF until alerts.telegram_enabled is true) ----
+    from .alerts import AlertBook, Notifier
+    from .telegram import TelegramSender
+    alertbook = AlertBook(store, settings)
+    notifier = Notifier(settings, alertbook, journal, risk_service, TelegramSender(settings.alerts.send_timeout_seconds),
+                        calendar, store=store, regime=regime)
+    notifier.source = feed.name
+    engine.notifier = notifier
+
     def engine_loop() -> None:
         while not stop.is_set():
             try:
                 engine.step()
             except Exception:
                 log.exception("signal loop step failed (it carries on)")
+            try:
+                notifier.tick(utcnow())
+            except Exception:
+                log.exception("alert dispatch failed (it carries on)")
             stop.wait(settings.engine.poll_seconds)
 
     @asynccontextmanager
@@ -472,14 +485,19 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     @app.get("/api/alert-switches")
     def api_alert_switches():
         from .journal import TRADE_TYPE_NAMES
+        from .track import all_type_records
         sw = journal.switches()
-        return {"switches": [{"type": t, "name": TRADE_TYPE_NAMES[t], **sw[t]} for t in sw],
+        tracks = all_type_records(store, journal, settings)
+        return {"switches": [{"type": t, "name": TRADE_TYPE_NAMES[t], **sw[t], "track": tracks[t]} for t in sw],
+                "telegram_enabled": settings.alerts.telegram_enabled,
                 "log": journal.switch_log(50),
                 "note": "Switches control alerts only; every strategy keeps paper-trading. Exit calls for positions "
                         "you hold are always sent."}
 
     app.state.journal = journal
     app.state.engine = engine
+    app.state.alerts = alertbook
+    app.state.notifier = notifier
 
     # ---- phase 6: read-only views of signals, positions, paper trades and execution ----
     @app.get("/api/signals")
@@ -530,6 +548,21 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                 "last": engine.last_summary, "problems": engine.problems,
                 "strategies": {"intraday": [s.id for s in engine.cash], "swing": [s.id for s in engine.swing],
                                "options": [s.id for s in desk.strategies]}}
+
+    @app.get("/api/alerts")
+    def api_alerts():
+        from .telegram import TelegramSender
+        ok, why = TelegramSender().configured()
+        return {**alertbook.view(), "telegram_configured": ok, "telegram_problem": why or None,
+                "note": "Send-only to your own chat (TELEGRAM_CHAT_ID); incoming messages are never read. The token "
+                        "is never shown."}
+
+    @app.get("/api/plan")
+    def api_plan():
+        from .schedule import eod_summary, premarket_plan
+        now = utcnow()
+        return {"premarket": premarket_plan(settings, store, journal, regime, now, feed.name),
+                "end_of_day": eod_summary(settings, journal, now)}
 
     @app.get("/signals", response_class=HTMLResponse)
     def signals_page():
