@@ -82,7 +82,7 @@ phase 6 journal, so live decisions are NO_TRADE (PORTFOLIO_UNKNOWN) until then.
 Index credit spreads and iron condors (user decision 2026-11-16) receive the option risk budget in
 `OptionContext.option_risk_budget_inr` (the effective limit after drawdown halving, `effective_option_budget`; the
 Phase 4 option backtest uses the full limit): when one lot at the configured width is above it, they take the widest listed
-width down to `min_hedge_width_points` (100) that fits one lot, else NO TRADE (ZERO_SIZE); the limit is never raised.
+width down to `min_hedge_width_points` (100) that passes every rule (`credit_spread.choose_width`: a failure of one width - hedge illiquid or unpriced, credit, one lot above the limit, no margin entry - moves on to the next narrower width), else NO TRADE listing every width tried; the limit is never raised. NaN and infinity are unknown in every risk and option limit check.
 
 ## 4. Technology
 
