@@ -400,6 +400,12 @@ class RiskService:
 
     def __init__(self, settings, store, hub, calendar):
         self.s, self.store, self.hub, self.calendar = settings, store, hub, calendar
+        self.journal = self.marker = self.costs = None
+        self.now_fn = None
+
+    def attach(self, journal, marker, costs, now_fn) -> None:
+        """Phase 6: open positions, P&L and equity per pool come from the journal (app/journal.py)."""
+        self.journal, self.marker, self.costs, self.now_fn = journal, marker, costs, now_fn
 
     def _status_of(self, symbol: str, now: datetime) -> str | None:
         return next((row["status"] for row in self.hub.snapshot(now) if row["symbol"] == symbol), None)
@@ -424,9 +430,21 @@ class RiskService:
         r = self.s.risk
         return store_correlations(self.s, self.store, source, r.correlation_window, r.correlation_min_overlap)
 
-    def account_state(self) -> AccountState:
-        return AccountState(capital_inr=self.s.account.capital_inr, positions=None, realised_today_inr=None,
-                            realised_month_inr=None, equity_curve=None, flows=tuple(self.store.capital_flows()))
+    def account_state(self, pool: str = "CASH_INDEX", now: datetime | None = None) -> AccountState:
+        """The account state of one capital pool (phase 6, issue 95): CASH_INDEX (account.capital_inr) or
+        STOCK_OPTIONS (stock_option_selling.backtest.capital_inr). Without the journal: positions not known."""
+        return self.pool_state(pool, now)[0]
+
+    def pool_state(self, pool: str = "CASH_INDEX", now: datetime | None = None) -> tuple[AccountState, dict]:
+        flows = tuple(self.store.capital_flows())
+        if self.journal is None:
+            cap = self.s.account.capital_inr if pool == "CASH_INDEX" else stock_capital(self.s)
+            return (AccountState(capital_inr=cap, positions=None, realised_today_inr=None, realised_month_inr=None,
+                                 equity_curve=None, flows=flows if pool == "CASH_INDEX" else ()),
+                    {"pool": pool, "unknown": ["open positions are not known (no journal)"]})
+        from ..journal import pool_account
+        now = now or (self.now_fn() if self.now_fn else datetime.now(timezone.utc))
+        return pool_account(self.journal, self.s, pool, now, self.marker.marks, self.costs, flows)
 
     def status(self, now: datetime) -> dict:
         """For GET /api/risk: the limits in rupees, the kill switch, and what is not known yet."""
@@ -435,7 +453,12 @@ class RiskService:
         stock_cap = stock_capital(s)
         m = self.market_state(s.regime.index_symbol, now)
         ks = kill_switch(s.regime.index_symbol, m.index_status, m.quarantined_recent, m.market_open, r.kill_switch)
-        acct = self.account_state()
+        pools = {}
+        for pool in ("CASH_INDEX", "STOCK_OPTIONS"):
+            acct, f = self.pool_state(pool, now)
+            probs = position_problems(acct.positions)
+            pools[pool] = {**f, "known": not probs and acct.equity_curve is not None, "problems": probs[:5]}
+        acct = self.account_state("CASH_INDEX", now)
         problems = position_problems(acct.positions)
         log = self.store.capital_log()
         return {
@@ -451,8 +474,8 @@ class RiskService:
                             "index_status": m.index_status, "market_open": m.market_open,
                             "quarantined_recent": m.quarantined_recent, **r.kill_switch.model_dump()},
             "portfolio": {"known": not problems, "problems": problems,
-                          "note": "open positions and P&L come from the phase 6 journal; until then every live "
-                                  "signal is NO_TRADE (PORTFOLIO_UNKNOWN)"},
+                          "note": "open positions and P&L come from the phase 6 journal, per capital pool"},
+            "pools": pools,
             "capital_log": {"entries": len(log),
                             "deposits_inr": round(sum(e["amount"] for e in log if e["type"] == "DEPOSIT"), 2),
                             "withdrawals_inr": round(sum(e["amount"] for e in log if e["type"] == "WITHDRAWAL"), 2),

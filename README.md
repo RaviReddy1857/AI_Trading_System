@@ -447,8 +447,8 @@ A limit is reached when the value equals it (exactly 2% lost today = stopped). C
 **Unknown is never assumed.** Unknown capital, open positions, P&L, equity history, margin, lot size, cost rates,
 sector, correlation or kill-switch input gives NO_TRADE with a code (`CAPITAL_UNKNOWN`, `PORTFOLIO_UNKNOWN`,
 `MARGIN_UNKNOWN`, `LOT_SIZE_UNKNOWN`, `DATA_MISSING`, `CORRELATION_UNKNOWN`, `KILL_SWITCH`, ...).
-**Your open positions are recorded by the phase 6 journal, so until phase 6 is built every live decision is NO_TRADE
-(`PORTFOLIO_UNKNOWN`).** Phase 5 itself issues no signals and sends nothing.
+Open positions, P&L and equity come from the phase 6 journal, per capital pool (below). Phase 5 itself issues no
+signals and sends nothing.
 
 Stock option spreads (phase 9) keep their own rules and their own capital: every rupee figure is a % of
 `stock_option_selling.backtest.capital_inr` (Rs 10,00,000), not `account.capital_inr` - so their risk limit is
@@ -466,6 +466,28 @@ drawdown calculation). From the command line (Windows PowerShell, app running):
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/capital/log -ContentType application/json `
   -Body '{"date": "2026-11-16", "type": "DEPOSIT", "amount": 50000, "note": "top-up"}'
 ```
+
+## Phase 6: live signals and alerts, paper mode (in progress)
+
+Research and suggestions only: nothing is ever sent to the broker. Every write below is a journal entry.
+
+**Two capital pools.** Stock option selling (any position with a sold stock option leg) uses
+`stock_option_selling.backtest.capital_inr` (Rs 10,00,000); everything else - intraday and swing stocks, index options,
+stock option buying - uses `account.capital_inr` (Rs 2,00,000). Each pool has its own realised and open P&L and its own
+equity history, so a loss in one pool never stops or halves the other. Deposits (`/capital/log`) belong to the cash and
+index pool. See both at `GET /api/positions` (`pools`) and `GET /api/risk` (`pools`).
+
+**Journal routes** (JSON body, from this computer only):
+| What | Route | Body |
+|---|---|---|
+| I took / skipped a signal | `POST /journal/{signal_id}/decision` | `{"decision": "TOOK", "fill_price": 101.5, "note": "..."}` (options: `"fills": [price per leg]`; optional `"quantity"`/`"lots"`, `"fill_time"`). Refused after the signal's valid-until |
+| A position I opened myself | `POST /journal/positions` | cash: `{"symbol", "trade_type": "INTRADAY_STOCKS"/"SWING_STOCKS", "direction": "LONG"/"SHORT", "quantity", "entry_price", "entry_date", "stop"?, "target"?}`; options: `{"symbol", "kind": "index"/"stock", "entry_date", "legs": [{"action", "right", "strike", "expiry", "lots", "lot_size", "price"}], "margin_inr"?, "stop"?, "target"?}` |
+| I closed it (all or part) | `POST /journal/positions/{id}/close` | `{"exit_price": x}` or `{"exit_prices": [per leg]}`, optional `"quantity"`/`"lots"` |
+| I moved my stop | `POST /journal/positions/{id}/stop` | `{"stop": x}` |
+| Alerts for one trade type on/off | `POST /journal/alert-switches` | `{"type": "SWING_STOCKS", "on": true}` |
+
+A sold option without a bought option of the same right and expiry is stored and flagged **UNHEDGED** (its maximum
+loss is shown as not known for a call, strike-based for a put). The six alert switches start OFF.
 
 ## Status values
 | Status | Meaning |
@@ -512,6 +534,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/capital/log -ContentTy
   JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`, `/api/options`, `/api/options/{underlying}` and
   the page `/options`; `POST /data/import/margins` for your margin entries; `GET /api/risk` and
   `POST /capital/log` (phase 5)
+- `app/journal.py`, `app/pricing.py`, `app/switches.py` - phase 6: signals, decisions, positions, paper trades and the
+  account state of each capital pool; quotes with their status; the trade-type alert switches
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 

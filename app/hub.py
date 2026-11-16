@@ -103,6 +103,22 @@ class MarketHub:
             return {"last": t.last, "at": t.received_at, "day_high": hi, "day_low": lo,
                     "range_source": src}
 
+    def quote(self, symbol: str, now: datetime | None = None) -> dict:
+        """The last good tick of a symbol WITH its status (LIVE, STALE, NO_DATA, CLOSED), for execution
+        records: a stale or missing quote is reported as such, never as zero and never filled in."""
+        now = now or utcnow()
+        with self._lock:
+            t = self._last_good.get(symbol)
+            status = self._status(t, now)
+            if t is None:
+                return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
+            return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
+
+    def last_tick_at(self) -> datetime | None:
+        """Time of the newest good tick of any symbol (None before the first)."""
+        with self._lock:
+            return max((t.received_at for t in self._last_good.values()), default=None)
+
     def stats(self) -> dict:
         with self._lock:
             return {"good_ticks": self._good_count, "quarantined_ticks": self._bad_count}

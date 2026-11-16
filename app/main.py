@@ -105,6 +105,21 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
 
     from .risk.engine import RiskService
     risk_service = RiskService(settings, store, hub, calendar)     # phase 5: also the Options page's option risk limit
+
+    # ---- phase 6: journal (signals, decisions, positions, paper trades) per capital pool ----
+    from .costs import CostModel, MissingCostRates
+    from .journal import CASH_INDEX, POOLS, STOCK_OPTIONS, Journal, JournalError, pool_capital
+    from .pricing import Marker
+    journal = Journal(store, settings)
+    marker = Marker(settings, store, hub, feed.name)
+    try:
+        cost_model = CostModel(settings.costs)
+        cost_model.require("intraday_equity", "delivery_equity", "options")
+    except MissingCostRates:
+        cost_model = None                     # every figure that needs charges is then unknown (NO_TRADE)
+    risk_service.attach(journal, marker, cost_model, utcnow)
+    for _pool in POOLS:
+        journal.ensure_equity_start(_pool, utcnow(), pool_capital(settings, _pool))
     desk = OptionDesk(settings, store, feed.name, live_price, regime_name, option_budget_fn=risk_service.option_budget)
     book = InstrumentBook(store, feed.name)
     if feed.name == "breeze":
@@ -341,6 +356,85 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             return JSONResponse({"ok": False, "errors": errors}, status_code=400)
         entry_id = store.add_capital_entry(day, kind, float(amount), note, utcnow())
         return {"ok": True, "id": entry_id, "entries": len(store.capital_log())}
+
+    # ---- phase 6: journal writes (journal only: nothing is sent to the broker) ----
+    def _journal_result(fn):
+        try:
+            return fn()
+        except JournalError as e:
+            return JSONResponse({"ok": False, "errors": [str(e)]}, status_code=e.status)
+
+    @app.post("/journal/alert-switches")
+    async def journal_alert_switch(request: Request):
+        """Body: {"type": one of the six trade types, "on": true | false}. Alerts only; paper trading goes on."""
+        from .switches import parse_switch_body
+        payload = await _json_body(request)
+        try:
+            t, on = parse_switch_body(payload)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "errors": [str(e)]}, status_code=400)
+        return {"ok": True, **journal.set_switch(t, on, utcnow())}
+
+    @app.post("/journal/positions")
+    async def journal_add_position(request: Request):
+        """A position I opened outside a signal (cash, or option legs). It gets the same exit calls."""
+        payload = await _json_body(request)
+        return _journal_result(lambda: {"ok": True, "position": journal.add_manual_position(payload, utcnow()).to_view()})
+
+    @app.post("/journal/positions/{position_id}/close")
+    async def journal_close_position(position_id: str, request: Request):
+        """I closed all or part of a position: {"exit_price": x} or {"exit_prices": [per leg]}, optional
+        "quantity"/"lots" (partial), "exit_time", "note". Exit calls stop once it is fully closed."""
+        payload = await _json_body(request)
+        return _journal_result(lambda: journal.close_position(position_id, payload, utcnow(), cost_model))
+
+    @app.post("/journal/positions/{position_id}/stop")
+    async def journal_position_stop(position_id: str, request: Request):
+        """I moved my stop (after a breakeven or trailing call): {"stop": x}."""
+        payload = await _json_body(request)
+        return _journal_result(lambda: {"ok": True, "position": journal.set_stop(position_id, payload, utcnow()).to_view()})
+
+    @app.post("/journal/{signal_id}/decision")
+    async def journal_decision(signal_id: str, request: Request):
+        """'I took this trade' / 'I skipped it': {"decision": "TOOK"|"SKIPPED", "note", "fill_price" or
+        "fills" (one per leg), "fill_time", "quantity"/"lots"}. Refused after the signal's valid-until."""
+        payload = await _json_body(request)
+        return _journal_result(lambda: journal.record_decision(signal_id, payload, utcnow()))
+
+    @app.post("/journal/{signal_id}/exit")
+    async def journal_signal_exit(signal_id: str, request: Request):
+        """Close the position I took from this signal (same body as /journal/positions/{id}/close)."""
+        payload = await _json_body(request)
+        d = journal.decision(signal_id)
+        if not d or not d.get("position_id"):
+            return JSONResponse({"ok": False, "errors": ["no position was taken from this signal"]}, status_code=404)
+        return _journal_result(lambda: journal.close_position(d["position_id"], payload, utcnow(), cost_model))
+
+    @app.get("/api/positions")
+    def api_positions():
+        now = utcnow()
+        def view(p):
+            prices, why = marker.marks(p, now)
+            from .journal import open_pnl
+            v = open_pnl(p, prices, cost_model)
+            return {**p.to_view(), "open_pnl_inr": None if v is None else float(v),
+                    "price_note": why or None, "closes": journal.closes(p.position_id)}
+        return {"as_of_utc": now.isoformat(),
+                "open": [view(p) for p in journal.positions("OPEN")],
+                "closed": [{**p.to_view(), "closes": journal.closes(p.position_id)}
+                           for p in journal.positions("CLOSED")][-50:],
+                "pools": {pool: risk_service.pool_state(pool, now)[1] for pool in POOLS}}
+
+    @app.get("/api/alert-switches")
+    def api_alert_switches():
+        from .journal import TRADE_TYPE_NAMES
+        sw = journal.switches()
+        return {"switches": [{"type": t, "name": TRADE_TYPE_NAMES[t], **sw[t]} for t in sw],
+                "log": journal.switch_log(50),
+                "note": "Switches control alerts only; every strategy keeps paper-trading. Exit calls for positions "
+                        "you hold are always sent."}
+
+    app.state.journal = journal
 
     @app.get("/", response_class=HTMLResponse)
     def home():

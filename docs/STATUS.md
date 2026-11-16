@@ -24,7 +24,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
-| 6 | Live signals and alerts (paper mode) | Not started | | |
+| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) built and tested | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2167,6 +2167,83 @@ the credit rule to end the search instead, it is one line in `_candidate_problem
 (2026-11-16, issue 100 closed); the minimum-credit rule still applies to the chosen width.** Strategy versions do not change
 (no setting changed); stored Phase 4 option backtests stay as before (issue 96, rerun later).
 
+## Phase 6: live signals and alerts, paper mode (2026-11-16)
+
+### Requirement-to-code/test table (written before the code)
+
+Milestones: **M1** journal and positions (with the two capital pools), **M2** signal cards, paper trader, execution
+records and exit calls, **M3** Telegram, the trade-type selector, scheduled messages and settlement alert sending,
+**M4** failure recovery. Each milestone is committed and reported on its own.
+
+| Req | Requirement (docs/implementation.md phase 6) | Code | Test | M |
+|---|---|---|---|---|
+| S1 / P6.1 | On every closed 5-minute bar: regime, allowed strategies, risk engine, store approved or NO_TRADE with reasons in `signals`; nothing sent to the broker | `app/engine.py` `SignalEngine.on_bar` (5-minute bars built from the stored 1-minute bars; swing strategies on the daily bars at the first bar of a session; phase 4 option strategies through `OptionDesk`); `app/journal.py` `signals` | `test_phase6_engine.py`: fixture bars -> stored card (end to end through the HTTP API) | M2 |
+| S2 / P6.2 | Card: instrument, direction, entry zone, stop, target, quantity or lots, valid-until, strategy id and version, regime, data timestamp; NO_TRADE cards too, collapsed | `app/cards.py` `build_card` | `test_phase6_cards.py`: every field present on an approved card; NO_TRADE card carries reasons and `collapsed` | M2 |
+| S2a / P6.3 | 'Why now' in plain words from the rule conditions that fired (+ regime, FII bias, events this week) | `app/cards.py` `why_now` | `test_phase6_cards.py` | M2 |
+| S2b / P6.3 | 'Estimate' in rupees: profit at target (option selling: premium collected), loss at stop (spreads: max loss), risk-reward, costs, breakevens; labelled "Estimate if target is hit, not a forecast" | `app/cards.py` `estimate` (figures from the RiskDecision and the signal details) | `test_phase6_cards.py`: hand calculation | M2 |
+| S2c / P6.4 | Hit rate and average result from backtest and paper trades with the count; "low sample" under 30; never a probability without recorded trades | `app/track.py` `track_record` | `test_phase6_cards.py`: 29 / 30 trades; no trades = no rate | M2 |
+| S3 / P6.5 | Telegram through a bot token in .env; approved signals only, plus daily stop / kill switch messages; failure logged, app carries on | `app/telegram.py` `TelegramSender` (sendMessage only, to TELEGRAM_CHAT_ID only; token never printed, logged or stored; errors redacted); `app/alerts.py` | `test_phase6_telegram.py`: fake HTTP; token absent from every log line, alert_log row and error; only the configured chat id; no getUpdates | M3 |
+| S3' | User: alerts stay OFF until switched on | `config.yaml` `alerts.telegram_enabled: false` (master switch) + the six type switches default off | `test_phase6_telegram.py`: master off -> nothing sent, logged "Telegram off" | M3 |
+| S3'' | User: ignore messages from any other chat | The app never reads incoming messages (no getUpdates, no webhook) | `test_phase6_telegram.py`: the sender calls sendMessage only | M3 |
+| S4 / P6.6 | Paper trader: every approved signal filled at the next bar's open, tracked to stop / target / time exit, with costs | `app/paper.py` `PaperTrader` (cash: `app.costs`; options: leg quotes, sell at bid / buy at ask) | `test_phase6_paper.py`: fills at next open (never the signal bar), stop-first rule, time exit, net P&L to the paise | M2 |
+| S5 / P6.7 | 'I took this trade' / 'I skipped it', optional note and fill price; journal only | `POST /journal/{signal_id}/decision`; `app/journal.py` | `test_phase6_journal.py` | M1 |
+| S6 / P6.8 | Signals expire at valid-until; cannot be acted on afterwards | `app/journal.py` (TOOK refused after valid-until), `app/cards.py` (`expired`, greyed) | `test_phase6_journal.py` | M1/M2 |
+| S7 / P6.9 | Score 0-100 by code from confluence (5m/15m/daily trend agreement, volume vs average, relative strength vs NIFTY and sector, regime fit, FII bias, distance to S/R); rank; alerts only for the top ones; daily cap; never a probability | `app/scoring.py` `score`; `config.yaml` `scoring`, `alerts.top_per_bar`, `alerts.daily_signal_cap` | `test_phase6_scoring.py`: each factor by hand; cap respected | M2/M3 |
+| S8 / P6.10 | Exit calls for every open position of every trade type (taken or manual): target, stop, breakeven, trail, partial, time, entry invalidated, regime flip, kill switch; action + reason with values; repeat (interval in config) until closed; options judged on option/spread price and underlying; alerts only | `app/positions.py` `exit_calls`, `ExitCallBook` (`exit_calls` table); stock option spreads also `app.options.stock_selling.exit_calls` | `test_phase6_exits.py`: per trade type x per call kind, action + reason, repeats until closed | M2 |
+| S9 / P6.11 | Pre-market plan 09:00 IST, end-of-day summary 15:45 | `app/schedule.py` `premarket_plan`, `eod_summary` | `test_phase6_schedule.py` | M3 |
+| S10 / P6.12 | Heartbeat: alert if the feed is STALE or no bar processed for 2 minutes in market hours | `app/recovery.py` `Watchdog` | `test_phase6_recovery.py` | M3/M4 |
+| S11 / P6.13-15 | Six trade-type switches (alerts only; paper-trading continues); track record and label beside each; alert only if switch on AND `strategies.status` allows; stored in `alert_switches`, changed only by `POST /journal/alert-switches`, default off, each change logged; exit calls always sent | `app/switches.py`, `app/track.py` | `test_phase6_switches.py`: off = paper only, no alert; on + status false = no alert; survives restart; change log | M3 (table and route M1) |
+| S12 / P6.16 | Manual positions: `POST /journal/positions`, `POST /journal/positions/{id}/close`; same exit calls | `app/journal.py`, `app/main.py` | `test_phase6_journal.py`, `test_phase6_exits.py` | M1 |
+| S13 / P6.17-18 | Execution records per leg at signal time and planned fill (bid, ask, last, depth, quote time, status; missing/stale/crossed recorded as such, never zero), paper fill, actual fill; slippage report vs mid and touch, by stock and strike-distance band (`execution.strike_distance_bands_pct`), spread and depth, count, low sample; dashboard and CSV | `app/execution.py`; `execution_snapshots` table; `GET /api/slippage`, `/api/slippage.csv` | `test_phase6_execution.py`: reconciles to stored records by hand | M2 |
+| S14a / P6.19 | Restart: positions, switches, unexpired signals, unconfirmed alerts reloaded; exit calls within one bar; no duplicate or revived signal; "restarted at hh:mm, data from hh:mm" | `app/recovery.py`, `app/engine.py` (deterministic signal_id, INSERT OR IGNORE) | `test_phase6_recovery.py` | M4 |
+| S14b / P6.20 | Stale or dropped feed: STALE, NO_TRADE (DATA_STALE), kill switch + heartbeat alert, "price stale: exit calls paused since hh:mm" (stale never triggers or silences an exit call); feed reconnects itself; signals resume only on fresh LIVE prices | `app/positions.py`, `app/recovery.py`, `app/feeds/breeze_feed.py` `reconnect` | `test_phase6_recovery.py`, `test_breeze_feed.py` (fake SDK) | M4 |
+| S14c / P6.20 | Expired Breeze login: detected from the broker's error, red on dashboard and Data status, one alert with re-login steps, no signals; token never read or logged | `app/feeds/breeze_feed.py` `login_state`, `app/data_status.py` | `test_phase6_recovery.py` (fake SDK) | M4 |
+| S14d / P6.21 | Partial or failed import: last good data in use, file rejected with a reason, Data status row amber or red | existing `app/manual_data.py`, `app/inbox.py`, `app/data_status.py` | `test_phase6_recovery.py` | M4 |
+| S14e / P6.22 | Alert key + `alert_log` (key, channel, attempts, sent_at, error); retried with back-off until delivered or expired, then "not delivered"; same key never sent twice | `app/alerts.py` `AlertBook`, `Dispatcher` | `test_phase6_alerts.py` | M3 |
+| S14f / P6.23 | Laptop sleep: gap detected, prices STALE until fresh ticks, due exit calls re-evaluated and sent, one "asleep from - to" alert, expired signals not sent | `app/recovery.py` `SleepDetector` | `test_phase6_recovery.py` (simulated clock jump) | M4 |
+| S15 | Two capital pools (issue 95): stock options and cash + index; P&L, equity history per pool; `decide` gets the signal's pool; a loss in one pool never stops or halves the other | `app/journal.py` `account_state(pool)`, `equity_history` table; `RiskService.account_state(pool)` | `test_phase6_pools.py` | M1 |
+| U1 | User: settlement alert sending (phase 9 M3 rules) for every open position with a sold stock option leg, repeating by level | `app/positions.py` (calls `app.options.settlement.settlement_alert` with the holiday calendar), `alerts.settlement_repeat_minutes` | `test_phase6_settlement_send.py` | M3 |
+| A1 | End-to-end: fixture bars -> stored signal card | - | `test_phase6_engine.py` | M2 |
+| A2 | Safety tests pass; writes only under /journal/, /data/import/, /capital/; no order, execute, square, submit, trade/ | routes | `tests/test_safety.py` (unchanged) | all |
+| A3 | Switch off: paper-traded, no alert; on: alerts follow `strategies.status` | `app/alerts.py` | `test_phase6_switches.py` | M3 |
+| A4 | Switches survive restart; changes logged | `app/journal.py`, `app/switches.py` | `test_phase6_journal.py` | M1 |
+
+### M1: journal, positions and the two capital pools (built)
+- `app/journal.py`: tables `signals` (INSERT OR IGNORE on the deterministic signal_id: never duplicated or edited),
+  `journal` (one TOOK/SKIPPED decision per signal; TOOK refused after valid-until and for a NO_TRADE signal; my fill per
+  leg, or the signal price marked `fill_estimated`), `positions` (origin SIGNAL or MANUAL; cash or option legs; stop,
+  target, invalidation level, margin, hedged flag), `position_closes` (all or part; P&L by code with the cost model's
+  estimated charges), `paper_trades` (written by the paper trader, M2), `position_marks`, `equity_history`,
+  `alert_switches` + `alert_switch_log`, `engine_state`. Trade type and pool of every signal and position.
+- `pool_account`: the risk engine's AccountState of ONE pool - my open positions plus the open paper trades of signals I
+  did not take (a taken signal counts once); realised today / this month; open P&L today = now less the last mark of an
+  earlier day (since entry when opened today); equity = pool capital + realised + open, earlier closes from
+  `equity_history` (first point: the pool's capital the day before the journal started). Deposits belong to the cash
+  and index pool.
+- `app/pricing.py`: quotes with their status (LIVE / STALE / MISSING / CROSSED, quote time, source); a mark or fill uses
+  LIVE quotes only; options close at the touch (bought legs at the bid, sold legs at the ask).
+- `RiskService.attach(journal, ...)`, `account_state(pool)`, `pool_state(pool)`: live decisions now get the pool's
+  positions instead of PORTFOLIO_UNKNOWN; `/api/risk` shows both pools. `MarketHub.quote()` gives a quote with its status.
+- Routes: `POST /journal/{signal_id}/decision`, `/journal/{signal_id}/exit`, `/journal/positions`,
+  `/journal/positions/{id}/close`, `/journal/positions/{id}/stop`, `/journal/alert-switches`; `GET /api/positions`,
+  `/api/alert-switches`.
+- Tested (`tests/test_phase6_journal.py`, `tests/test_phase6_pools.py`, 46 tests; whole suite 962 passing): trade type and pool table; a signal
+  stored once; every refused decision with its status; fills per leg; manual cash and option positions and their
+  refusals; UNHEDGED short call (max loss not known) and short put (strike-based, by hand); partial and full close to the
+  paise; switches default off, logged, kept across a restart; the routes and their local-host and JSON checks; **a loss
+  in the stock pool reaching its daily stop (Rs 20,000) stops stock spreads only, a cash loss of Rs 4,000 stops cash
+  only, a 10% drawdown halves the cash pool only**; an unknown quote makes only its own pool unknown; open P&L today from
+  the previous day's mark; a paper trade of a taken signal counted once; deposits in the cash pool only; the day's
+  closing equity from the session's last marks.
+- Changed test: `tests/test_phase5_api.py::test_api_risk_limits_and_unknown_portfolio` asserted "portfolio not known"
+  (true until the journal existed, issue 91); it now asserts a known, empty portfolio and both pools.
+- Decisions (yours to change): the pool follows the capital the risk engine sizes the signal on, so **stock option
+  buying is in the cash and index pool** (the engine sizes it on `account.capital_inr`); a cash position without a stop
+  risks its whole value (long) or has no known limit (short); open P&L includes the estimated round-trip charges; a
+  position opened before today without a mark from an earlier day makes its pool unknown (marks are saved on every
+  processed bar); the Phase 9 portfolio check's `history_verified` stays False live (stock option selling signals are
+  the Phase 9 remainder).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2252,11 +2329,11 @@ the credit rule to end the search instead, it is one line in `_candidate_problem
 | 89 | data | holidays.csv has 2026 only: settlement alerts for expiries from January 2027 are counted conservatively (one session earlier) | Waiting for user: add the 2027 NSE holidays when published |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
 | 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | Decided 2026-11-16 (user): the limit is not raised; index spreads narrow to the widest width down to 100 points that fits one lot, else NO TRADE (built) |
-| 91 | 5 | Every live risk decision is NO_TRADE (PORTFOLIO_UNKNOWN) because open positions, P&L and equity history are recorded by the phase 6 journal | Open: phase 6 |
+| 91 | 5 | Every live risk decision is NO_TRADE (PORTFOLIO_UNKNOWN) because open positions, P&L and equity history are recorded by the phase 6 journal | Fixed 2026-11-16 (phase 6 M1): the journal records them per pool |
 | 92 | 5 | NIFTY and BANKNIFTY share the sector tag "Index": at most two open index trades together | Closed 2026-11-16: kept (user) |
 | 93 | 5 | Kill-switch quarantine spike (20 ticks in 5 minutes) is a starting value | Open: check against a live market day (phase 6) |
 | 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Closed 2026-11-16: confirmed (user) |
-| 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Decided 2026-11-16 (user): two pools - stock options, and cash plus index. Each pool's daily stop, monthly pause and drawdown (halve and pause) count only that pool's P&L and equity, as % of that pool's capital. To build in phase 6 (the journal records positions and P&L per pool); until then `decide` receives one account state |
+| 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Decided 2026-11-16 (user): two pools - stock options, and cash plus index. Each pool's daily stop, monthly pause and drawdown (halve and pause) count only that pool's P&L and equity, as % of that pool's capital. Built 2026-11-16 (phase 6 M1): the journal keeps P&L and equity per pool and `decide` receives the signal's pool (test: a loss in one pool never stops or halves the other) |
 | 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun later (user, 2026-11-16) |
 | 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
 | 98 | review | Negative commitment or risk was summed into the pool and limits | Fixed 2026-11-16: refused (PORTFOLIO_UNKNOWN) |
