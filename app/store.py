@@ -133,6 +133,9 @@ CREATE TABLE IF NOT EXISTS capital_log (
     note TEXT, logged_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS quality_events_at ON quality_events (at_utc);
+CREATE TABLE IF NOT EXISTS import_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, at_utc TEXT NOT NULL, reason TEXT NOT NULL
+);
 """
 
 HISTORY_TABLES = ("bars_1d", "bars_5m")
@@ -218,6 +221,19 @@ class Store:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM quality_events WHERE at_utc >= ?",
                                     (at.isoformat(),)).fetchone()[0]
+
+    # ---------------- rejected imports (phase 6 recovery) ----------------
+    def log_import_failure(self, kind: str, at: datetime, reason: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO import_failures (kind, at_utc, reason) VALUES (?,?,?)",
+                             (kind, at.isoformat(), str(reason)[:500]))
+            self._db.commit()
+
+    def import_failures(self, since: datetime) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT kind, at_utc, reason FROM import_failures WHERE at_utc>=? ORDER BY id",
+                                    (since.isoformat(),)).fetchall()
+        return [{"kind": r[0], "at_utc": r[1], "reason": r[2]} for r in rows]
 
     # ---------------- capital log (phase 5): deposits and withdrawals, never profit ----------------
     def add_capital_entry(self, day: date, kind: str, amount: float, note: str, at: datetime) -> int:

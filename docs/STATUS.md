@@ -24,7 +24,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
-| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) M2 (signal loop, cards, score, paper trader, execution records, exit calls) and M3 (Telegram, switches, scheduled messages, settlement alert sending) built and tested | 1070 passing (whole suite) | |
+| 6 | Live signals and alerts (paper mode) | Built and tested on fixtures in four milestones: journal and positions with two capital pools; live loop, cards, score, paper trader, execution records, exit calls for every trade type; Telegram (send-only, OFF until switched on), trade-type switches, plan and summary, settlement alert sending; failure recovery. Not yet seen: a real Telegram message, a live market day, a real feed drop | 1079 passing (whole suite) | 2026-11-16 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2328,6 +2328,60 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
   with a switch on no signal alert is sent until you change a status in config.yaml (exit calls and system alerts do not
   depend on it).
 
+### M4: failure recovery (built)
+- `app/recovery.py` `Watchdog` (own thread, every 15 s): index feed not LIVE in market hours -> one heartbeat alert
+  per outage and a red banner "feed stale since hh:mm"; after `engine.feed_reconnect_after_seconds` (90) the feed
+  reconnects itself (`BreezeFeed.reconnect`: drop the quote stream and subscribe again), at most once per interval; a
+  closed bar not processed within 120 s -> heartbeat alert; a wall-clock jump of more than 5 minutes over a session
+  (laptop asleep) -> one "system was asleep from hh:mm to hh:mm" alert and banner; an expired Breeze login -> red
+  banner, red Data status row, one alert a day with the re-login steps; after a restart "restarted at hh:mm, data from
+  hh:mm" (the first good tick since the start).
+- `BreezeFeed.login_state` from the broker's own error replies (history, option chain, option history, the login
+  call); every Breeze credential is scrubbed from the stored and logged message.
+- Rejected imports (`/data/import/{kind}`, the inbox) are recorded (`import_failures`) and shown for a day as an amber
+  "Rejected import" row on the Data status page; the import itself stays all-or-nothing, the last good data in use.
+- Restart: positions, switches, exit calls and the alert log are in the database; unexpired signals and pending paper
+  trades are reloaded (`SignalEngine.restore`); deterministic ids keep a signal from being issued twice; an expired
+  signal is shown expired and refused (SIGNAL_EXPIRED).
+- Tested (`tests/test_phase6_recovery.py`, 9 tests; plus the alert-log tests of M3): restart mid-session (position
+  monitored on the first bar after the restart, a queued alert sent after it, the banner); stale feed (no signal, one
+  heartbeat, banner, reconnect at once when already stale 10 minutes and again only after the interval, back to normal
+  on fresh ticks); engine heartbeat at 120 s; a stale position shows "paused since" and gets no price call; expired
+  login (red, one alert, no signal, the session value never in the state, the log or the Data status); a failed FII/DII
+  import (all-or-nothing, last good data, amber rejected row; the route records it); laptop sleep (STALE on wake, one
+  "asleep 10:30 to 11:20" alert and banner, the expired signal neither sent nor paper-filled, the STOP due in the gap
+  sent on the first fresh bar); `BreezeFeed.reconnect` against the fake SDK.
+
+### Phase 6: what was tested, what was not
+- Whole suite: see the summary row (every acceptance check of phase 6 has a test; the table above names it).
+- Run here: the app in sim mode (port 8765, separate database) during market hours on 2026-11-16: every route answered,
+  the loop processed a bar and raised exit calls on a test position. Repeated after M4 (after the close): /signals,
+  /api/engine, /api/alerts, /api/plan, /api/alert-switches, /api/data-status and /api/risk answered 200, the end-of-day
+  summary built, no error in the log.
+- **Not tested here (needs you or a live market):** a real Telegram message (alerts are off; put the token and your
+  chat id in .env, set `alerts.telegram_enabled: true`); a full live market day in paper mode with Breeze data; a real
+  feed drop and the Breeze reconnect against the real SDK (tested on a fake SDK only); the exact text of Breeze's
+  expired-session error (detected from words such as "session key is expired", "invalid session", "unauthorized");
+  market depth (the feed is subscribed without it, so the slippage report shows "depth not sent by the feed");
+  real fills against paper fills (no trade yet).
+
+### Decisions made in phase 6 (yours to change)
+- Pools: stock option selling = STOCK_OPTIONS pool; stock option buying stays in the cash and index pool because the
+  risk engine sizes it on `account.capital_inr`. Deposits belong to the cash and index pool.
+- A position without a stop: long cash risks its whole value; a short or an unhedged short call has no known limit,
+  which makes its pool unknown (PORTFOLIO_UNKNOWN) until you enter a stop or close it.
+- Open P&L includes the estimated round-trip charges; "today" is measured from the last mark of an earlier day.
+- Signal alert = switch on AND `strategies.status` alerts (architecture default; issue 36). All statuses are false.
+- Alerts while Telegram is off are logged as OFF and never sent later (switching on does not flush old alerts).
+- The same idea (strategy, symbol, direction, legs) is not issued again while an earlier one is valid.
+- Paper fills: cash at the touch of the next bar's first quote (last + slippage only without bid/ask); options at
+  each leg's touch; both refused when the fill is at or beyond the stop or target.
+- Exit-call R = entry to the first stop; breakeven 1R, trail from 1.5R at 1R behind the best price, partial 50% at 1R,
+  invalidation 0.3% beyond the entry level; calls repeat every 15 minutes; settlement NOTICE 240 / WARNING 60 / URGENT
+  15 minutes, overdue every bar.
+- Pre-market plan only between 09:00 and 09:15 (not sent after the open); summary from 15:45.
+- Telegram is send-only; nothing reads incoming messages (the user asked to ignore other chats: none is read at all).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2431,6 +2485,13 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 30 | 3b | Breeze daily history before 2019-01-22 has wrong-scale days (stocks, several dates) and ~100x VIX values | Open: swing tests start 2019-01-22 (`backtest.test_start`); older bars kept |
 | 31 | 3b | A Breeze history request once hung for over 30 minutes (no SDK timeout) | Fixed: 60 s timeout per request; that symbol fails and a rerun resumes |
 | 32 | 3b | No v2 strategy is profitable after costs or better than random entries | All phase 3 cash strategies set to no alerts, paper only, "negative in backtests" (2026-11-13). Waiting for user: what to try next |
+| 101 | 6 | Telegram never sent for real: alerts are off (`alerts.telegram_enabled: false`) | Waiting for user: put TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env, switch on, check one message arrives |
+| 102 | 6 | Every strategy's `strategies.status` has `alerts: false`, so no SIGNAL alert can be sent even with a switch on | Waiting for user: decide per strategy (exit calls and system alerts are not affected) |
+| 103 | 6 | Phase 6 not yet run for a full market day with live Breeze data (paper mode) | Waiting for user (docs/AFTER_EACH_PHASE.md "After phase 6") |
+| 104 | 6 | Breeze reconnect and expired-login detection tested on a fake SDK only; the real expired-session text is not known | Open: check the log the first time a session expires |
+| 105 | 6 | Market depth is not recorded (quote stream subscribed without depth; the chain has none) | Open: subscribing with depth is a later change if wanted |
+| 106 | 6 | With the default stock-spread stop (buy back at 2x credit) the risk equals the credit, so no 1.5R trailing call can arise for a stock spread | Reported; a tighter stop of your own makes it possible |
+| 107 | 6 | Phase 9 portfolio check needs `history_verified`, which stays False live: stock option selling signals would be PORTFOLIO_UNKNOWN | Open: phase 9 remainder (stock option selling signals are not generated in phase 6) |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
 ## Decisions log
@@ -2544,4 +2605,8 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 2026-11-16 | User: the index spread width search fits the EFFECTIVE option risk limit, after drawdown halving (built) |
 | 2026-11-16 | Review fixes: negative risk or commitment is invalid input (never summed); NaN or infinity is unknown in every limit check; the width search tries every width down to 100 points and uses the first that passes every rule |
 | 2026-11-16 | User: a too-small credit at one width moves the search to the next narrower width (kept); the minimum credit (`min_credit_pct_of_width`) still applies to the chosen width |
+| 2026-11-16 | Phase 6: two capital pools in the journal (stock option selling; everything else); stock option buying in the cash and index pool (sized on account.capital_inr) |
+| 2026-11-16 | Phase 6: Telegram send-only to TELEGRAM_CHAT_ID, never reading incoming messages; OFF until alerts.telegram_enabled (user) |
+| 2026-11-16 | Phase 6: signal alert = switch on AND strategies.status alerts; exit calls, settlement, kill switch, daily stop, plan and summary always (when Telegram is on) |
+| 2026-11-16 | Phase 6: paper fill at the next bar's first LIVE quote (touch); exit calls repeat every 15 minutes until closed; a stale price never triggers or silences a call |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

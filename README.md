@@ -467,7 +467,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/capital/log -ContentTy
   -Body '{"date": "2026-11-16", "type": "DEPOSIT", "amount": 50000, "note": "top-up"}'
 ```
 
-## Phase 6: live signals and alerts, paper mode (in progress)
+## Phase 6: live signals and alerts, paper mode
 
 Research and suggestions only: nothing is ever sent to the broker. Every write below is a journal entry.
 
@@ -509,6 +509,13 @@ sends to that chat and never reads incoming messages. Then, per trade type, swit
 alerts, the kill switch, the daily stop, the pre-market plan (09:00) and the end-of-day summary (15:45) are sent.
 Every alert and its delivery state is listed under "Alerts" on `/signals` (`GET /api/alerts`); a failed send is
 retried and shown as "not delivered" if it expires first.
+
+**When something fails** the app stays safe and tells you: a stale or dropped feed gives no signals, a red banner
+"feed stale since hh:mm", one heartbeat alert and an automatic reconnect; an expired Breeze login shows red on
+`/signals` and the Data status page with one alert and the re-login steps; a rejected import keeps the last good data
+and shows an amber "Rejected import" row; after a restart the banner says "restarted at hh:mm, data from hh:mm" and
+open positions are checked on the next bar; after the laptop sleeps you get one "system was asleep from - to" alert,
+prices count as stale until fresh ticks arrive, and expired signals are never sent.
 
 A sold option without a bought option of the same right and expiry is stored and flagged **UNHEDGED** (its maximum
 loss is shown as not known for a call, strike-based for a put). The six alert switches start OFF.
@@ -561,6 +568,7 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 - `app/engine.py`, `app/cards.py`, `app/scoring.py`, `app/track.py`, `app/paper.py`, `app/execution.py`,
   `app/positions.py` - phase 6: the live loop, signal cards, the score, track records, the paper trader, execution
   records and the slippage report, exit calls
+- `app/recovery.py` - phase 6: heartbeat, feed reconnect, sleep detection, expired login, restart banner
 - `app/telegram.py`, `app/alerts.py`, `app/schedule.py` - phase 6: the send-only Telegram client, the alert log
   and what is sent, the pre-market plan and end-of-day summary
 - `app/journal.py`, `app/pricing.py`, `app/switches.py` - phase 6: signals, decisions, positions, paper trades and the
@@ -569,6 +577,10 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Phase 6 live.** No real Telegram message has been sent (alerts are off until you switch them on); no full market
+  day has run with live Breeze data; a real feed drop, the Breeze reconnect and the expired-login message are tested on
+  a fake SDK only; market depth is not recorded. Every strategy's status has `alerts: false`, so no signal alert is sent
+  until you change it in config.yaml.
 - **Risk engine on real positions.** Phase 5 is tested on fixtures only. Open positions, P&L and the equity history come
   from the phase 6 journal, so no live signal has been sized for real yet (every live decision is NO_TRADE until then).
   The kill switch's quarantine spike threshold (20 in 5 minutes) is a starting value, not tuned on live ticks.

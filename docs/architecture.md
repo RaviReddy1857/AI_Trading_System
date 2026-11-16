@@ -77,12 +77,21 @@ sector (2 per sector) and correlation above 0.8 (a correlated group shares one p
 equality. Stock option spreads (phase 9) use the phase 9 rules instead of the pool, sector and correlation, and every
 rupee figure of their decision is a % of `stock_option_selling.backtest.capital_inr` (never `account.capital_inr`):
 capital-fit label (advisory), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
-approval whose risk exceeds the budget. Live inputs come from `RiskService`; open positions are not known until the
-phase 6 journal, so live decisions are NO_TRADE (PORTFOLIO_UNKNOWN) until then.
+approval whose risk exceeds the budget. Live inputs come from `RiskService`; since phase 6 the account state is that of
+the signal's capital pool (`app/journal.py` `pool_account`: STOCK_OPTIONS for stock option selling, capital
+`stock_option_selling.backtest.capital_inr`; CASH_INDEX for everything else, capital `account.capital_inr`), so a loss
+in one pool never stops or halves the other.
 Index credit spreads and iron condors (user decision 2026-11-16) receive the option risk budget in
 `OptionContext.option_risk_budget_inr` (the effective limit after drawdown halving, `effective_option_budget`; the
 Phase 4 option backtest uses the full limit): when one lot at the configured width is above it, they take the widest listed
 width down to `min_hedge_width_points` (100) that passes every rule (`credit_spread.choose_width`: a failure of one width - hedge illiquid or unpriced, credit, one lot above the limit, no margin entry - moves on to the next narrower width), else NO TRADE listing every width tried; the limit is never raised. NaN and infinity are unknown in every risk and option limit check.
+
+**Phase 6 live loop (paper mode).** `app/engine.py` runs on every closed 5-minute bar (built from the stored 1-minute
+bars): regime, strategies, `decide` with the signal's pool, score (`app/scoring.py`, a ranking aid), card
+(`app/cards.py`), store, paper trade (`app/paper.py`: next bar's first LIVE quote, never the signal bar), exit calls for
+my positions (`app/positions.py`), marks. Alerts (`app/alerts.py`, `app/telegram.py`): send-only to the user's chat, OFF
+until `alerts.telegram_enabled`; signal alerts need the type's switch AND `strategies.status`; exit calls always.
+Recovery (`app/recovery.py`): heartbeat, feed reconnect, sleep detection, expired login, restart banner.
 
 ## 4. Technology
 
@@ -131,6 +140,8 @@ trading_system/
     risk/       sizing.py  portfolio.py  limits.py  engine.py  # phase 5
     engine.py  scoring.py  paper.py  alerts.py  positions.py   # phase 6 (positions: exit calls, manual entry)
     switches.py                                               # phase 6: trade-type alert switches
+    journal.py  pricing.py  cards.py  track.py  execution.py   # phase 6: journal and pools, quotes, cards, records
+    telegram.py  schedule.py  recovery.py                     # phase 6: send-only Telegram, plan/summary, watchdog
     journal.py  scorecard.py  cutback.py  ladder.py            # phase 7
     llm/        base.py  claude_cli.py  prompts.py             # phase 8
   data/         market.db  events.csv  holidays.csv  fii_dii.csv
@@ -250,9 +261,14 @@ A strategy must be a pure function of its context: same input, same output, no n
 | `option_expiries`, `option_expiry_misses` | 4 | underlying, source, expiry, kind (weekly/monthly): expiry dates of EXPIRED contracts, found from the option history itself; and the weeks/months searched without a result |
 | `instruments` | 4 | underlying, source, expiry, lot_size, kind (weekly/monthly), strikes_json, as_of_utc (current contracts, read from the broker's list; replaced on each refresh) |
 | `margins` | 4 | underlying, structure (CREDIT_SPREAD/IRON_CONDOR), width, margin_per_lot_inr, as_of (entered by the user) |
-| `signals` | 6 | signal_id, all Signal fields, RiskDecision fields, score, card_json |
-| `paper_trades` | 6 | signal_id, entry/exit time and price, costs, net_pnl, exit_reason |
-| `journal` | 6 | signal_id, decision (TOOK/SKIPPED), fill price, note, exit price |
+| `signals` | 6 | signal_id, created, strategy id/version, symbol, trade_type, pool, status, valid_until, score, signal_json, decision_json, card_json (never edited; INSERT OR IGNORE) |
+| `paper_trades` | 6 | signal_id, trade type, pool, legs, quantity, status (PENDING/OPEN/CLOSED/NOT_FILLED), planned fill, entry/exit time and price(s), source, stop, target, time exit, costs, net_pnl, exit_reason |
+| `journal` | 6 | signal_id, decision (TOOK/SKIPPED), at, note, fill price or fills per leg, fill time, position_id |
+| `position_closes` | 6 | position_id, at, units, exit prices, gross, estimated charges, net (all or part of a position) |
+| `position_marks`, `equity_history` | 6 | open P&L per unit of each held position by day (the previous close's figure); each pool's closing equity |
+| `exit_call_log`, `alert_log` | 6 | every exit call sent (repeat number); every alert: key, channel, kind, text, attempts, sent_at, error, status (PENDING/SENT/NOT_DELIVERED/OFF) |
+| `execution_snapshots` | 6 | signal_id, leg, moment (SIGNAL/PLANNED_FILL/PAPER_FILL/ACTUAL_FILL), source, time, bid, ask, last, quote time, status, depth, spot, price |
+| `engine_state`, `alert_switch_log`, `import_failures` | 6 | last processed bar, watchdog time, equity close per day; switch changes; rejected imports (shown a day on Data status) |
 | `positions` | 6 | open positions the user took or entered manually: origin (SIGNAL/MANUAL), trade type, legs (instrument or option legs), quantity/lots, entry, current stop/target, hedged flag (UNHEDGED shown in red), status, last exit call |
 | `alert_switches` | 6 | trade type (intraday stocks, swing stocks, index option buying, index option selling, stock option buying, stock option selling), on/off (default off), changed_at; with a change log |
 | `exit_calls` | 6 | position_id, at_utc, kind (TARGET, STOP, BREAKEVEN, TRAIL, PARTIAL, TIME, ENTRY_INVALIDATED, REGIME_FLIP, KILL_SWITCH, STRIKE_BREACHED, TREND_FLIP, FORCED_EXPIRY_EXIT), action text, reason values, repeat count |
@@ -291,7 +307,11 @@ its own `confirmed` flag; alert deadlines use the earliest stated auto-close tim
 Phase 5 (2026-11-16) adds to `risk`: `max_trades_per_sector` (2), `correlation_window` (60), `correlation_threshold`
 (0.8, strictly above links), `correlation_min_overlap` (50) and `kill_switch` (`quarantine_window_minutes` 5,
 `quarantine_max_events` 20); sector tags on NIFTY and BANKNIFTY ("Index"). Cash sizing uses `backtest.position_cap_pct`.
-Later phases add: `scoring`, `alerts` (repeat interval for exit calls, daily cap), `stock_option_selling` (phase 9 remainder: universe filters
+Phase 6 (2026-11-16) adds `scoring` (weights and lookbacks of the six factors), `alerts` (`telegram_enabled: false`
+master switch, top per bar, daily cap, exit-call and settlement repeat intervals, retry back-off, plan and summary
+times, heartbeat and sleep gaps), `exits` (breakeven, trail, partial, invalidation buffer), `execution` (strike-distance
+bands) and `engine` (poll interval, feed reconnect).
+Later phases add: `stock_option_selling` (phase 9 remainder: universe filters
 min_open_interest and max_bid_ask_spread_pct, shortlist size and ranking weights, max_short_delta 0.20, hedge_strikes_out 2-3,
 max_loss_per_stock_spread_pct, entry window 20-35 days to expiry, profit_target_pct_of_credit 50, stop_multiple_of_credit 2,
 exit_days_before_expiry, recommended_capital_inr), `cutback`, `ladder`, `llm`, `go_live_gate`.
@@ -367,14 +387,16 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
 Read-only: `/health`, `/`, `/api/prices`, `/api/quality`, `/api/bars/{symbol}`, `/api/config` (phase 1);
 `/api/regime` (2); `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests` (3); `/api/options`,
 `/api/options/{underlying}` and the page `/options` (4);
-`/api/risk` (5: limits in rupees, kill switch, what is not known); `/api/signals`, `/api/signals/{id}`, `/api/positions`, `/api/alert-switches` (6);
+`/api/risk` (5: limits in rupees, kill switch, what is not known, both pools); `/api/signals`, `/api/signals/{id}`,
+`/api/positions`, `/api/alert-switches`, `/api/paper`, `/api/exit-calls`, `/api/slippage`, `/api/slippage.csv`,
+`/api/engine`, `/api/alerts`, `/api/plan` and the page `/signals` (6);
 `/api/stock-option-selling/shortlist`, `/api/stock-option-selling/profile/{stock}`,
 `/api/stock-option-selling/reversals`, `/api/stock-option-selling/campaigns`,
 `/api/stock-option-selling/settlement` and the page `/stock-option-selling` (9); `/api/scorecard` (7); `/api/briefing` (8).
 
 Writes (journal and manual data only): `POST /journal/{signal_id}/decision`, `POST /journal/{signal_id}/exit`,
-`POST /journal/alert-switches` (6), `POST /journal/positions` and `POST /journal/positions/{id}/close` (manual positions,
-6; option legs and the UNHEDGED flag, 9), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries (`margins`, phase 4),
+`POST /journal/alert-switches` (6), `POST /journal/positions`, `POST /journal/positions/{id}/close` (all or part) and
+`POST /journal/positions/{id}/stop` (I moved my stop) (6; option legs and the UNHEDGED flag are accepted from phase 6), `POST /data/import/{kind}` for FII/DII, events, holidays and margin entries (`margins`, phase 4),
 `POST /capital/log` (5: `{"date", "type": DEPOSIT|WITHDRAWAL, "amount", "note"}`). Route names avoid the forbidden word list (for example `alert-switches`, never `trade/`).
 
 Forbidden in any path: `order`, `execute`, `square`, `submit`, `trade/`. The safety test checks every route.

@@ -230,6 +230,12 @@ The risk engine. It is the only component allowed to approve a signal, and it ca
 
 **Outcome:** Real-time instruction cards on the dashboard and Telegram
 
+**Status (2026-11-16):** built and tested on fixtures in four milestones (journal and positions with the two capital
+pools; signal cards, paper trader, execution records and exit calls; Telegram and the trade-type selector; failure
+recovery). The requirement-to-code/test table, decisions and what is not tested are in docs/STATUS.md, "Phase 6".
+Telegram is off until `alerts.telegram_enabled` is set; no real message, live market day or live Breeze failure has
+been seen yet.
+
 ### Scope
 
 Live signals in paper mode.

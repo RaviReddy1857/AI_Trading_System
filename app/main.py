@@ -208,6 +208,19 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     notifier.source = feed.name
     engine.notifier = notifier
 
+    # ---- phase 6: failure recovery (heartbeat, feed reconnect, sleep, expired login, restart banner) ----
+    from .recovery import Watchdog
+    watchdog = Watchdog(settings, hub, journal, alertbook, calendar, feed, engine)
+    watchdog.start(utcnow())
+
+    def watchdog_loop() -> None:
+        while not stop.is_set():
+            try:
+                watchdog.check(utcnow())
+            except Exception:
+                log.exception("watchdog check failed (it carries on)")
+            stop.wait(15)
+
     def engine_loop() -> None:
         while not stop.is_set():
             try:
@@ -239,6 +252,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             threading.Thread(target=options_loop, name="options", daemon=True).start()
             if settings.engine.enabled:
                 threading.Thread(target=engine_loop, name="engine", daemon=True).start()
+                threading.Thread(target=watchdog_loop, name="watchdog", daemon=True).start()
         yield
         stop.set()
         feed.stop()
@@ -305,7 +319,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     def _status() -> dict:
         from .data_status import data_status
         live = any(r.get("status") == "LIVE" for r in hub.snapshot())
-        return data_status(settings, store, calendar, feed.name, live_ticks_today=live, manual=manual)
+        return data_status(settings, store, calendar, feed.name, live_ticks_today=live, manual=manual,
+                           login_state=getattr(feed, "login_state", None))
 
     @app.get("/api/data-status")
     def api_data_status():
@@ -326,6 +341,9 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         except ValueError as e:
             raise HTTPException(400, str(e))
         results = run_inbox(settings, store, manual, board_meetings=decl)
+        for r in results:
+            if not r.get("ok", True):                    # rejected: the last good data stays in use; shown on Data status
+                store.log_import_failure(f"inbox {r.get('file', '')}", utcnow(), "; ".join(r.get("errors", []))[:500])
         return {"ok": all(r.get("ok", True) for r in results), "files": results,
                 "note": "no files in the inbox" if not results else ""}
 
@@ -358,6 +376,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             raise HTTPException(400, 'body must be JSON like {"text": "..."}')
         text = payload["text"].lstrip("﻿")
         result = import_margins(settings, store, text) if kind == "margins" else manual.import_text(kind, text)
+        if not result["ok"]:                             # rejected: the last good data stays in use; shown on Data status
+            store.log_import_failure(kind, utcnow(), "; ".join(str(e) for e in result.get("errors", []))[:500])
         return JSONResponse(result, status_code=200 if result["ok"] else 400)
 
     # ---- phase 5: risk engine (read-only status) and the capital log (deposits never count as profit) ----
@@ -498,6 +518,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     app.state.engine = engine
     app.state.alerts = alertbook
     app.state.notifier = notifier
+    app.state.watchdog = watchdog
 
     # ---- phase 6: read-only views of signals, positions, paper trades and execution ----
     @app.get("/api/signals")
@@ -544,7 +565,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
 
     @app.get("/api/engine")
     def api_engine():
-        return {**engine_info, "last_bar_utc": engine.last_bar.isoformat() if engine.last_bar else None,
+        return {**engine_info, "status": watchdog.status(utcnow()),
+                "last_bar_utc": engine.last_bar.isoformat() if engine.last_bar else None,
                 "last": engine.last_summary, "problems": engine.problems,
                 "strategies": {"intraday": [s.id for s in engine.cash], "swing": [s.id for s in engine.swing],
                                "options": [s.id for s in desk.strategies]}}

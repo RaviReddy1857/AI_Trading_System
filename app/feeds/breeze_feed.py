@@ -60,6 +60,26 @@ def _subscribed_ok(resp) -> bool:
     return isinstance(resp, dict) and "subscribed" in str(resp.get("message", "")).lower()
 
 
+_EXPIRED_WORDS = ("session key is expired", "session expired", "invalid session", "session is invalid",
+                  "session key", "unauthorized", "not authorized", "login", "401")
+
+
+def login_problem(text) -> bool:
+    """True when a broker error says the login (session) is no longer valid."""
+    t = str(text or "").lower()
+    return any(w in t for w in _EXPIRED_WORDS) and ("session" in t or "login" in t or "auth" in t or "401" in t)
+
+
+def scrub(text) -> str:
+    """An error text with every Breeze credential from .env removed (they are never logged or shown)."""
+    out = str(text)
+    for name in ("BREEZE_API_KEY", "BREEZE_API_SECRET", "BREEZE_SESSION_TOKEN"):
+        v = os.environ.get(name, "")
+        if v:
+            out = out.replace(v, "<redacted>")
+    return out[:300]
+
+
 class BreezeFeed:
     name = "breeze"
 
@@ -72,6 +92,20 @@ class BreezeFeed:
         self._sleep = sleep
         # Filled by start(): {"subscribed": [symbols], "failed": [(symbol, code, why)], "total": n}
         self.subscription_summary: dict | None = None
+        # phase 6: OK / EXPIRED / UNKNOWN, from the broker's own replies (the token itself is never read here)
+        self.login_state: dict = {"state": "UNKNOWN", "at": None, "message": ""}
+        self._on_tick = None
+
+    def note_reply(self, reply) -> None:
+        """Record what a broker reply says about the login: an error naming an expired or invalid session sets
+        EXPIRED; data coming back sets OK."""
+        from datetime import datetime, timezone
+        err = reply.get("Error") if isinstance(reply, dict) else None
+        if err and login_problem(err):
+            self.login_state = {"state": "EXPIRED", "at": datetime.now(timezone.utc).isoformat(), "message": scrub(err)}
+            log.error("Breeze login expired or invalid: %s", scrub(err))
+        elif isinstance(reply, dict) and reply.get("Success"):
+            self.login_state = {"state": "OK", "at": datetime.now(timezone.utc).isoformat(), "message": ""}
 
     def _login(self):
         key = os.environ.get("BREEZE_API_KEY", "")
@@ -92,7 +126,25 @@ class BreezeFeed:
     def connect(self) -> None:
         """Log in for data calls only (used by the history downloader)."""
         if self._sdk is None:
-            self._sdk = self._login()
+            try:
+                self._sdk = self._login()
+            except Exception as e:
+                if login_problem(e):
+                    from datetime import datetime, timezone
+                    self.login_state = {"state": "EXPIRED", "at": datetime.now(timezone.utc).isoformat(),
+                                        "message": scrub(e)}
+                raise
+
+    def reconnect(self) -> None:
+        """Phase 6 recovery: drop the quote stream and subscribe again (same login; data calls only)."""
+        if self._sdk is None or self._on_tick is None:
+            return
+        try:
+            self._sdk.ws_disconnect()
+        except Exception:
+            log.exception("disconnect before reconnect failed")
+        self._by_token.clear()
+        self.start(self._on_tick)
 
     def _subscribe_one(self, inst: Instrument) -> str | None:
         """Subscribe one symbol. Returns None on success, else the reason it failed."""
@@ -113,6 +165,7 @@ class BreezeFeed:
         return None
 
     def start(self, on_tick: TickHandler) -> None:
+        self._on_tick = on_tick
         self.connect()
         self._sdk.ws_connect()
 
@@ -169,6 +222,7 @@ class BreezeFeed:
             interval=interval, from_date=from_iso, to_date=to_iso,
             stock_code=inst.breeze_code, exchange_code="NSE", product_type="cash",
         )
+        self.note_reply(resp)
         return resp.get("Success") or []
 
     def option_chain(self, breeze_code: str, expiry_iso: str, right: str) -> list[dict]:
@@ -178,6 +232,7 @@ class BreezeFeed:
             stock_code=breeze_code, exchange_code="NFO", product_type="options",
             expiry_date=expiry_iso, right=right,
         )
+        self.note_reply(resp)
         return (resp or {}).get("Success") or []
 
     def option_historical_raw(self, breeze_code: str, expiry_iso: str, strike: float, right: str,
@@ -191,7 +246,9 @@ class BreezeFeed:
             stock_code=breeze_code, exchange_code="NFO", product_type="options",
             expiry_date=expiry_iso, right=right, strike_price=strike_text,
         )
-        return resp if isinstance(resp, dict) else {"Success": None, "Error": f"unexpected reply: {resp!r}"}
+        out = resp if isinstance(resp, dict) else {"Success": None, "Error": f"unexpected reply: {resp!r}"}
+        self.note_reply(out)
+        return out
 
     def option_historical(self, breeze_code: str, expiry_iso: str, strike: float, right: str,
                           interval: str, from_iso: str, to_iso: str) -> list[dict]:

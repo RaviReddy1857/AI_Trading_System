@@ -25,6 +25,7 @@ class MarketHub:
         # day range seen from good ticks: symbol -> (IST date, high, low, first tick time)
         self._seen_range: dict[str, tuple] = {}
         self._good_count = 0
+        self._first_tick_at = None
         self._bad_count = 0
         self._bars = BarBuilder(lambda bar: store.save_bar(bar, feed_name))
 
@@ -39,6 +40,8 @@ class MarketHub:
                                                   tick.last, tick.bid, tick.ask, tick.source)
                 return
             self._good_count += 1
+            if self._first_tick_at is None:
+                self._first_tick_at = tick.received_at
             self._last_good[tick.symbol] = tick
             day = tick.received_at.astimezone(IST).date()
             seen = self._seen_range.get(tick.symbol)
@@ -113,6 +116,11 @@ class MarketHub:
             if t is None:
                 return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
             return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
+
+    def first_tick_at(self) -> datetime | None:
+        """Time of the first good tick since the app started (the "data from" of a restart)."""
+        with self._lock:
+            return self._first_tick_at
 
     def last_tick_at(self) -> datetime | None:
         """Time of the newest good tick of any symbol (None before the first)."""

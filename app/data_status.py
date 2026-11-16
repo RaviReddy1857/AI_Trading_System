@@ -128,7 +128,7 @@ def trading_days_after(cal, a: date, b: date) -> int:
 
 
 def data_status(settings: Settings, store: Store, calendar, feed_name: str, live_ticks_today: bool = False,
-                manual=None, now: datetime | None = None) -> dict:
+                manual=None, now: datetime | None = None, login_state: dict | None = None) -> dict:
     now = now or utcnow()
     today = now.astimezone(IST).date()
     last_session = today if calendar.is_trading_day(today) and now.astimezone(IST).hour >= 16 else calendar.previous_trading_day(today)
@@ -162,6 +162,11 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                                        "the token itself is never read"}))
     if not confirmed:
         rows[-1]["colour"] = "red"
+    if isinstance(login_state, dict) and login_state.get("state") == "EXPIRED":     # phase 6: from the broker's error
+        rows[-1].update(status=MISSING, colour="red", what_to_do="Breeze login EXPIRED: log in again, put the new "
+                        "session value in .env, restart the app. No signals until fresh LIVE prices arrive.")
+        rows[-1]["detail"] = {**rows[-1]["detail"], "login_expired_at": login_state.get("at"),
+                              "broker_message": login_state.get("message")}
     _flag_future(rows[-1], future_fetch, "download log entries")
 
     # 2. Breeze option history download
@@ -322,6 +327,9 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
                      {"behind": behind, "last_date_per_stock": per}))
     _flag_future(rows[-1], bars_future, "daily bars")
 
+    for f in store.import_failures(now - timedelta(days=1)):      # phase 6: a rejected import stays visible for a day
+        rows.append(_row(f"Rejected import: {f['kind']}", f["at_utc"], f["reason"], STALE,
+                         "nothing: the last good data stays in use", "Fix the file or the pasted text and import again"))
     if manual is not None:
         for p in manual.problems():
             rows.append(_row("Your data files", None, p, STALE, "the regime and scenarios that read the file",
