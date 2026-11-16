@@ -2163,7 +2163,8 @@ moves past an illiquid call hedge.
 configured hedge pays too little is now tried narrower. One Phase 4 test asserted the old result (a far sold strike:
 CREDIT_TOO_SMALL at 200 points); it now asserts the new one (100 points, credit at least 8% of the width, "200:
 CREDIT_TOO_SMALL" on the card) and keeps a case with no narrower strike, which is still CREDIT_TOO_SMALL. If you want
-the credit rule to end the search instead, it is one line in `_candidate_problem`. Strategy versions do not change
+the credit rule to end the search instead, it is one line in `_candidate_problem`. **Kept by the user
+(2026-11-16, issue 100 closed); the minimum-credit rule still applies to the chosen width.** Strategy versions do not change
 (no setting changed); stored Phase 4 option backtests stay as before (issue 96, rerun later).
 
 ## Open issues
@@ -2260,7 +2261,7 @@ the credit rule to end the search instead, it is one line in `_candidate_problem
 | 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
 | 98 | review | Negative commitment or risk was summed into the pool and limits | Fixed 2026-11-16: refused (PORTFOLIO_UNKNOWN) |
 | 99 | review | NaN or infinite correlation, open interest, IV rank, margin, risk or budget passed limit checks | Fixed 2026-11-16: unknown everywhere (table in "Review fixes: Codex review of d7581e7..0f908c2") |
-| 100 | review | Width search ended on a failure of one width (illiquid hedge, margin for that width) | Fixed 2026-11-16: moves on to the next narrower width; credit too small moves on too (user to confirm) |
+| 100 | review | Width search ended on a failure of one width (illiquid hedge, margin for that width) | Closed 2026-11-16: moves on to the next narrower width; credit too small moves on too (kept by the user); the minimum-credit rule still applies to the chosen width |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -2381,4 +2382,5 @@ the credit rule to end the search instead, it is one line in `_candidate_problem
 | 2026-11-16 | User: the daily stop, monthly pause and drawdown rules run per pool (stock options; cash and index), each on its own pool's P&L and capital - for phase 6 (issue 95) |
 | 2026-11-16 | User: the index spread width search fits the EFFECTIVE option risk limit, after drawdown halving (built) |
 | 2026-11-16 | Review fixes: negative risk or commitment is invalid input (never summed); NaN or infinity is unknown in every limit check; the width search tries every width down to 100 points and uses the first that passes every rule |
+| 2026-11-16 | User: a too-small credit at one width moves the search to the next narrower width (kept); the minimum credit (`min_credit_pct_of_width`) still applies to the chosen width |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |
