@@ -1141,8 +1141,11 @@ def test_option_config_is_validated():
 
 
 # ---------------- desk, routes and page ----------------
-def desk_world(tmp_path=None, regime="TRENDING_UP", margin=True):
+def desk_world(tmp_path=None, regime="TRENDING_UP", margin=True, capital=1000000.0):
+    # Rs 10,00,000: since phase 5 (2026-11-16) an index spread is shown only if one lot fits the option risk budget
+    # (2.5% of capital); at Rs 2,00,000 this chain's spread does not fit at any width (tests/test_phase5_width.py)
     s = settings()
+    s = s.model_copy(update={"account": s.account.model_copy(update={"capital_inr": capital})})
     store = Store(":memory:")
     days = weekdays(date(2025, 10, 1), date(2026, 11, 12))
     store.save_history_bars("bars_1d", [Bar("INDIAVIX", daily_start(d), 12, 13, 11, 12 + i * 0.01, None)

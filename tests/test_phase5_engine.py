@@ -215,29 +215,45 @@ def stock_spread(margin=230000.0):
     return bull_put("RELIANCE", (1300, 20.0), (1290, 14.0), 1, 500, margin, "STOCK_OPTION", "stock_option_selling")
 
 
-@pytest.mark.parametrize("capital, fit, warning", [
+@pytest.mark.parametrize("stock_capital, fit, warning", [
     (200000.0, "NEEDS_MORE_CAPITAL", "shortfall Rs 30,000.00"),
     (300000.0, "TIGHT", "TIGHT_CAPITAL"),
     (1000000.0, "FITS", None),
 ])
-def test_stock_spread_capital_is_advisory(capital, fit, warning):
-    d = run(stock_spread(), acct=account(capital_inr=capital))
+def test_stock_spread_capital_is_advisory(stock_capital, fit, warning):
+    """The stock-option capital (stock_option_selling.backtest.capital_inr) decides the label; margin 2,30,000."""
+    d = run(stock_spread(), s=settings(stock_capital=stock_capital))
     assert d.status == "APPROVED" and d.capital_fit == fit          # never hidden for capital
     assert d.lots == 1 and d.risk_inr == 2000.0 and d.margin_inr == 230000.0
     assert (any(warning in w for w in d.warnings) if warning else d.warnings == ())
 
 
+def test_stock_spread_reads_the_stock_option_capital_not_account_capital():
+    """account.capital_inr Rs 2,00,000, stock_option_selling.backtest.capital_inr Rs 10,00,000 (config.yaml):
+    the stock spread is FITS (usable 7,50,000 >= 2,30,000), its risk is 0.2% of 10,00,000, and the account
+    capital - even unknown - changes nothing."""
+    assert S.account.capital_inr == 200000 and S.stock_option_selling.backtest.capital_inr == 1000000
+    d = run(stock_spread())
+    assert d.status == "APPROVED" and d.capital_fit == "FITS" and d.risk_pct == 0.2
+    assert d.facts["capital_inr"] == 1000000 and d.facts["capital_source"] == "stock_option_selling.backtest.capital_inr"
+    assert d.facts["sizing"]["budget_inr"] == 25000.0              # 2.5% of 10,00,000, not 5,000
+    for other in (50000.0, 400000.0, None):
+        assert run(stock_spread(), acct=account(capital_inr=other)).to_dict() == d.to_dict()
+    # an index spread still uses account.capital_inr
+    assert run(bull_put()).facts["capital_source"] == "account.capital_inr"
+
+
 def test_stock_spread_never_more_lots_than_signalled_and_within_its_budget():
     """Budget 2.5% of 10,00,000 = 25,000 would allow 12 lots; the signal had 1."""
-    assert run(stock_spread(), acct=account(capital_inr=1000000.0)).lots == 1
-    # capital 79,999.60: budget 1,999.99 < one lot's 2,000 -> ZERO_SIZE (exactly at 80,000: 2,000 -> 1 lot)
-    assert run(stock_spread(), acct=account(capital_inr=79999.6)).reason_codes[0] == "ZERO_SIZE"
-    assert run(stock_spread(), acct=account(capital_inr=80000.0)).lots == 1
+    assert run(stock_spread()).lots == 1
+    # stock capital 79,999.60: budget 1,999.99 < one lot's 2,000 -> ZERO_SIZE (exactly at 80,000: 2,000 -> 1 lot)
+    assert run(stock_spread(), s=settings(stock_capital=79999.6)).reason_codes[0] == "ZERO_SIZE"
+    assert run(stock_spread(), s=settings(stock_capital=80000.0)).lots == 1
 
 
 def test_stock_spread_blocks_on_unknown_margin_and_history():
-    assert "MARGIN_UNKNOWN" in run(stock_spread(None), acct=account(capital_inr=1000000.0)).reason_codes
-    d = run(stock_spread(), acct=account(capital_inr=1000000.0, history_verified=False))
+    assert "MARGIN_UNKNOWN" in run(stock_spread(None)).reason_codes
+    d = run(stock_spread(), acct=account(history_verified=False))
     assert d.reason_codes == ("PORTFOLIO_UNKNOWN",)
 
 
@@ -245,14 +261,16 @@ def test_stock_spread_phase9_portfolio_limit():
     """Phase 9 group limit: at most 2 positions per correlated group (same sector). Two Oil & Gas spreads
     held -> CORRELATED_LIMIT for a third."""
     held = tuple(OpenPosition(f"p{s}", s, "STOCK_SPREAD", 2000.0, 100000.0, 0.0, 0.0) for s in ("ONGC", "BPCL"))
-    d = run(stock_spread(), acct=account(capital_inr=1000000.0, positions=held), corr=lambda a, b: 0.1)
+    d = run(stock_spread(), acct=account(positions=held), corr=lambda a, b: 0.1)
     assert d.reason_codes == ("CORRELATED_LIMIT",)
 
 
-def test_stock_spread_still_stops_on_kill_switch_and_loss_stop():
-    a = account(capital_inr=1000000.0)
-    assert "KILL_SWITCH" in run(stock_spread(), acct=a, mkt=market(index_status="STALE")).reason_codes
-    assert "DAILY_STOP" in run(stock_spread(), acct=replace(a, realised_today_inr=-20000.0)).reason_codes
+@pytest.mark.parametrize("loss, stopped", [(19999.99, False), (20000.0, True), (20000.01, True)])
+def test_stock_spread_still_stops_on_kill_switch_and_loss_stop(loss, stopped):
+    """Daily stop 2% of the stock-option capital 10,00,000 = 20,000 (just under / at / over)."""
+    assert "KILL_SWITCH" in run(stock_spread(), mkt=market(index_status="STALE")).reason_codes
+    d = run(stock_spread(), acct=account(realised_today_inr=-loss))
+    assert ("DAILY_STOP" in d.reason_codes) is stopped and (d.status == "APPROVED") is (not stopped)
 
 
 # ---------------- step 8: changing capital rescales everything ----------------
@@ -333,6 +351,7 @@ def test_option_risk_never_above_limits(capital, width, credit_frac, lot, dd, co
         sig = bull_put("RELIANCE", (1300, sold), (1300 - width, 10.0), 2, lot, 50000.0, "STOCK_OPTION",
                        "stock_option_selling")
         pct = S.stock_option_selling.max_risk_per_position_pct
+        capital = S.stock_option_selling.backtest.capital_inr       # stock spreads: the stock-option capital
     else:
         sig = bull_put("NIFTY", (24000, sold), (24000 - width, 10.0), 1, lot, 50000.0)
         pct = S.risk.max_loss_per_option_pct

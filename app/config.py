@@ -402,6 +402,10 @@ class CreditSpreadParams(StrictModel):
     min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when IV rank is high
     max_short_delta: float = Field(0.20, gt=0, lt=0.5)        # |delta| of the sold strike at most this
     hedge_width_pct: float = Field(1.0, gt=0, le=10)          # bought strike this % of spot further out (rounded to a strike)
+    # phase 5 decision (user, 2026-11-16): when one lot at that width risks more than the option risk budget
+    # (risk.max_loss_per_option_pct of capital), try narrower widths down to this many points and take the widest
+    # that sizes to at least one lot; none fits = NO TRADE (ZERO_SIZE). The risk limit itself is never raised.
+    min_hedge_width_points: float = Field(100.0, gt=0, le=5000)
     entry_min_dte: int = Field(20, ge=1, le=90)               # calendar days to expiry at the signal
     entry_max_dte: int = Field(35, ge=1, le=120)
     min_credit_pct_of_width: float = Field(8.0, ge=0, le=100)  # skip if the credit is too thin for the risk

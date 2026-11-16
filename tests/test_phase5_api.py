@@ -31,6 +31,8 @@ def test_api_risk_limits_and_unknown_portfolio():
     assert (lim["max_loss_per_trade"], lim["max_loss_per_option"], lim["daily_loss_stop"], lim["monthly_loss_pause"],
             lim["position_value_cap"], lim["capital_pool_usable"]) == (2000, 5000, 4000, 12000, 50000, 150000)
     assert r["portfolio"]["known"] is False and r["portfolio"]["problems"]
+    # stock option spreads: 2.5% of the separate stock-option capital (Rs 10,00,000), not of Rs 2,00,000
+    assert r["stock_option_capital_inr"] == 1000000 and lim["max_risk_per_stock_spread"] == 25000
     assert "KILL_SWITCH" in r["reason_codes"] and "ZERO_SIZE" in r["reason_codes"]
     assert isinstance(r["kill_switch"]["on"], bool)
 

@@ -66,7 +66,7 @@ from ..regime import fii_bias
 from ..store import Store
 from ..strategies import MarketContext, build_strategies
 from . import build_option_strategies
-from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_costs
+from .base import ExpiryInfo, OptionContext, OptionQuote, OptionStrategy, add_costs, index_option_budget
 from .greeks import iv_rank
 from .payoff import UNHEDGED_SHORT, check_hedged
 from .instruments import InstrumentBook
@@ -583,6 +583,7 @@ class OptionEngine:
             no_filter=variant != "strategy", baseline_right=variant.split(":")[1] if ":" in variant else None,
             daily=daily, index_daily=self.base.index_daily(d)[-400:] if daily else (),
             closed_trades=closed_trades,
+            option_risk_budget_inr=index_option_budget(self.s) if kind == "index" else None,
             market={**self.market_at(d), "reversal": self.reversal_scanner(sym).info_on(d),
                     "breadth_pct": self.breadth_at(d), **self.score_inputs(sym, d)} if daily else {})
 

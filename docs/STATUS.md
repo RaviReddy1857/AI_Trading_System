@@ -23,7 +23,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
-| 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions | 848 passing (whole suite) | 2026-11-16 |
+| 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-up (user decisions): index spreads narrow to the widest width down to 100 points that fits one lot; stock option spreads use the stock-option capital | 863 passing (whole suite) | 2026-11-16 |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
@@ -2039,6 +2039,61 @@ FII row or VIX spike lies after a stock's last bar, so the bound changes nothing
   taken out of that period's change.
 - The kill switch checks market hours in sim mode too (the hub does not); outside 09:15-15:30 IST it is on.
 
+## Phase 5 follow-up: the user's decisions (2026-11-16)
+
+Answers to the five decisions of the Phase 5 report:
+1. Kill switch, daily stop, monthly pause and drawdown pause also stop stock option spreads: **confirmed**.
+2. NIFTY and BANKNIFTY keep the shared sector tag "Index": **kept**.
+3. The option risk limit is **not raised**. Index spreads (credit spread, iron condor) try widths down to 100 points
+   and take the widest that sizes to at least one lot; if none fits, NO TRADE stays. **Built** (below).
+4. A limit is reached at equality; correlation must be strictly above 0.8: **confirmed**.
+5. Cash risk includes estimated charges and slippage at the stop: **confirmed**.
+
+And: stock option spreads must read the separate stock-option capital, not `account.capital_inr`.
+**Checked: they did not.** The Phase 9 research pages and backtests already used it (`phase9_settings`), but the
+Phase 5 risk engine sized stock spreads, labelled their capital fit and applied the Phase 9 portfolio limits against
+`account.capital_inr` (Rs 2,00,000). **Fixed**: every rupee figure of a stock spread decision (risk budget 2.5%,
+capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %) is now a percentage of
+`stock_option_selling.backtest.capital_inr` (Rs 10,00,000); `account.capital_inr` does not affect it. `/api/risk` shows
+`stock_option_capital_inr` and the stock-spread risk limit Rs 25,000. Index and cash signals still use
+`account.capital_inr`.
+
+### Width search for index spreads (built)
+- `config.yaml` `strategies.credit_spread.min_hedge_width_points: 100` and `strategies.iron_condor.min_hedge_width_points:
+  100` (validated in `CreditSpreadParams`); `OptionContext.option_risk_budget_inr`; `app/options/credit_spread.py`
+  `fit_width` and `one_lot_loss`; `build_side` can take a given hedge strike.
+- Rule: the configured width (`hedge_width_pct` of spot) is kept when one lot's cost-inclusive max loss fits the budget
+  (capital x `risk.max_loss_per_option_pct`, `base.index_option_budget`). Otherwise every listed narrower width of at
+  least 100 points is tried, widest first (a condor at the same width on both sides); the first that is priced, liquid,
+  gives a credit of at least `min_credit_pct_of_width` and fits one lot is used, with a "hedge width narrowed from X to
+  Y points" line on the card. None fits: ZERO_SIZE, no signal, with the widths tried.
+- Applies on the Options page (live) and in the Phase 4 option backtest (index contexts only). Stock contexts get no
+  budget; the Phase 9 strategy has its own evaluation and is unaffected. The budget is before the drawdown halving: at a
+  10% drawdown the risk engine may still give ZERO_SIZE for a spread the strategy sized to one full-budget lot.
+- At Rs 2,00,000 (budget Rs 5,000) the fixture NIFTY chain's spread is NO TRADE at every width from 200 down to 100
+  points (one lot at 100 points: Rs 5,624.91).
+
+### Tested (15 new tests; whole suite 863 passing)
+- `tests/test_phase5_width.py`: no budget or a budget that fits = unchanged width; budget exactly one lot at 200, 150
+  or 100 points -> that width (the widest that fits); 1 paisa under one lot at 250 -> 200, under 200 -> 150; 1 paisa
+  under one lot at 100 -> NO TRADE (ZERO_SIZE) although a 50-point spread would fit (never below 100); the iron condor
+  narrows both sides; the risk engine sizes the narrowed spread to exactly 1 lot at a budget equal to its loss; the
+  Options page at Rs 2,00,000 shows ZERO_SIZE with the reason; the Phase 4 backtest context carries the budget.
+- `tests/test_phase5_engine.py`: the stock spread reads `stock_option_selling.backtest.capital_inr` (budget Rs 25,000,
+  risk 0.2%, FITS) and is identical whatever `account.capital_inr` is (Rs 50,000, Rs 4,00,000, unknown); the
+  capital-fit labels and ZERO_SIZE boundary now vary the stock capital; the daily stop for a stock spread is 2% of
+  Rs 10,00,000 (19,999.99 / 20,000 / 20,000.01).
+- `tests/test_phase4.py`: the two Options-page tests now run at Rs 10,00,000, because at Rs 2,00,000 their fixture
+  spread no longer fits one lot at any width (that case is the new Options-page test above). Nothing else changed.
+
+### Not done / to know
+- The `credit_spread` and `iron_condor` strategy versions changed (new setting), so the stored Phase 4 option backtest
+  reports are of the previous version. **They were not rerun.** A rerun at Rs 2,00,000 will trade fewer, narrower
+  index spreads.
+- Open question: a stock spread's daily stop and monthly pause are now 2% and 6% of the stock-option capital
+  (Rs 20,000 and Rs 60,000), while open positions and P&L will come from one account-wide journal (phase 6). Whether
+  the stops should count only stock option P&L is for phase 6 to settle with the user (issue 95).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2123,11 +2178,14 @@ FII row or VIX spike lies after a stock's last bar, so the bound changes nothing
 | 90 | review | Pending entries dropped out of the portfolio book until their first synchronized bar; settlement estimate reused one hedge for several sold legs and counted cash from the first hedge only | Fixed 2026-11-16; rerun on stored data identical |
 | 89 | data | holidays.csv has 2026 only: settlement alerts for expiries from January 2027 are counted conservatively (one session earlier) | Waiting for user: add the 2027 NSE holidays when published |
 | 81 | data | Stock-year exclusion, amended 2026-11-15 (exact corrections, repo-confirmed jumps, smooth-ratio test): 8 priority stock-years excluded from 2019 (1 in 2023-2024), 10 other watchlist ones | Applied |
-| 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | Confirmed by phase 5 (2026-11-16): such a spread gets ZERO_SIZE at Rs 2,00,000. Waiting for user: narrower width, lower limit or more capital |
+| 49 | 4 | At Rs 2,00,000 capital one lot of most index spreads risks more than 2.5% of capital (for example a 200-point NIFTY spread: about Rs 10,000 to 11,000) | Decided 2026-11-16 (user): the limit is not raised; index spreads narrow to the widest width down to 100 points that fits one lot, else NO TRADE (built) |
 | 91 | 5 | Every live risk decision is NO_TRADE (PORTFOLIO_UNKNOWN) because open positions, P&L and equity history are recorded by the phase 6 journal | Open: phase 6 |
-| 92 | 5 | NIFTY and BANKNIFTY share the sector tag "Index": at most two open index trades together | Waiting for user: keep, or give each index its own tag |
+| 92 | 5 | NIFTY and BANKNIFTY share the sector tag "Index": at most two open index trades together | Closed 2026-11-16: kept (user) |
 | 93 | 5 | Kill-switch quarantine spike (20 ticks in 5 minutes) is a starting value | Open: check against a live market day (phase 6) |
-| 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Waiting for user: confirm |
+| 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Closed 2026-11-16: confirmed (user) |
+| 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Open: settle in phase 6 with the user |
+| 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun when wanted |
+| 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -2243,4 +2301,6 @@ FII row or VIX spike lies after a stock's last bar, so the bound changes nothing
 | 2026-11-16 | Phase 5: NIFTY and BANKNIFTY tagged sector "Index"; unknown sector, correlation, positions, P&L, equity, margin, lot size, costs or kill-switch input = NO_TRADE |
 | 2026-11-16 | Phase 5: stock option spreads keep the phase 9 rules (capital advisory, phase 9 portfolio limits, never more lots than signalled) and also stop on the kill switch, loss stops and drawdown pause |
 | 2026-11-16 | Phase 5: deposits and withdrawals in `capital_log` (`POST /capital/log`); drawdown uses a deposit-neutral equity index |
+| 2026-11-16 | User: decisions 1, 4, 5 confirmed; shared "Index" sector tag kept; option risk limit not raised - index spreads narrow down to 100 points (widest that fits one lot), else NO TRADE |
+| 2026-11-16 | Stock option spreads: every rupee figure of the risk decision is a % of `stock_option_selling.backtest.capital_inr`, never `account.capital_inr` |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from ..config import IronCondorParams
 from .base import OptionContext, round_trip_costs
-from .credit_spread import CreditSpread, build_side
+from .credit_spread import CreditSpread, build_side, fit_width
 from .payoff import InvalidStructure, iron_condor
 
 
@@ -41,6 +41,10 @@ class IronCondor(CreditSpread):
         call = build_side(self, ctx, exp, "CE", p)
         if call is None:
             return []
+        sides = fit_width(self, ctx, exp, p, [put, call])    # one lot within the option risk budget, never wider
+        if sides is None:
+            return []
+        put, call = sides
         legs = put[0] + call[0]
         views = put[1] + call[1]
         credit, width = put[2] + call[2], max(put[3], call[3])

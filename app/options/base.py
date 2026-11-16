@@ -141,6 +141,9 @@ class OptionContext:
     # (backtest comparison only). "" = a new entry.
     rolling: str = ""
     max_lots: int | None = None        # phase 9 roll: the replacement is never larger than the position it replaces
+    # phase 5: index credit spreads and condors narrow their width (down to min_hedge_width_points) until one lot's
+    # cost-inclusive max loss fits this budget (capital x risk.max_loss_per_option_pct). None = width not adjusted.
+    option_risk_budget_inr: float | None = None
     events: tuple = field(default_factory=tuple)   # manual_data.Event rows (results, board meetings, corporate actions)
     daily: tuple = field(default_factory=tuple)    # the underlying's daily bars up to asof (phase 9: trend, support, resistance)
     index_daily: tuple = field(default_factory=tuple)   # the index's daily bars up to asof (phase 9: relative return)
@@ -155,6 +158,12 @@ class OptionContext:
         # traded prices, past margins unknown) may switch the margin rule off.
         if not self.historical and not self.require_margin:
             raise ValueError("a live option context must require margin (require_margin=False is for backtests only)")
+
+
+def index_option_budget(settings) -> float:
+    """The option risk budget the index spread width search uses: capital x risk.max_loss_per_option_pct, to
+    the paise (the risk engine's own budget before any drawdown halving)."""
+    return round(settings.account.capital_inr * settings.risk.max_loss_per_option_pct / 100.0, 2)
 
 
 class OptionStrategy(Strategy):

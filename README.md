@@ -23,7 +23,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 848 passed
+python -m pytest -q          # should say 863 passed
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
@@ -432,6 +432,7 @@ or **NO_TRADE** with every reason code that applies. All numbers are computed by
 |---|---|---|
 | Cash: shares = floor(capital x 1% / (entry - stop)), position value at most 25% of capital, charges included | `max_loss_per_trade_pct`, `backtest.position_cap_pct` | Rs 2,000 risk, Rs 50,000 position |
 | Options: lots = floor(capital x 2.5% / max loss of one lot), cost-inclusive; 0 lots = ZERO_SIZE | `max_loss_per_option_pct` | Rs 5,000 |
+| Index spreads: if one lot is above that, narrower widths down to 100 points are tried and the widest that fits one lot is used; none fits = NO TRADE (the limit is never raised) | `strategies.credit_spread` / `iron_condor` `min_hedge_width_points` | - |
 | Capital pool: 25% of capital stays uncommitted | `uncommitted_cash_pct` | Rs 1,50,000 usable |
 | At most 2 open index selling spreads | `max_open_selling_spreads` | - |
 | At most 2 open trades per sector (watchlist sector tags; NIFTY and BANKNIFTY are sector "Index") | `max_trades_per_sector` | - |
@@ -449,7 +450,9 @@ sector, correlation or kill-switch input gives NO_TRADE with a code (`CAPITAL_UN
 **Your open positions are recorded by the phase 6 journal, so until phase 6 is built every live decision is NO_TRADE
 (`PORTFOLIO_UNKNOWN`).** Phase 5 itself issues no signals and sends nothing.
 
-Stock option spreads (phase 9) keep their own rules: capital is advisory (label FITS / TIGHT / NEEDS_MORE_CAPITAL with
+Stock option spreads (phase 9) keep their own rules and their own capital: every rupee figure is a % of
+`stock_option_selling.backtest.capital_inr` (Rs 10,00,000), not `account.capital_inr` - so their risk limit is
+Rs 25,000 a position and their daily stop Rs 20,000. Capital is advisory (label FITS / TIGHT / NEEDS_MORE_CAPITAL with
 the shortfall, never a block), size within `stock_option_selling.max_risk_per_position_pct` and never more lots than
 the signal, the phase 9 portfolio limits; unknown data or margin, the kill switch, the loss stops and the drawdown pause
 still block them.

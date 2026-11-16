@@ -14,8 +14,10 @@ Checks (all of them are evaluated; each failing one adds its code):
 - sizing (ZERO_SIZE); capital pool and selling-spread count (RISK_BUDGET_USED); sector (SECTOR_LIMIT);
   correlation above risk.correlation_threshold = one position (CORRELATED_LIMIT, CORRELATION_UNKNOWN).
 
-Stock option spreads (phase 9) follow the phase 9 specification: capital is advisory (a capital-fit
-label and a warning, never a block), size within stock_option_selling.max_risk_per_position_pct, never
+Stock option spreads (phase 9) follow the phase 9 specification: every rupee figure of their decision is a
+percentage of the separate stock-option capital `stock_option_selling.backtest.capital_inr` (Rs 10,00,000; the
+capital of every Phase 9 output, `stock_selling.phase9_settings`), never of account.capital_inr; capital is
+advisory (a capital-fit label and a warning, never a block), size within stock_option_selling.max_risk_per_position_pct, never
 more lots than signalled, and the phase 9 portfolio limits (`app.options.portfolio.portfolio_check`).
 Unknown data, unknown margin, a missing hedge, the kill switch, the loss stops and the drawdown pause
 still block them: each of these only reduces risk.
@@ -63,6 +65,12 @@ def is_stock_spread(signal: Signal) -> bool:
     return signal.asset_class == "STOCK_OPTION" and signal.direction == "SPREAD"
 
 
+def stock_capital(settings) -> float:
+    """The separate stock-option capital every Phase 9 figure uses (not account.capital_inr)."""
+    from ..options.stock_selling import phase9_settings
+    return phase9_settings(settings).account.capital_inr
+
+
 def _f(x) -> float | None:
     return None if x is None else float(round(Decimal(str(x)), 2))
 
@@ -84,7 +92,10 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
     def no(code: str, text: str) -> None:
         block.append((code, text))
 
-    cap = account.capital_inr
+    cap = stock_capital(settings) if is_stock_spread(signal) else account.capital_inr
+    facts["capital_inr"] = cap
+    facts["capital_source"] = ("stock_option_selling.backtest.capital_inr" if is_stock_spread(signal)
+                               else "account.capital_inr")
     cap_ok = known(cap) and cap > 0
     if not cap_ok:
         no(CAPITAL_UNKNOWN, f"capital not known ({cap!r}): no limit can be computed")
@@ -343,7 +354,7 @@ def _stock_spread(signal, settings, costs, cap, factor, positions, problems, cor
                                            settings.risk.uncommitted_cash_pct)
         out["fit"] = label
         facts["capital_fit"] = {**pf, "shortfall_inr": shortfall,
-                                "recommended_capital_inr": settings.stock_option_selling.backtest.capital_inr}
+                                "capital_source": "stock_option_selling.backtest.capital_inr"}
         if label == NEEDS_MORE_CAPITAL:
             warnings.append(f"{NEEDS_MORE_CAPITAL}: margin Rs {out['margin']:,.2f} is above the free capital; "
                             f"shortfall Rs {shortfall:,.2f} (capital is advisory for stock option selling)")
@@ -395,6 +406,7 @@ class RiskService:
         """For GET /api/risk: the limits in rupees, the kill switch, and what is not known yet."""
         s, r = self.s, self.s.risk
         cap = s.account.capital_inr
+        stock_cap = stock_capital(s)
         m = self.market_state(s.regime.index_symbol, now)
         ks = kill_switch(s.regime.index_symbol, m.index_status, m.quarantined_recent, m.market_open, r.kill_switch)
         acct = self.account_state()
@@ -402,10 +414,12 @@ class RiskService:
         log = self.store.capital_log()
         return {
             "as_of_utc": now.isoformat(), "capital_inr": cap, "account_mode": s.account.mode,
+            "stock_option_capital_inr": stock_cap,     # stock option spreads: every figure is a % of this
             "limits_pct": {k: v for k, v in r.model_dump().items() if k != "kill_switch"},
             "limits_inr": {**s.limits_in_rupees(),
                            "position_value_cap": s.rupees(s.backtest.position_cap_pct),
-                           "max_risk_per_stock_spread": s.rupees(s.stock_option_selling.max_risk_per_position_pct),
+                           "max_risk_per_stock_spread": round(stock_cap * s.stock_option_selling.max_risk_per_position_pct
+                                                              / 100, 2),
                            "capital_pool_usable": s.rupees(100 - r.uncommitted_cash_pct)},
             "kill_switch": {"on": bool(ks), "reasons": ks, "index": s.regime.index_symbol,
                             "index_status": m.index_status, "market_open": m.market_open,

@@ -19,7 +19,7 @@ from ..models import utcnow
 from ..quality import IST
 from ..store import Store
 from . import build_option_strategies
-from .base import ChainQuotes, ExpiryInfo, OptionContext, OptionQuote
+from .base import ChainQuotes, ExpiryInfo, OptionContext, OptionQuote, index_option_budget
 from .chain import stored_quotes, wanted_specs
 from .greeks import days_to_expiry, iv_and_delta, iv_rank, years_to_expiry
 from .instruments import InstrumentBook
@@ -185,7 +185,8 @@ class OptionDesk:
                 iv_rank=iv["rank"], trigger=None, allowed_kinds=tuple(cfg.expiries),
                 margin=lambda structure, width: margins.lookup(sym, structure, width, today), require_margin=True,
                 historical=False, max_spread_pct=o.chain.max_spread_pct, min_oi_lots=o.chain.min_open_interest_lots,
-                search_steps=o.backtest.strike_search_steps)
+                search_steps=o.backtest.strike_search_steps,
+                option_risk_budget_inr=index_option_budget(self.s) if kind == "index" else None)
             for st in self.strategies:
                 sigs = st.evaluate(ctx)
                 reasons = list(st.last_no_trade)

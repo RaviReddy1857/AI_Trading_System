@@ -310,6 +310,7 @@ strategies:
     min_iv_rank: 50             # sell only when IV rank is high
     max_short_delta: 0.20
     hedge_width_pct: 1.0        # bought strike about 1% of spot further out
+    min_hedge_width_points: 100 # one lot above the option risk budget: try narrower, down to 100 points (widest that fits)
     entry_min_dte: 20
     entry_max_dte: 35
     min_credit_pct_of_width: 8
@@ -320,6 +321,7 @@ strategies:
     min_iv_rank: 50
     max_short_delta: 0.15
     hedge_width_pct: 0.5
+    min_hedge_width_points: 100
     entry_min_dte: 3
     entry_max_dte: 7
     min_credit_pct_of_width: 8

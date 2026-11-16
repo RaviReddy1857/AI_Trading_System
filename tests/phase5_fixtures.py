@@ -56,10 +56,13 @@ class FlatCosts(ZeroCosts):
         return b
 
 
-def settings(capital: float = 200000.0, **risk):
+def settings(capital: float = 200000.0, stock_capital: float | None = None, **risk):
+    """`stock_capital`: stock_option_selling.backtest.capital_inr (default: config.yaml's Rs 10,00,000)."""
     s = load_settings()
     raw = s.model_dump()
     raw["account"]["capital_inr"] = capital
+    if stock_capital is not None:
+        raw["stock_option_selling"]["backtest"]["capital_inr"] = stock_capital
     raw["risk"].update(risk)
     return type(s).model_validate(raw)
 

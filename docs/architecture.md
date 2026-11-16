@@ -74,10 +74,14 @@ hours, quarantine spike); the signal's price LIVE, not expired, regime allowed; 
 (cash: floor(capital x 1% / stop distance), position value cap, charges and slippage included; options: floor(capital x
 2.5% / one lot's cost-inclusive max loss), recomputed for n lots); capital pool (25% uncommitted), index selling spreads,
 sector (2 per sector) and correlation above 0.8 (a correlated group shares one position's budget). A limit is reached at
-equality. Stock option spreads (phase 9) use the phase 9 rules instead of the pool, sector and correlation: capital-fit
-label (advisory), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
+equality. Stock option spreads (phase 9) use the phase 9 rules instead of the pool, sector and correlation, and every
+rupee figure of their decision is a % of `stock_option_selling.backtest.capital_inr` (never `account.capital_inr`):
+capital-fit label (advisory), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
 approval whose risk exceeds the budget. Live inputs come from `RiskService`; open positions are not known until the
 phase 6 journal, so live decisions are NO_TRADE (PORTFOLIO_UNKNOWN) until then.
+Index credit spreads and iron condors (user decision 2026-11-16) receive the option risk budget in
+`OptionContext.option_risk_budget_inr`: when one lot at the configured width is above it, they take the widest listed
+width down to `min_hedge_width_points` (100) that fits one lot, else NO TRADE (ZERO_SIZE); the limit is never raised.
 
 ## 4. Technology
 
