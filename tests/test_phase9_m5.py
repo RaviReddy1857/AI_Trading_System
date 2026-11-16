@@ -40,8 +40,9 @@ def test_ACCEPTANCE_reversal_outcomes_against_matching_baselines_by_hand():
       median 0%, up in 1 of 4 = 25%.
       New low against that day's 3-session low: 0 (ref 99; later 99, 99: no), 1 (99; 99, 109: no),
       3 (99; 104, 98: yes), 4 (99; 98, 104: yes) = 2 of 4 = 50%.
-    Every session (all but the confirmation, 0-7): adds 5: 99 -> 105 = +6.06%, 6: 0%, 7: 0%;
-      median 0% of 7, new low 2 of 7 = 28.6%.
+    Every session (0-7, the confirmation included - review fix 2026-11-16): adds 2: +5% (its 3-session
+      low 99; later 109, 104: no new low), 5: 99 -> 105 = +6.06%, 6: 0%, 7: 0%;
+      median 0% of 8, new low 2 of 8 = 25%.
     Confirmation minus matching: median +5 points, up-share +75 points, new-low share -50 points;
     one confirmation is LOW SAMPLE (min 2), so the comparison is LOW SAMPLE."""
     sc, days = fake_scanner()
@@ -55,9 +56,9 @@ def test_ACCEPTANCE_reversal_outcomes_against_matching_baselines_by_hand():
     assert r["low_sample"] is False
     assert m["new_low_afterwards"] == {"within_sessions": 2, "cases": 4, "share_pct": 50.0, "low_sample": False}
     e = out["baselines"]["every_session"]
-    assert e["outcomes"][0]["cases"] == 7 and e["outcomes"][0]["median_pct"] == 0.0
+    assert e["outcomes"][0]["cases"] == 8 and e["outcomes"][0]["median_pct"] == 0.0
     assert e["outcomes"][0]["best_pct"] == 10.0                                    # session 1: 100 -> 110
-    assert e["new_low_afterwards"]["cases"] == 7 and e["new_low_afterwards"]["share_pct"] == 28.6
+    assert e["new_low_afterwards"]["cases"] == 8 and e["new_low_afterwards"]["share_pct"] == 25.0
     vs = out["versus_matching_baseline"]
     assert vs["baseline"] == "washed_out_not_confirmed"
     assert vs["outcomes"] == [{"sessions": 2, "median_minus_baseline_pct": 5.0, "up_share_minus_baseline_pts": 75.0,
@@ -71,12 +72,13 @@ def test_the_baselines_use_the_same_sessions_and_never_a_horizon_past_the_period
     # the period ends at session 5: only starts 0-3 have a whole horizon; the confirmation (2) still counts
     out = reversal_outcomes({"X": sc}, days[:6], [2], 2)
     m = out["baselines"]["washed_out_not_confirmed"]["outcomes"][0]
-    assert m["cases"] == 3 and out["baselines"]["every_session"]["outcomes"][0]["cases"] == 3       # 0, 1, 3
+    assert m["cases"] == 3 and out["baselines"]["every_session"]["outcomes"][0]["cases"] == 4       # 0, 1, (2), 3
     # a period without the confirmation: no confirmation, baselines still measured, the difference unknown
     later = reversal_outcomes({"X": sc}, days[3:], [2], 2)
     assert later["confirmations"] == 0 and later["baselines"]["washed_out_not_confirmed"]["outcomes"][0]["cases"] == 2
     assert later["versus_matching_baseline"]["outcomes"][0]["median_minus_baseline_pct"] is None
-    # a confirmation day is never in a baseline; a day that is not washed out is never in the matching one
+    # a confirmation day is never in the matching baseline (it is in every_session); a day that is not
+    # washed out is never in the matching one
     sc.days[CONFIRMED] = ReversalDay(washed_out=True, confirmed=False)
     again = reversal_outcomes({"X": sc}, days, [2], 2)
     assert again["baselines"]["washed_out_not_confirmed"]["outcomes"][0]["cases"] == 5

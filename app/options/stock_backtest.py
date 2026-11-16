@@ -666,6 +666,12 @@ def print_reversal(out: dict) -> None:
             print(f"    {r['sessions']:3d} sessions: median {r['median_minus_baseline_pct']} points, up-share "
                   f"{r['up_share_minus_baseline_pts']} points" + ("  LOW SAMPLE" if r["low_sample"] else ""))
         print(f"    new-low share {vs['new_low_share_minus_baseline_pts']} points" + ("  LOW SAMPLE" if vs["new_low_low_sample"] else ""))
+    if out.get("windows"):
+        print(f"  windows ({out['market_sessions']['note']}): eligible starts = completed + excluded")
+        for g, by in out["windows"].items():
+            for k, a in by.items():
+                print(f"    {g:26s} {k:>16s}: {a['eligible_starts']:6d} = {a['completed']:6d} + "
+                      + (", ".join(f"{n} {why}" for why, n in sorted(a["excluded"].items())) or "0 excluded"))
 
 
 def run_reversal_reports(settings: Settings, store: Store, eng: OptionEngine, option_stocks: list[str],
@@ -675,7 +681,8 @@ def run_reversal_reports(settings: Settings, store: Store, eng: OptionEngine, op
     `option_stocks` (the stocks whose option history is stored). Daily exit check."""
     sessions = [d for d in dev if first is None or d >= first]
     outcomes = reversal_outcomes({s: eng.reversal_scanner(s) for s in study_stocks}, dev,
-                                 settings.stock_option_selling.reversal.outcome_sessions, settings.backtest.min_trades)
+                                 settings.stock_option_selling.reversal.outcome_sessions, settings.backtest.min_trades,
+                                 calendar=eng.base.calendar)
     reports = {}
     for st in build_reversal_strategies(settings):
         res = run_option_backtest(settings, store, eng.source, st, eng.prices, option_stocks, engine=eng, save=save,

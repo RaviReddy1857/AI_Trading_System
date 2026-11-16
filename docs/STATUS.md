@@ -17,6 +17,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
+| - | Review fixes (Codex review of 968d410..267f09b): reversal windows in market sessions, excluded across price breaks and missing sessions; every_session includes confirmations; scenario triggers bounded to [floor, as-of]; window accounting | Fixed and tested; stored-data rerun: confirmations identical, baselines slightly changed, scenario history unchanged; still LOW SAMPLE | 672 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M5: reversal outcome study against matching baselines (washed out and not confirmed; every session) | Built and tested; on stored data LOW SAMPLE (26 cases), no conclusion | 664 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M4: profiles and scenario history - exclusions counted, breach history from 2019-01-22 at every decision, VIX spikes from post-2019 VIX only | Built and tested; stored-data results unchanged | 661 passing (whole suite) | 2026-11-16 |
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
@@ -1906,6 +1907,37 @@ most of a horizon), so their cases are not independent. Tests: `tests/test_phase
   stored option months).
 - Not tested here: nothing new; the study reads stored daily bars only.
 
+## Review fixes: Codex review of 968d410..267f09b (2026-11-16)
+
+| # | Finding | Fix | Tests (fail on 267f09b, pass now) |
+|---|---|---|---|
+| 1 HIGH | Outcome windows counted bars, not sessions: a window could cross an unadjusted price break (a 2-for-1 split read as -50%) and a missing session stretched it | `reversal.market_sessions`, `_window`: a horizon is h market sessions (the holiday calendar's trading days; the NIFTY sessions in a year holidays.csv has no holidays for); every session in the window needs a price and no break (`ReversalScanner.breaks`) may lie inside; otherwise excluded by reason. Same rule for the confirmations, both baselines and the new-low window | `tests/test_phase9_m5_review.py`: `..._2_for_1_split_is_excluded`, `..._missing_session_is_excluded_not_stretched`, `test_horizons_are_counted_in_market_sessions_from_the_holiday_calendar` |
+| 2 MEDIUM | `every_session` left out the confirmation dates | confirmation dates are in `every_session` (reference low: the 52-week low, like every other session); left out of `washed_out_not_confirmed` only | `test_ACCEPTANCE_every_session_includes_the_confirmation_dates`; `tests/test_phase9_m5.py` corrected (every session 8 cases, new low 2 of 8 = 25%) |
+| 3 MEDIUM | Scenario triggers read FII rows before the floor (a floor-date streak from pre-floor selling) and FII/VIX/index rows after the as-of date | `shortlist.scenario_triggers`: index sessions, FII rows and VIX bars restricted to [floor, as-of] before any streak or spike | `..._fii_selling_before_the_floor_makes_no_streak_on_the_floor_date`, `..._triggers_as_of_a_date_contain_nothing_later` |
+| 4 LOW | No count of the windows left out | `windows`: for every group and horizon, eligible starts, completed cases and exclusions by reason, asserted to add up; on the printout | `test_every_group_and_horizon_reports_eligible_completed_and_excluded`, `test_the_printout_shows_the_window_accounting` |
+
+Baseline definitions unchanged. Whole suite: **672 passing**.
+
+### Rerun on stored data (50 stocks, 2019-01-22 .. 2026-06-05), old (267f09b) -> new
+| | Cases 10 / 20 / 40 | Median 10 / 20 / 40 | Up % 10 / 20 / 40 | New low within 40 |
+|---|---|---|---|---|
+| Confirmed (27) | 26 / 26 / 26 -> same | -1.43 / +1.23 / +1.80 -> same | 38.5 / 57.7 / 53.8 -> same | 3.8% -> 3.8% |
+| Matching baseline | 4,456 / 4,383 / 4,286 -> 4,454 / 4,381 / 4,259 | +1.46 / +3.15 / +5.11 -> +1.46 / +3.15 / +5.20 | 61.2 / 65.6 / 68.6 -> 61.2 / 65.6 / 69.0 | 16.8% -> 16.2% |
+| Every session | 88,189 / 87,689 / 86,689 -> 88,040 / 87,370 / 86,030 | +0.65 / +1.38 / +2.73 -> +0.66 / +1.41 / +2.82 | 55.3 / 57.5 / 60.3 -> 55.3 / 57.7 / 60.7 | 11.6% -> 11.0% |
+| Confirmed minus matching | | -2.89 / -1.92 / -3.31 -> -2.89 / -1.92 / -3.40 | -22.7 / -7.9 / -14.8 -> -22.7 / -7.9 / -15.2 | -13.0 -> -12.4 points |
+
+Exclusions (new): confirmations 1 of 27 (horizon past the period, every horizon); matching baseline 4,546 starts, at 40
+sessions 260 past the period and 27 across a price break; every session 88,715 starts (the 27 confirmation days now
+included), at 40 sessions 2,000 past the period and 685 across a price break. No window was excluded for a missing
+session: on stored data every stock has a bar on every NIFTY session of the period, and in 2026 every holiday-calendar
+trading day has a NIFTY bar. Holidays.csv covers 2026 only, so for 2019-2025 the NIFTY sessions are the market sessions
+(a day missing from NIFTY and the stock alike would go unnoticed there). Still LOW SAMPLE (26 cases): no conclusion,
+nothing tuned.
+
+Scenario history (50 stocks, summed): unchanged - FII streak 840 cases of 850 triggers, India VIX spike 2,010 of 2,600,
+RBI decision 823 of 1,100, own results no data. The stored FII rows start 2026-01-14 (none before the floor), and no
+FII row or VIX spike lies after a stock's last bar, so the bound changes nothing on this data.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2102,3 +2134,4 @@ most of a horizon), so their cases are not independent. Tests: `tests/test_phase
 | 2026-11-16 | Scenario history: every trigger date that is not a case is counted by reason (before the floor, no session within 5 days, same starting session, horizon not passed); the breach history counts its incomplete start days |
 | 2026-11-16 | Statistics floor: the breach history a decision reads is the last 504 closes on or after 2019-01-22; India VIX spikes are computed from VIX bars on or after 2019-01-22 only (older Breeze VIX is wrong-scale) |
 | 2026-11-16 | Reversal study baselines: the matching baseline is every washed-out session without a confirmation (same stocks, same sessions, same measurement; reference low = that day's 52-week low); every session is shown as a reference; differences are evidence only when neither side is LOW SAMPLE |
+| 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

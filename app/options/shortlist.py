@@ -131,15 +131,20 @@ def scenario_triggers(settings: Settings, store: Store, source: str, sym: str, f
     """Trigger dates of each scenario from the stored data files, or None (with what to fill in)
     when a file has nothing for it. Dates are only read, never made up."""
     p = settings.stock_option_selling.profile
-    sessions = [bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source)]
-    fii = [(r["date"], r["fii_net_cr"]) for r in store.fii_dii_all()]
+    # every input is restricted to [floor, session] before any streak or spike is computed: a streak on the
+    # floor date never counts selling days before it, and nothing after the as-of date is ever read
+    inside = lambda d: floor <= d <= session
+    sessions = [d for d in (bar_date(b) for b in store.history_bars("bars_1d", settings.regime.index_symbol, source))
+                if inside(d)]
+    fii = [(r["date"], r["fii_net_cr"]) for r in store.fii_dii_all() if inside(r["date"])]
     events = store.events_between(floor, session)
     rbi = [e["date"] for e in events if e["type"] == "RBI_POLICY"]
     results = [e["date"] for e in events if e["type"] == "RESULTS" and e["symbol"] == sym]
     # the percentile looks back a year, but never before the floor: older Breeze VIX bars are wrong-scale
     # (issue 30). In the first year after the floor the percentile part is unknown, so no day is a KNOWN
     # non-spike day and no episode can start there (vix_spike_dates needs one before the first spike day)
-    vix = [b for b in store.history_bars("bars_1d", settings.options.iv_reference_symbol, source) if bar_date(b) >= floor]
+    vix = [b for b in store.history_bars("bars_1d", settings.options.iv_reference_symbol, source)
+           if inside(bar_date(b))]
     return {
         "after an FII selling streak": {
             "dates": fii_streak_starts(fii, settings.bias.streak_days, True, sessions) if fii else None,

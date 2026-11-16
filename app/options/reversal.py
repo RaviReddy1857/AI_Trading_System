@@ -27,7 +27,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from ..history import bar_date
 from .stock_profile import pivots
@@ -65,6 +65,7 @@ class ReversalScanner:
         self.bars, self.cfg, self.pivot_bars = list(daily), cfg, pivot_bars
         self.dates = [bar_date(b) for b in self.bars]
         self._pos = {d: i for i, d in enumerate(self.dates)}
+        self.breaks = tuple(sorted(breaks))       # bar indexes that opened across an unadjusted price break
         self.pivots: list[tuple[str, int, int, float]] = []   # confirmed pivots: (L | H, index, confirmed at, price)
         self.days: list[ReversalDay] = []
         self._scan({bar_date(b): b.close for b in index_daily}, long_sma_days, sorted(breaks))
@@ -199,63 +200,137 @@ def _new_low(flags: list[bool], longest: int, min_cases: int) -> dict:
             "share_pct": round(sum(flags) / len(flags) * 100, 1) if flags else None, "low_sample": len(flags) < min_cases}
 
 
+# outcome windows (review fix 2026-11-16): a horizon is counted in market sessions, every one of them must have a
+# price for the stock, and no unadjusted price break may lie inside; otherwise the window is excluded, by reason
+PAST_PERIOD = "horizon past the tested period"
+NOT_A_SESSION = "start day is not a market session"
+MISSING_SESSION = "a market session in the window has no price"
+PRICE_BREAK = "an unadjusted price break inside the window"
+GROUPS = ("confirmations", "washed_out_not_confirmed", "every_session")
+
+
+def market_sessions(sessions: Sequence[date], calendar=None) -> tuple[list[date], list[int]]:
+    """The market sessions from the first to the last of `sessions` (the index's session dates): every
+    trading day of the holiday calendar (weekdays less data/holidays.csv) in each year the calendar
+    covers, plus every date in `sessions`. A year the calendar holds no holiday for has not been entered
+    (NSE publishes a list every year): there the index's sessions alone are the market sessions, so a
+    day missing from the index too goes unnoticed. Returns (sessions, the years not covered)."""
+    if not sessions:
+        return [], []
+    first, last = min(sessions), max(sessions)
+    have = {h.year for h in calendar.holidays} if calendar is not None else set()
+    out = set(sessions)
+    d = first
+    while d <= last:
+        if d.year in have and calendar.is_trading_day(d):
+            out.add(d)
+        d += timedelta(days=1)
+    return sorted(out), [y for y in range(first.year, last.year + 1) if y not in have]
+
+
+def _window(dates: Sequence[date], pos: dict, breaks: Sequence[int], i: int, h: int, mkt: list[date],
+            mkt_pos: dict, last: date) -> tuple[int | None, str | None]:
+    """(index of the bar h market sessions after bar i, None) or (None, why the window is excluded)."""
+    k = mkt_pos.get(dates[i])
+    if k is None:
+        return None, NOT_A_SESSION
+    if k + h >= len(mkt) or mkt[k + h] > last:
+        return None, PAST_PERIOD
+    if any(d not in pos for d in mkt[k + 1:k + h + 1]):
+        return None, MISSING_SESSION
+    j = pos[mkt[k + h]]
+    if any(i < b <= j for b in breaks):
+        return None, PRICE_BREAK
+    return j, None
+
+
 def reversal_outcomes(scanners: dict[str, ReversalScanner], sessions: Sequence[date], horizons: Sequence[int],
-                      min_cases: int) -> dict:
+                      min_cases: int, calendar=None) -> dict:
     """Every confirmation inside `sessions` (the tested period): the close-to-close move after each
-    horizon, and the share whose low later fell below the base low within the longest horizon. A
-    case counts for a horizon only if the whole horizon lies inside `sessions`. HISTORY, NOT A FORECAST.
+    horizon, and the share whose low later fell below the base low within the longest horizon.
+    HISTORY, NOT A FORECAST.
+
+    A horizon of h is h MARKET sessions (`market_sessions`: the holiday calendar's trading days, and
+    the index's sessions where the calendar has no holidays for the year). A window counts only if
+    the whole of it lies inside `sessions`, the stock has a price on every market session in it, and
+    no unadjusted price break (split, bonus, demerger: `ReversalScanner.breaks`) lies inside it;
+    otherwise it is excluded, by reason. The same rule applies to the confirmations and both baselines.
+    `windows` gives, for every group and horizon (and the new-low window), the eligible starts, the
+    completed cases and the exclusions by reason; they always add up.
 
     Baselines (`baselines`), the same stocks and the same tested sessions, measured exactly the same
-    way (close of the day to the close h sessions later; whole horizon inside the period; a new low =
-    a later low under the reference low within the longest horizon):
+    way (close of the day to the close h sessions later; a new low = a later low under the reference
+    low within the longest horizon):
     - washed_out_not_confirmed (the MATCHING baseline): every session on which the stock was washed out
       and no reversal was confirmed that day; its reference low is the lowest low of the 52-week window
       (`high_lookback_sessions`) that day, as a base low is for a confirmation;
-    - every_session (a reference for the drift of the period): every session, the same 52-week low.
+    - every_session (a reference for the drift of the period): every session, confirmation days
+      included, the same 52-week low.
     `versus_matching_baseline`: the confirmations' median and up-share minus the matching baseline's,
     per horizon, and the new-low share minus its; `low_sample` when either side has fewer than
     `min_cases` cases. Baseline sessions overlap (consecutive days share most of their horizon), so
     their cases are not independent; the count is the number of sessions, not of separate episodes."""
     allowed = set(sessions)
     last = max(sessions) if sessions else None
+    mkt, uncovered = market_sessions(sessions, calendar)
+    mkt_pos = {d: k for k, d in enumerate(mkt)}
     longest = max(horizons)
-    moves: dict[int, list[float]] = {h: [] for h in horizons}
-    new_low = []
+    nl_key = f"new_low_within_{longest}"
+    keys = [str(h) for h in horizons] + [nl_key]
+    acct = {g: {k: {"eligible_starts": 0, "completed": 0, "excluded": {}} for k in keys} for g in GROUPS}
+    moves = {g: {h: [] for h in horizons} for g in GROUPS}
+    lows = {g: [] for g in GROUPS}
     events = []
-    base_moves = {k: {h: [] for h in horizons} for k in BASELINES}
-    base_low = {k: [] for k in BASELINES}
+
+    def count(groups, key, why):
+        for g in groups:
+            a = acct[g][key]
+            a["eligible_starts"] += 1
+            if why is None:
+                a["completed"] += 1
+            else:
+                a["excluded"][why] = a["excluded"].get(why, 0) + 1
+
     for sym, sc in sorted(scanners.items()):
         lookback = sc.cfg.high_lookback_sessions
+        pos = {d: i for i, d in enumerate(sc.dates)}
+        breaks = tuple(getattr(sc, "breaks", ()))
         for i, day in enumerate(sc.days):
             if sc.dates[i] not in allowed:
                 continue
-            groups = []
+            week52_low = min(b.low for b in sc.bars[max(0, i - lookback + 1):i + 1])
+            groups = ["every_session"]
+            refs = {"every_session": week52_low}
             if day.confirmed:
                 events.append({"stock": sym, "date": sc.dates[i].isoformat(), "close": sc.bars[i].close,
                                "base_low": day.base_low})
-                ref = day.base_low
-            else:
-                ref = min(b.low for b in sc.bars[max(0, i - lookback + 1):i + 1])
-                groups.append("every_session")
-                if day.washed_out:
-                    groups.append("washed_out_not_confirmed")
+                groups.append("confirmations")
+                refs["confirmations"] = day.base_low
+            elif day.washed_out:
+                groups.append("washed_out_not_confirmed")
+                refs["washed_out_not_confirmed"] = week52_low
             for h in horizons:
-                if i + h < len(sc.bars) and sc.dates[i + h] <= last:
-                    move = (sc.bars[i + h].close / sc.bars[i].close - 1) * 100
-                    if day.confirmed:
-                        moves[h].append(move)
+                j, why = _window(sc.dates, pos, breaks, i, h, mkt, mkt_pos, last)
+                count(groups, str(h), why)
+                if j is not None:
+                    move = (sc.bars[j].close / sc.bars[i].close - 1) * 100
                     for g in groups:
-                        base_moves[g][h].append(move)
-            if i + longest < len(sc.bars) and sc.dates[i + longest] <= last:
-                broke = min(b.low for b in sc.bars[i + 1:i + 1 + longest]) < ref
-                if day.confirmed:
-                    new_low.append(broke)
+                        moves[g][h].append(move)
+            j, why = _window(sc.dates, pos, breaks, i, longest, mkt, mkt_pos, last)
+            count(groups, nl_key, why)
+            if j is not None:
+                low = min(b.low for b in sc.bars[i + 1:j + 1])
                 for g in groups:
-                    base_low[g].append(broke)
-    rows = _rows(moves, horizons, min_cases)
-    nl = _new_low(new_low, longest, min_cases)
-    baselines = {k: {"what": BASELINES[k], "outcomes": _rows(base_moves[k], horizons, min_cases),
-                     "new_low_afterwards": _new_low(base_low[k], longest, min_cases)} for k in BASELINES}
+                    lows[g].append(low < refs[g])
+    for g in GROUPS:
+        for k in keys:
+            a = acct[g][k]
+            done = len(lows[g]) if k == nl_key else len(moves[g][int(k)])
+            assert a["completed"] == done and a["eligible_starts"] == done + sum(a["excluded"].values()), (g, k, a)
+    rows = _rows(moves["confirmations"], horizons, min_cases)
+    nl = _new_low(lows["confirmations"], longest, min_cases)
+    baselines = {k: {"what": BASELINES[k], "outcomes": _rows(moves[k], horizons, min_cases),
+                     "new_low_afterwards": _new_low(lows[k], longest, min_cases)} for k in BASELINES}
     match = baselines["washed_out_not_confirmed"]
     diff = lambda a, b: None if a is None or b is None else round(a - b, 2)
     versus = {"baseline": "washed_out_not_confirmed",
@@ -267,8 +342,12 @@ def reversal_outcomes(scanners: dict[str, ReversalScanner], sessions: Sequence[d
               "new_low_share_minus_baseline_pts": diff(nl["share_pct"], match["new_low_afterwards"]["share_pct"]),
               "new_low_low_sample": nl["low_sample"] or match["new_low_afterwards"]["low_sample"],
               "note": "a difference is evidence only when neither side is LOW SAMPLE; baseline sessions overlap"}
+    sess_note = ("horizons in market sessions from the holiday calendar"
+                 + (f"; holidays.csv has no holidays for {', '.join(map(str, uncovered))}, so there the index's "
+                    f"sessions are the market sessions" if uncovered else ""))
     return {"label": "history, not a forecast", "confirmations": len(events), "stocks": len({e["stock"] for e in events}),
             "outcomes": rows, "new_low_afterwards": nl, "baselines": baselines, "versus_matching_baseline": versus,
+            "windows": acct, "market_sessions": {"note": sess_note, "calendar_not_covering": uncovered},
             "min_cases": min_cases, "events": events}
 
 
