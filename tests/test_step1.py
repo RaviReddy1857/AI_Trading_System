@@ -125,9 +125,10 @@ def test_breeze_tick_parsing():
 # ---------- web app ----------
 def sim_settings() -> Settings:
     """The user's config.yaml, pinned to sim mode, so app tests never depend on
-    whether the user has switched feed.mode to breeze."""
+    whether the user has switched feed.mode to breeze or turned Telegram on."""
     raw = load_settings().model_dump()
     raw["feed"]["mode"] = "sim"
+    raw["alerts"]["telegram_enabled"] = False
     raw["history"]["sim_seed_on_start"] = False
     return Settings.model_validate(raw)
 

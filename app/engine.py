@@ -128,8 +128,9 @@ class SignalEngine:
         if open_t < b <= close_t and (self.last_bar is None or b > self.last_bar):
             return self.on_bar(b, now)
         if now > close_t + timedelta(minutes=1) and self.j.get_state(f"equity_closed:{day}") is None:
+            flows = tuple(self.store.capital_flows())
             for pool in POOLS:
-                close_equity_day(self.j, self.s, pool, now)
+                close_equity_day(self.j, self.s, pool, now, flows)
             self.j.set_state(f"equity_closed:{day}", now.isoformat(), now)
         return None
 

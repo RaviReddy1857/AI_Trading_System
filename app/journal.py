@@ -13,6 +13,13 @@ The pool of a signal is the pool whose capital the risk engine sizes it on (`ris
 Each pool's realised and open P&L and equity history are kept apart, so a loss in one pool never stops or
 halves the other. Deposits and withdrawals (capital_log) belong to the CASH_INDEX pool (the trading account).
 
+The deposit rule (one rule, for the equity figures and the drawdown alike): a pool's equity at a day's close is
+its configured capital + the net deposits dated after the pool's first equity point up to that day (CASH_INDEX
+only; money already in the account when the journal began is in the configured capital) + realised P&L to date
++ open P&L. The drawdown (`app.risk.limits.drawdown_state`) takes the same flows out of each day's change, so a
+deposit or a withdrawal alone moves equity but never the drawdown, and a trading loss after a deposit is measured
+against the equity including the deposit.
+
 Nothing is assumed. A position whose open P&L, risk or committed capital cannot be computed makes its pool
 unknown (PORTFOLIO_UNKNOWN), and the risk engine says NO TRADE for that pool.
 """
@@ -339,11 +346,15 @@ def committed_inr(pos: Position) -> Decimal | None:
     return None if pos.margin_inr is None else _paise(pos.margin_inr)
 
 
-def position_kind(pos: Position) -> str:
+def kind_of_trade_type(trade_type: str) -> str:
     from .risk.portfolio import CASH, INDEX_SELLING_SPREAD, OPTION_BUY, OTHER, STOCK_SPREAD
     return {"INTRADAY_STOCKS": CASH, "SWING_STOCKS": CASH, "INDEX_OPTION_BUYING": OPTION_BUY,
             "STOCK_OPTION_BUYING": OPTION_BUY, "INDEX_OPTION_SELLING": INDEX_SELLING_SPREAD,
-            "STOCK_OPTION_SELLING": STOCK_SPREAD}.get(pos.trade_type, OTHER)
+            "STOCK_OPTION_SELLING": STOCK_SPREAD}.get(trade_type, OTHER)
+
+
+def position_kind(pos: Position) -> str:
+    return kind_of_trade_type(pos.trade_type)
 
 
 # ---------------- manual position input ----------------
@@ -924,29 +935,47 @@ class Journal:
     # ---- realised P&L per pool ----
     def realised(self, pool: str, since: date | None = None, until: date | None = None) -> Decimal | None:
         """Realised P&L of a pool (my closed positions and the paper trades of signals I did not take), after
-        estimated charges, for closes dated (IST) from `since` to `until` inclusive. None when a close's net
-        is not known."""
+        estimated charges, for closes dated (IST) from `since` to `until` inclusive. None when a figure is not known.
+
+        Same basis as the open P&L (`pool_account`): with `since`, a close of a position opened before `since` counts
+        only its change from the last closing mark before `since` (net of the close less that mark per unit x units
+        closed), so a position that gained up to yesterday's close and lost today shows today's loss whether it is
+        still open or closed. No such mark: not known (None), as for the open P&L. Without `since`: since entry."""
         taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
         total = Decimal(0)
-        pos_pool = {p.position_id: p.pool for p in self.positions(status=None)}
+
+        def amount(ref: str, entry_utc: datetime, net, units: int) -> Decimal | None:
+            if net is None:
+                return None
+            if since is None or ist_day(entry_utc) >= since:
+                return _d(net)
+            m = self.last_mark_before(ref, since)
+            if m is None:
+                return None
+            return _paise(_d(net) - _d(m[1]) * units)
+
+        pos_by_id = {p.position_id: p for p in self.positions(status=None)}
         for c in self.closes():
-            if pos_pool.get(c["position_id"]) != pool:
+            p = pos_by_id.get(c["position_id"])
+            if p is None or p.pool != pool:
                 continue
             day = ist_day(datetime.fromisoformat(c["at_utc"]))
             if (since and day < since) or (until and day > until):
                 continue
-            if c["net_inr"] is None:
+            v = amount(p.position_id, p.entry_utc, c["net_inr"], c["units"])
+            if v is None:
                 return None
-            total += _d(c["net_inr"])
+            total += v
         for t in self.paper_trades(status="CLOSED", pool=pool):
             if t["signal_id"] in taken or not t["exit_utc"]:
                 continue
             day = ist_day(datetime.fromisoformat(t["exit_utc"]))
             if (since and day < since) or (until and day > until):
                 continue
-            if t["net_pnl_inr"] is None:
+            v = amount(f"paper:{t['signal_id']}", datetime.fromisoformat(t["entry_utc"]), t["net_pnl_inr"], t["quantity"])
+            if v is None:
                 return None
-            total += _d(t["net_pnl_inr"])
+            total += v
         return _paise(total)
 
     def held_positions(self, pool: str) -> list[Position]:
@@ -955,6 +984,25 @@ class Journal:
         taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
         out = list(self.positions("OPEN", pool))
         out += [self.paper_position(t) for t in self.paper_trades(status="OPEN", pool=pool) if t["signal_id"] not in taken]
+        return out
+
+    def pending_reservations(self, pool: str, now: datetime) -> list[dict]:
+        """Approved paper trades not filled yet (PENDING) and still within their valid-until, of signals I did not
+        take: each reserves its approved risk and margin, a sector slot and a place in its correlated group from
+        approval until it fills (it is then an open paper trade) or expires - as the backtests reserve accepted
+        entries until they fill."""
+        taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
+        out = []
+        for t in self.paper_trades(status="PENDING", pool=pool):
+            if t["signal_id"] in taken:
+                continue
+            try:
+                valid_until = datetime.fromisoformat(json.loads(t["note"] or "{}")["valid_until_utc"])
+            except (KeyError, ValueError, TypeError):
+                valid_until = None                      # not known: it keeps its reservation (never released early)
+            if valid_until is not None and now >= valid_until:
+                continue
+            out.append(t)
         return out
 
 
@@ -1001,7 +1049,9 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     less the last mark recorded on an earlier day (since entry when opened today); this month: less the
     last mark before the month began (since entry when opened this month). A position whose figure cannot
     be computed is passed with None, so the engine says PORTFOLIO_UNKNOWN with the position named.
-    Equity = pool capital + realised to date + open P&L now; earlier closes from `equity_history`."""
+    Equity = pool capital + net deposits since the first equity point (`net_flows`; CASH_INDEX only) + realised
+    to date + open P&L now; earlier closes from `equity_history`. Approved paper trades not filled yet are passed
+    as positions with their approved risk and margin and no P&L (`Journal.pending_reservations`)."""
     from .risk.portfolio import AccountState, OpenPosition
     cap = pool_capital(settings, pool)
     today = ist_day(now)
@@ -1038,17 +1088,30 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
                                  None if committed is None else float(committed),
                                  None if today_pnl is None else float(today_pnl),
                                  None if month_pnl is None else float(month_pnl), origin=p.origin))
+    # approved paper trades not filled yet reserve their approved risk and margin (no P&L yet): sector,
+    # correlated-group, capital-pool and selling-spread limits count them from approval until fill or expiry
+    pending = journal.pending_reservations(pool, now)
+    for t in pending:
+        risk, margin = _num(t["risk_inr"]), _num(t["margin_inr"])
+        if risk is None:
+            unknown.append(f"pending {t['signal_id']} ({t['symbol']}): approved risk not known")
+        if margin is None:
+            unknown.append(f"pending {t['signal_id']} ({t['symbol']}): approved margin not known")
+        rows.append(OpenPosition(f"pending:{t['signal_id']}", t["symbol"], kind_of_trade_type(t["trade_type"]), risk,
+                                 margin, 0.0, 0.0, origin="PENDING"))
     r_today = journal.realised(pool, since=today)
     r_month = journal.realised(pool, since=month_start)
     r_all = journal.realised(pool)
     stored = [(d, e) for d, e in journal.equity_rows(pool) if d < today]
     curve = None
     if r_all is not None and open_now_total is not None and stored:
-        curve = tuple(stored) + ((today, float(_paise(_d(cap) + r_all + open_now_total))),)
+        deposits = net_flows(journal, pool, flows, today)
+        curve = tuple(stored) + ((today, float(_paise(_d(cap) + deposits + r_all + open_now_total))),)
     state = AccountState(capital_inr=cap, positions=tuple(rows), realised_today_inr=None if r_today is None else float(r_today),
                          realised_month_inr=None if r_month is None else float(r_month), equity_curve=curve,
                          flows=tuple(flows) if pool == CASH_INDEX else ())
-    facts = {"pool": pool, "capital_inr": cap, "open_positions": len(rows), "unknown": unknown,
+    facts = {"pool": pool, "capital_inr": cap, "open_positions": len(rows) - len(pending),
+             "pending_reserved": len(pending), "unknown": unknown,
              "realised_today_inr": state.realised_today_inr, "realised_month_inr": state.realised_month_inr,
              "realised_total_inr": None if r_all is None else float(r_all),
              "open_pnl_inr": None if open_now_total is None else float(open_now_total),
@@ -1070,9 +1133,20 @@ def record_marks(journal: Journal, pool: str, now: datetime, marks, costs) -> in
     return n
 
 
-def close_equity_day(journal: Journal, settings, pool: str, now: datetime) -> dict | None:
-    """Write today's closing equity of a pool after the close, from the last marks of the session. Nothing is
-    written when a figure is not known (a position without a mark today, a close without a net figure)."""
+def net_flows(journal: Journal, pool: str, flows, upto: date) -> Decimal:
+    """Net deposits (deposits +, withdrawals -) of a pool dated after its first equity point up to `upto` inclusive:
+    the part of the equity that is money put in, not profit (the deposit rule, module docstring). CASH_INDEX only."""
+    if pool != CASH_INDEX or not flows:
+        return Decimal(0)
+    rows = journal.equity_rows(pool)
+    start = rows[0][0] if rows else None
+    return sum((_d(a) for d, a in flows if (start is None or d > start) and d <= upto), Decimal(0))
+
+
+def close_equity_day(journal: Journal, settings, pool: str, now: datetime, flows=()) -> dict | None:
+    """Write today's closing equity of a pool after the close, from the last marks of the session, with the net
+    deposits to date (`net_flows`). Nothing is written when a figure is not known (a position without a mark
+    today, a close without a net figure)."""
     r_all = journal.realised(pool)
     total = Decimal(0)
     for p in journal.held_positions(pool):           # the last mark of the session (prices are CLOSED now)
@@ -1082,6 +1156,6 @@ def close_equity_day(journal: Journal, settings, pool: str, now: datetime) -> di
         total += _paise(_d(per_unit) * p.quantity)
     if r_all is None:
         return None
-    eq = _paise(_d(pool_capital(settings, pool)) + r_all + total)
+    eq = _paise(_d(pool_capital(settings, pool)) + net_flows(journal, pool, flows, ist_day(now)) + r_all + total)
     journal.write_equity(pool, ist_day(now), float(eq), float(r_all), float(total), now, "close")
     return {"pool": pool, "day": ist_day(now).isoformat(), "equity_inr": float(eq)}
