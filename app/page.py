@@ -266,7 +266,16 @@ function reversals(rep){
  const nl=o.new_low_afterwards;
  return `<h2 style="margin-top:12px">Every confirmed reversal: what happened next <span class="tag warn">${esc(o.label)}</span></h2>
  <div class="mute">${o.confirmations} confirmations in ${o.stocks} stocks (daily prices from 2019-01-22, development period). New low within ${nl.within_sessions} sessions: <b>${fmt(nl.share_pct,1)}%</b> of ${nl.cases} cases${nl.low_sample?' <b class="STALE">LOW SAMPLE</b>':''}.</div>
- <table><thead><tr><th>Sessions later</th><th>Cases</th><th>Median %</th><th>Mean %</th><th>25th pct</th><th>75th pct</th><th>Worst %</th><th>Best %</th><th>Up in % of cases</th><th>Sample</th></tr></thead><tbody>${o.outcomes.map(r=>`<tr><td>${r.sessions}</td><td>${r.cases}</td><td>${fmt(r.median_pct)}</td><td>${fmt(r.mean_pct)}</td><td>${fmt(r.p25_pct)}</td><td>${fmt(r.p75_pct)}</td><td>${fmt(r.worst_pct)}</td><td>${fmt(r.best_pct)}</td><td>${fmt(r.up_pct_of_cases,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}</tbody></table>`;
+ <table><thead><tr><th>Sessions later</th><th>Cases</th><th>Median %</th><th>Mean %</th><th>25th pct</th><th>75th pct</th><th>Worst %</th><th>Best %</th><th>Up in % of cases</th><th>Sample</th></tr></thead><tbody>${o.outcomes.map(r=>`<tr><td>${r.sessions}</td><td>${r.cases}</td><td>${fmt(r.median_pct)}</td><td>${fmt(r.mean_pct)}</td><td>${fmt(r.p25_pct)}</td><td>${fmt(r.p75_pct)}</td><td>${fmt(r.worst_pct)}</td><td>${fmt(r.best_pct)}</td><td>${fmt(r.up_pct_of_cases,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}</tbody></table>${revBase(o)}`;
+}
+function revBase(o){
+ const bs=o.baselines; if(!bs) return '';
+ const vs=o.versus_matching_baseline;
+ const row=(name,b)=>b.outcomes.map(r=>`<tr><td>${esc(name)}</td><td>${r.sessions}</td><td>${r.cases}</td><td>${fmt(r.median_pct)}</td><td>${fmt(r.up_pct_of_cases,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('');
+ return `<h3>Against matching baselines (same stocks, same sessions, measured the same way)</h3>
+ <div class="mute">${Object.values(bs).map(b=>esc(b.what)+`: new low within ${b.new_low_afterwards.within_sessions} sessions ${fmt(b.new_low_afterwards.share_pct,1)}% of ${b.new_low_afterwards.cases} sessions`).join('<br>')}<br>${esc(vs.note)}.</div>
+ <table><thead><tr><th>Baseline</th><th>Sessions later</th><th>Cases</th><th>Median %</th><th>Up in % of cases</th><th>Sample</th></tr></thead><tbody>${Object.entries(bs).map(([k,b])=>row(k.replace(/_/g,' '),b)).join('')}</tbody></table>
+ <table><thead><tr><th>Confirmations minus matching baseline</th><th>Median (points)</th><th>Up-share (points)</th><th>Sample</th></tr></thead><tbody>${vs.outcomes.map(r=>`<tr><td>${r.sessions} sessions later</td><td>${fmt(r.median_minus_baseline_pct)}</td><td>${fmt(r.up_share_minus_baseline_pts,1)}</td><td class="${r.low_sample?'STALE':''}">${r.low_sample?'LOW SAMPLE':'ok'}</td></tr>`).join('')}<tr><td>new-low share</td><td colspan="2">${fmt(vs.new_low_share_minus_baseline_pts,1)}</td><td class="${vs.new_low_low_sample?'STALE':''}">${vs.new_low_low_sample?'LOW SAMPLE':'ok'}</td></tr></tbody></table>`;
 }
 function policies(rep){
  const all=rep.exit_policy_comparison; if(!all) return '';

@@ -652,6 +652,20 @@ def print_reversal(out: dict) -> None:
     nl = out["new_low_afterwards"]
     print(f"  made a new low within {nl['within_sessions']} sessions: {nl['share_pct']}% of {nl['cases']} cases"
           + ("  LOW SAMPLE" if nl["low_sample"] else ""))
+    for b in (out.get("baselines") or {}).values():
+        print(f"  {b['what']}:")
+        for r in b["outcomes"]:
+            print(f"    {r['sessions']:3d} sessions later: cases {r['cases']:6d}  median {r['median_pct']}%  "
+                  f"up in {r['up_pct_of_cases']}%" + ("  LOW SAMPLE" if r["low_sample"] else ""))
+        bl = b["new_low_afterwards"]
+        print(f"    made a new low within {bl['within_sessions']} sessions: {bl['share_pct']}% of {bl['cases']} sessions")
+    vs = out.get("versus_matching_baseline")
+    if vs:
+        print("  confirmations minus the matching baseline (" + vs["note"] + "):")
+        for r in vs["outcomes"]:
+            print(f"    {r['sessions']:3d} sessions: median {r['median_minus_baseline_pct']} points, up-share "
+                  f"{r['up_share_minus_baseline_pts']} points" + ("  LOW SAMPLE" if r["low_sample"] else ""))
+        print(f"    new-low share {vs['new_low_share_minus_baseline_pts']} points" + ("  LOW SAMPLE" if vs["new_low_low_sample"] else ""))
 
 
 def run_reversal_reports(settings: Settings, store: Store, eng: OptionEngine, option_stocks: list[str],

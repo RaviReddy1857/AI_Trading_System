@@ -417,7 +417,8 @@ Stock option selling backtests (`app/options/stock_backtest.py`) add: target and
 (filled at the next 5-minute bar's open; a leg that did not trade in a bar is priced at its last trade if at most
 `intraday_leg_max_age_minutes` old) beside the daily check; three exit policies on identical recorded entries (stop, roll
 by the rules, roll every month), reported per campaign; the effect of each rule and alert against the baseline; and the
-reversal study. A spread still open when its next session is inside the last `forced_exit_trading_days_before_expiry`
+reversal study (every confirmation's 10/20/40-session outcome and new-low share against a matching baseline: the
+washed-out sessions of the same stocks and period without a confirmation, measured the same way). A spread still open when its next session is inside the last `forced_exit_trading_days_before_expiry`
 trading days is closed at that session (`FORCED_EXPIRY_EXIT`), after the time exit has been checked.
 Only complete (stock, year) pairs of downloaded option history are reported unless `--all-data` is given.
 

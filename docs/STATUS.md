@@ -17,6 +17,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
+| - | Phase 9 M5: reversal outcome study against matching baselines (washed out and not confirmed; every session) | Built and tested; on stored data LOW SAMPLE (26 cases), no conclusion | 664 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M4: profiles and scenario history - exclusions counted, breach history from 2019-01-22 at every decision, VIX spikes from post-2019 VIX only | Built and tested; stored-data results unchanged | 661 passing (whole suite) | 2026-11-16 |
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
@@ -1869,12 +1870,41 @@ Phase 5 not started; variants A-D and every default unchanged; no holdout opened
 | Nothing alerts until approved; the reversal alert goes to every open position once approved | `reversal.alerts_approved`, `alert_kinds` | `test_ACCEPTANCE_reversal_alert_goes_to_every_open_position_only_after_approval` | C |
 | Study: 10/20/40-session outcome of every confirmation, the share making a new low, LOW SAMPLE | `reversal_outcomes`, `run_reversal_reports` | `test_reversal_outcomes_by_hand_and_low_sample` | C |
 | Both candidates against their no-filter baselines (same structure, same stocks and period; the put candidate against baseline:PE, the bull call against the bull call schedule) | `run_reversal_reports` | `test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline` | C |
-| The outcome study against matching baselines | the outcomes had no baseline: a median move after a confirmation could not be told apart from what washed-out stocks did anyway | - | **B (next commit)** |
+| The outcome study against matching baselines | the outcomes had no baseline: a median move after a confirmation could not be told apart from what washed-out stocks did anyway | - | **B** (M5 below): `reversal.reversal_outcomes` `baselines`, `versus_matching_baseline`; printout and backtests page; `tests/test_phase9_m5.py` |
 
 ### M4 result on stored data
 The strategy's portfolio runs on stored data (16 stocks 2025-2026 and 30 stocks 2026, both executions) give the same
 trades, statistics and skipped counts as before: every decision there is after 2021, so the floor on the breach history
 changes nothing, and the VIX change only touches 2019. Whole suite: **661 passing**.
+
+## Phase 9 M5: the reversal outcome study against matching baselines (2026-11-16)
+
+The only M5 gap (table above). Defined in `reversal.reversal_outcomes` before any result was looked at; the same stocks,
+the same tested sessions and the same measurement as the confirmations (close to the close h sessions later, the whole
+horizon inside the period; a new low = a later low under the reference low within 40 sessions):
+- **matching baseline** (`washed_out_not_confirmed`): every session on which the stock was washed out and no reversal was
+  confirmed; reference low = the lowest low of that day's 52-week window (a confirmation's base low is that window's low
+  on its base day);
+- **reference** (`every_session`): every session of the same stocks, for the drift of the period.
+`versus_matching_baseline` gives the confirmations' median and up-share minus the matching baseline's per horizon, and the
+new-low share minus its, LOW SAMPLE when either side has under 30 cases. Baseline sessions overlap (consecutive days share
+most of a horizon), so their cases are not independent. Tests: `tests/test_phase9_m5.py` (by hand). Whole suite:
+**664 passing**.
+
+### Result on stored daily data (50 watchlist stocks, development period 2019-01-22 .. 2026-06-05; no option prices needed)
+| | Cases (10 / 20 / 40) | Median move 10 / 20 / 40 sessions | Up in % of cases | New low within 40 sessions |
+|---|---|---|---|---|
+| Confirmed reversals (27 in 19 stocks) | 26 / 26 / 26 (LOW SAMPLE) | -1.43% / +1.23% / +1.80% | 38.5 / 57.7 / 53.8 | 3.8% |
+| Matching baseline: washed out, not confirmed | 4,456 / 4,383 / 4,286 sessions | +1.46% / +3.15% / +5.11% | 61.2 / 65.6 / 68.6 | 16.8% |
+| Reference: every session | 88,189 / 87,689 / 86,689 sessions | +0.65% / +1.38% / +2.73% | 55.3 / 57.5 / 60.3 | 11.6% |
+| Confirmed minus matching | - | -2.89 / -1.92 / -3.31 points | -22.7 / -7.9 / -14.8 points | -13.0 points |
+
+- **History, not a forecast; LOW SAMPLE (26 cases): no conclusion.** On these numbers a confirmation was not followed by a
+  better price move than the average washed-out day; fewer confirmations went on to a new low (1 of 26 against 17% of
+  washed-out sessions). Nothing was changed: the detector stays watch only, and no threshold was tuned.
+- The two candidate trades against their no-filter baselines are unchanged from the M1 report (no confirmation inside the
+  stored option months).
+- Not tested here: nothing new; the study reads stored daily bars only.
 
 ## Open issues
 
@@ -2071,3 +2101,4 @@ changes nothing, and the VIX change only touches 2019. Whole suite: **661 passin
 | 2026-11-16 | Delivery estimate: bought legs in the money are allocated once across the position, to the most exposed sold legs first (puts: highest strike; calls: lowest), deepest bought leg first; unallocated sold quantity is fully deliverable (user) |
 | 2026-11-16 | Scenario history: every trigger date that is not a case is counted by reason (before the floor, no session within 5 days, same starting session, horizon not passed); the breach history counts its incomplete start days |
 | 2026-11-16 | Statistics floor: the breach history a decision reads is the last 504 closes on or after 2019-01-22; India VIX spikes are computed from VIX bars on or after 2019-01-22 only (older Breeze VIX is wrong-scale) |
+| 2026-11-16 | Reversal study baselines: the matching baseline is every washed-out session without a confirmation (same stocks, same sessions, same measurement; reference low = that day's 52-week low); every session is shown as a reference; differences are evidence only when neither side is LOW SAMPLE |

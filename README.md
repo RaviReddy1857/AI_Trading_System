@@ -346,7 +346,8 @@ Research only, no alerts yet. Signal cards, Telegram alerts and the manual posit
 watch list ("watch only, never a signal"), campaigns, and a per-stock profile with scenario history ("history, not a
 forecast"). Each scenario shows its cases and how many trigger dates were not counted (before 2019-01-22, no stored
 price near the date, the same starting day as another trigger, or its 30 days not over yet). Backtest results are on
-http://127.0.0.1:8000/backtests.
+http://127.0.0.1:8000/backtests. The reversal study there sets every confirmed reversal against the washed-out days
+of the same stocks that had no confirmation (and against every day), measured the same way.
 
 **Settlement readiness (phase 9 M3).** The same page has a "Settlement readiness" card (and
 `GET /api/stock-option-selling/settlement`): ICICI's physical-settlement rules as you entered them in `config.yaml`

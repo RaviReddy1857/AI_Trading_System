@@ -19,7 +19,8 @@ spread with the sold strike below the base low (ReversalPutSpread). Prior breakd
 lows the fall broke, above the price) are shown as stall zones.
 
 `reversal_outcomes` measures every past confirmation: the move 10, 20 and 40 sessions later and the
-share that went on to a new low.
+share that went on to a new low, against matching baselines measured the same way on the same stocks
+and sessions (defined in `reversal_outcomes`, before any result was seen).
 """
 from __future__ import annotations
 
@@ -171,28 +172,15 @@ class ReversalScanner:
                                                    "base_low": None, "stall_zones": [], "reasons": []}
 
 
-def reversal_outcomes(scanners: dict[str, ReversalScanner], sessions: Sequence[date], horizons: Sequence[int],
-                      min_cases: int) -> dict:
-    """Every confirmation inside `sessions` (the tested period): the close-to-close move after each
-    horizon, and the share whose low later fell below the base low within the longest horizon. A
-    case counts for a horizon only if the whole horizon lies inside `sessions`. HISTORY, NOT A FORECAST."""
-    allowed = set(sessions)
-    last = max(sessions) if sessions else None
-    longest = max(horizons)
-    moves: dict[int, list[float]] = {h: [] for h in horizons}
-    new_low = []
-    events = []
-    for sym, sc in sorted(scanners.items()):
-        for i, day in enumerate(sc.days):
-            if not day.confirmed or sc.dates[i] not in allowed:
-                continue
-            events.append({"stock": sym, "date": sc.dates[i].isoformat(), "close": sc.bars[i].close,
-                           "base_low": day.base_low})
-            for h in horizons:
-                if i + h < len(sc.bars) and sc.dates[i + h] <= last:
-                    moves[h].append((sc.bars[i + h].close / sc.bars[i].close - 1) * 100)
-            if i + longest < len(sc.bars) and sc.dates[i + longest] <= last:
-                new_low.append(min(b.low for b in sc.bars[i + 1:i + 1 + longest]) < day.base_low)
+BASELINES = {
+    "washed_out_not_confirmed": "matching baseline: every session of the same stocks in the same period on which the "
+                                "stock was washed out (more than washed_out_drawdown_pct below its 52-week high, "
+                                "min_sessions_below_long sessions below its long average) and no reversal was confirmed",
+    "every_session": "reference: every session of the same stocks in the same period",
+}
+
+
+def _rows(moves: dict[int, list[float]], horizons: Sequence[int], min_cases: int) -> list[dict]:
     rows = []
     for h in horizons:
         m = moves[h]
@@ -203,11 +191,84 @@ def reversal_outcomes(scanners: dict[str, ReversalScanner], sessions: Sequence[d
                      "p75_pct": round(percentile(m, 75), 2) if m else None,
                      "worst_pct": round(min(m), 2) if m else None, "best_pct": round(max(m), 2) if m else None,
                      "up_pct_of_cases": round(sum(1 for z in m if z > 0) / len(m) * 100, 1) if m else None})
+    return rows
+
+
+def _new_low(flags: list[bool], longest: int, min_cases: int) -> dict:
+    return {"within_sessions": longest, "cases": len(flags),
+            "share_pct": round(sum(flags) / len(flags) * 100, 1) if flags else None, "low_sample": len(flags) < min_cases}
+
+
+def reversal_outcomes(scanners: dict[str, ReversalScanner], sessions: Sequence[date], horizons: Sequence[int],
+                      min_cases: int) -> dict:
+    """Every confirmation inside `sessions` (the tested period): the close-to-close move after each
+    horizon, and the share whose low later fell below the base low within the longest horizon. A
+    case counts for a horizon only if the whole horizon lies inside `sessions`. HISTORY, NOT A FORECAST.
+
+    Baselines (`baselines`), the same stocks and the same tested sessions, measured exactly the same
+    way (close of the day to the close h sessions later; whole horizon inside the period; a new low =
+    a later low under the reference low within the longest horizon):
+    - washed_out_not_confirmed (the MATCHING baseline): every session on which the stock was washed out
+      and no reversal was confirmed that day; its reference low is the lowest low of the 52-week window
+      (`high_lookback_sessions`) that day, as a base low is for a confirmation;
+    - every_session (a reference for the drift of the period): every session, the same 52-week low.
+    `versus_matching_baseline`: the confirmations' median and up-share minus the matching baseline's,
+    per horizon, and the new-low share minus its; `low_sample` when either side has fewer than
+    `min_cases` cases. Baseline sessions overlap (consecutive days share most of their horizon), so
+    their cases are not independent; the count is the number of sessions, not of separate episodes."""
+    allowed = set(sessions)
+    last = max(sessions) if sessions else None
+    longest = max(horizons)
+    moves: dict[int, list[float]] = {h: [] for h in horizons}
+    new_low = []
+    events = []
+    base_moves = {k: {h: [] for h in horizons} for k in BASELINES}
+    base_low = {k: [] for k in BASELINES}
+    for sym, sc in sorted(scanners.items()):
+        lookback = sc.cfg.high_lookback_sessions
+        for i, day in enumerate(sc.days):
+            if sc.dates[i] not in allowed:
+                continue
+            groups = []
+            if day.confirmed:
+                events.append({"stock": sym, "date": sc.dates[i].isoformat(), "close": sc.bars[i].close,
+                               "base_low": day.base_low})
+                ref = day.base_low
+            else:
+                ref = min(b.low for b in sc.bars[max(0, i - lookback + 1):i + 1])
+                groups.append("every_session")
+                if day.washed_out:
+                    groups.append("washed_out_not_confirmed")
+            for h in horizons:
+                if i + h < len(sc.bars) and sc.dates[i + h] <= last:
+                    move = (sc.bars[i + h].close / sc.bars[i].close - 1) * 100
+                    if day.confirmed:
+                        moves[h].append(move)
+                    for g in groups:
+                        base_moves[g][h].append(move)
+            if i + longest < len(sc.bars) and sc.dates[i + longest] <= last:
+                broke = min(b.low for b in sc.bars[i + 1:i + 1 + longest]) < ref
+                if day.confirmed:
+                    new_low.append(broke)
+                for g in groups:
+                    base_low[g].append(broke)
+    rows = _rows(moves, horizons, min_cases)
+    nl = _new_low(new_low, longest, min_cases)
+    baselines = {k: {"what": BASELINES[k], "outcomes": _rows(base_moves[k], horizons, min_cases),
+                     "new_low_afterwards": _new_low(base_low[k], longest, min_cases)} for k in BASELINES}
+    match = baselines["washed_out_not_confirmed"]
+    diff = lambda a, b: None if a is None or b is None else round(a - b, 2)
+    versus = {"baseline": "washed_out_not_confirmed",
+              "outcomes": [{"sessions": r["sessions"], "median_minus_baseline_pct": diff(r["median_pct"], b["median_pct"]),
+                            "up_share_minus_baseline_pts": diff(r["up_pct_of_cases"], b["up_pct_of_cases"]),
+                            "cases": r["cases"], "baseline_cases": b["cases"],
+                            "low_sample": r["low_sample"] or b["low_sample"]}
+                           for r, b in zip(rows, match["outcomes"])],
+              "new_low_share_minus_baseline_pts": diff(nl["share_pct"], match["new_low_afterwards"]["share_pct"]),
+              "new_low_low_sample": nl["low_sample"] or match["new_low_afterwards"]["low_sample"],
+              "note": "a difference is evidence only when neither side is LOW SAMPLE; baseline sessions overlap"}
     return {"label": "history, not a forecast", "confirmations": len(events), "stocks": len({e["stock"] for e in events}),
-            "outcomes": rows,
-            "new_low_afterwards": {"within_sessions": longest, "cases": len(new_low),
-                                   "share_pct": round(sum(new_low) / len(new_low) * 100, 1) if new_low else None,
-                                   "low_sample": len(new_low) < min_cases},
+            "outcomes": rows, "new_low_afterwards": nl, "baselines": baselines, "versus_matching_baseline": versus,
             "min_cases": min_cases, "events": events}
 
 
