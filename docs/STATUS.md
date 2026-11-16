@@ -2367,11 +2367,12 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 
 ### Decisions made in phase 6 (yours to change)
 - Pools: stock option selling = STOCK_OPTIONS pool; stock option buying stays in the cash and index pool because the
-  risk engine sizes it on `account.capital_inr`. Deposits belong to the cash and index pool.
+  risk engine sizes it on `account.capital_inr` (confirmed by the user 2026-11-16). Deposits belong to the cash and index pool.
 - A position without a stop: long cash risks its whole value; a short or an unhedged short call has no known limit,
   which makes its pool unknown (PORTFOLIO_UNKNOWN) until you enter a stop or close it.
 - Open P&L includes the estimated round-trip charges; "today" is measured from the last mark of an earlier day.
-- Signal alert = switch on AND `strategies.status` alerts (architecture default; issue 36). All statuses are false.
+- Signal alert = switch on AND `strategies.status` alerts (confirmed by the user, issue 36 closed). All statuses stay
+  false for now (user).
 - Alerts while Telegram is off are logged as OFF and never sent later (switching on does not flush old alerts).
 - The same idea (strategy, symbol, direction, legs) is not issued again while an earlier one is valid.
 - Paper fills: cash at the touch of the next bar's first quote (last + slippage only without bid/ask); options at
@@ -2412,7 +2413,7 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 24 | 3 | Options IPFT rate empty (sources disagree) | Fixed 2026-11-13: NSE circular NSE/FA/73061 (user) - Rs 3,553/crore of premium each side including IPFT; IPFT set to 0 so it is not counted twice |
 | 34 | 3b | Phase 3b results were computed with Prime 999 rates; the plan is Prime 4999 (lower brokerage) | Fixed 2026-11-13: rerun at Prime 4999 rates; all still negative after costs |
 | 35 | 3b | Backtest start-up wrote holidays to the database and failed while the app held the write lock | Fixed 2026-11-13: holidays read from the CSV, nothing written |
-| 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Built 2026-11-16 with the default (both); waiting for user to confirm. Today every strategy's status has alerts: false |
+| 36 | plan | Alert rule when a trade-type switch is on (switch AND strategy status, or switch alone) | Closed 2026-11-16: switch AND strategy status, confirmed by the user |
 | 37 | plan | Meaning of "stop at 2x credit" for stock spreads | Waiting for user (default: buy-back cost reaches 2x credit) |
 | 38 | plan | Whether Breeze provides historical option prices | Fixed 2026-11-13: yes (expired contracts too, to at least 2017, daily/5-minute/1-minute, volume and OI; trades only, no bid/ask). Option backtests use them |
 | 39 | review | Engine validated the raw open, not the slipped fill, against stop/target | Fixed 2026-11-13: fill after slippage checked (`FILL_BEYOND_STOP_OR_TARGET`); no real trade affected |
@@ -2486,11 +2487,11 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 31 | 3b | A Breeze history request once hung for over 30 minutes (no SDK timeout) | Fixed: 60 s timeout per request; that symbol fails and a rerun resumes |
 | 32 | 3b | No v2 strategy is profitable after costs or better than random entries | All phase 3 cash strategies set to no alerts, paper only, "negative in backtests" (2026-11-13). Waiting for user: what to try next |
 | 101 | 6 | Telegram never sent for real: alerts are off (`alerts.telegram_enabled: false`) | Waiting for user: put TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env, switch on, check one message arrives |
-| 102 | 6 | Every strategy's `strategies.status` has `alerts: false`, so no SIGNAL alert can be sent even with a switch on | Waiting for user: decide per strategy (exit calls and system alerts are not affected) |
+| 102 | 6 | Every strategy's `strategies.status` has `alerts: false`, so no SIGNAL alert can be sent even with a switch on | Decided 2026-11-16 (user): keep every strategy at alerts: false for now (exit calls and system alerts are not affected) |
 | 103 | 6 | Phase 6 not yet run for a full market day with live Breeze data (paper mode) | Waiting for user (docs/AFTER_EACH_PHASE.md "After phase 6") |
 | 104 | 6 | Breeze reconnect and expired-login detection tested on a fake SDK only; the real expired-session text is not known | Open: check the log the first time a session expires |
 | 105 | 6 | Market depth is not recorded (quote stream subscribed without depth; the chain has none) | Open: subscribing with depth is a later change if wanted |
-| 106 | 6 | With the default stock-spread stop (buy back at 2x credit) the risk equals the credit, so no 1.5R trailing call can arise for a stock spread | Reported; a tighter stop of your own makes it possible |
+| 106 | 6 | With the default stock-spread stop (buy back at 2x credit) the risk equals the credit, so no 1.5R trailing call can arise for a stock spread | Closed 2026-11-16: left as is (user) |
 | 107 | 6 | Phase 9 portfolio check needs `history_verified`, which stays False live: stock option selling signals would be PORTFOLIO_UNKNOWN | Open: phase 9 remainder (stock option selling signals are not generated in phase 6) |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
@@ -2605,7 +2606,8 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
 | 2026-11-16 | User: the index spread width search fits the EFFECTIVE option risk limit, after drawdown halving (built) |
 | 2026-11-16 | Review fixes: negative risk or commitment is invalid input (never summed); NaN or infinity is unknown in every limit check; the width search tries every width down to 100 points and uses the first that passes every rule |
 | 2026-11-16 | User: a too-small credit at one width moves the search to the next narrower width (kept); the minimum credit (`min_credit_pct_of_width`) still applies to the chosen width |
-| 2026-11-16 | Phase 6: two capital pools in the journal (stock option selling; everything else); stock option buying in the cash and index pool (sized on account.capital_inr) |
+| 2026-11-16 | Phase 6: two capital pools in the journal (stock option selling; everything else); stock option buying in the cash and index pool (sized on account.capital_inr) - confirmed by the user |
+| 2026-11-16 | User: signal alert = switch on AND strategies.status (issue 36 closed); every strategy stays at alerts: false for now; no trailing call for stock spreads at the default stop is accepted (issue 106) |
 | 2026-11-16 | Phase 6: Telegram send-only to TELEGRAM_CHAT_ID, never reading incoming messages; OFF until alerts.telegram_enabled (user) |
 | 2026-11-16 | Phase 6: signal alert = switch on AND strategies.status alerts; exit calls, settlement, kill switch, daily stop, plan and summary always (when Telegram is on) |
 | 2026-11-16 | Phase 6: paper fill at the next bar's first LIVE quote (touch); exit calls repeat every 15 minutes until closed; a stale price never triggers or silences a call |

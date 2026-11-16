@@ -503,7 +503,7 @@ phases 4, 5 and 6.
 | Brokerage and tax rates | 2026-11-13: Prime 4999 brokerage (user); NSE charges per circular NSE/FA/73061 (IPFT included in the exchange charge); other statutory rates from published sources. Labelled "not yet verified against a contract note". User to verify against a contract note |
 | Watchlist | NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (2026-11-12), codes mapped from ICICI's instrument list by symbol and ISIN |
 | Risk percentages | As in section 8 |
-| Alert rule for a switched-on trade type | Alert only if the strategy's `strategies.status` also allows alerts (so "negative in backtests" strategies stay silent). User may decide that the switch alone should be enough |
+| Alert rule for a switched-on trade type | Decided 2026-11-16 (user): alert only if the switch is on AND the strategy's `strategies.status` allows alerts; every strategy stays at alerts: false for now |
 | Stock spread stop "2x credit" | Close when the cost to buy back the spread reaches 2x the credit received (loss about 1x credit before costs). User to confirm |
 
 ## 16. Source-of-truth order
