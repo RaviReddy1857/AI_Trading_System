@@ -514,9 +514,11 @@ class Journal:
 
     # ---- signals ----
     def save_signal(self, signal: Signal, decision, now: datetime, score: float | None = None,
-                    card: dict | None = None) -> bool:
-        """Store a signal and its risk decision. Signals are never edited after creation: a second save of
-        the same signal_id (a restart, the same bar again) is ignored. True when stored now."""
+                    card: dict | None = None, paper: dict | None = None) -> bool:
+        """Store a signal and its risk decision, and with `paper` its pending paper trade, in ONE transaction (a
+        crash never leaves an approved signal without its paper trade). Signals are never edited after creation:
+        a second save of the same signal_id (a restart, the same bar again) is ignored, its paper row too. True
+        when stored now."""
         tt = signal_trade_type(signal)
         with self._lock:
             cur = self._db.execute(
@@ -526,8 +528,15 @@ class Journal:
                  json.dumps(signal.to_dict(), sort_keys=True, default=str),
                  json.dumps(decision.to_dict(), sort_keys=True, default=str),
                  None if card is None else json.dumps(card, sort_keys=True, default=str), now.isoformat()))
-            self._db.commit()
-            return cur.rowcount == 1
+            stored = cur.rowcount == 1
+            try:
+                if stored and paper is not None:
+                    self._upsert_paper(paper)
+                self._db.commit()
+            except BaseException:
+                self._db.rollback()
+                raise
+            return stored
 
     def has_signal(self, signal_id: str) -> bool:
         with self._lock:
@@ -833,11 +842,14 @@ class Journal:
                    "gross_inr", "costs_inr", "net_pnl_inr", "note", "horizon", "strategy_id"]
 
     def upsert_paper(self, row: dict) -> None:
-        vals = [row.get(k) for k in self._PAPER_COLS]
         with self._lock:
-            self._db.execute(f"INSERT OR REPLACE INTO paper_trades ({','.join(self._PAPER_COLS)}) VALUES "
-                             f"({','.join('?' * len(self._PAPER_COLS))})", vals)
+            self._upsert_paper(row)
             self._db.commit()
+
+    def _upsert_paper(self, row: dict) -> None:
+        vals = [row.get(k) for k in self._PAPER_COLS]
+        self._db.execute(f"INSERT OR REPLACE INTO paper_trades ({','.join(self._PAPER_COLS)}) VALUES "
+                         f"({','.join('?' * len(self._PAPER_COLS))})", vals)
 
     def paper_trades(self, status: str | None = None, pool: str | None = None) -> list[dict]:
         q, args = f"SELECT {','.join(self._PAPER_COLS)} FROM paper_trades WHERE 1=1", []

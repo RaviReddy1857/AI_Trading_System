@@ -33,6 +33,16 @@ class FakeMarker:
     def option(self, u, expiry, strike, right, now):
         return self.opt_q.get((strike, right)) or LegQuote("MISSING", None, None, None, None, "option chain")
 
+    def first_cash(self, symbol, after, now):
+        q = self.cash(symbol, now)
+        return q if q.quote_time is not None and q.quote_time >= after else LegQuote("MISSING", None, None, None, None,
+                                                                                      "feed tick")
+
+    def first_option(self, u, expiry, strike, right, after, now):
+        q = self.option(u, expiry, strike, right, now)
+        return q if q.quote_time is not None and q.quote_time >= after else LegQuote("MISSING", None, None, None, None,
+                                                                                      "option chain")
+
     def spot(self, symbol, now):
         q = self.cash_q.get(symbol)
         return q.last if q and q.usable else None

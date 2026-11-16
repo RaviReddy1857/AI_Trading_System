@@ -100,18 +100,31 @@ class SignalEngine:
 
     # ---- restart ----
     def restore(self, now: datetime) -> dict:
-        """Reload what a restart must not lose: unexpired signals (for pending paper fills and duplicates). Open
-        positions, switches, exit calls and unconfirmed alerts live in the database and are read on every bar."""
-        n = 0
+        """Reload what a restart must not lose: unexpired signals (for pending paper fills and duplicates), and the
+        pending paper trade of an unexpired approved signal that has none (a database written before signals and
+        paper trades were saved in one transaction). Open positions, switches, exit calls and unconfirmed alerts
+        live in the database and are read on every bar."""
+        from .models import RiskDecision
+        n = recreated = 0
         for row in self.j.unexpired_signals(now):
-            self.signals[row["signal_id"]] = signal_from_dict(row["signal"])
+            sig = signal_from_dict(row["signal"])
+            self.signals[row["signal_id"]] = sig
             n += 1
+            if row["status"] == "APPROVED" and self.j.paper_trade(row["signal_id"]) is None:
+                d = row["decision"]
+                dec = RiskDecision(status="APPROVED", reason_codes=(), quantity=d.get("quantity"), lots=d.get("lots"),
+                                   risk_inr=d.get("risk_inr"), risk_pct=d.get("risk_pct"),
+                                   est_profit_inr=d.get("est_profit_inr"), est_loss_inr=d.get("est_loss_inr"),
+                                   costs_inr=d.get("costs_inr"), margin_inr=d.get("margin_inr"),
+                                   capital_fit=d.get("capital_fit"))
+                if self.paper.open(sig, dec, now) is not None:
+                    recreated += 1
         for row in self.j.paper_trades(status="PENDING"):
             if row["signal_id"] not in self.signals:
                 r = self.j.signal(row["signal_id"])
                 if r:
                     self.signals[row["signal_id"]] = signal_from_dict(r["signal"])
-        return {"unexpired_signals": n, "open_positions": len(self.j.positions("OPEN")),
+        return {"unexpired_signals": n, "paper_trades_recreated": recreated, "open_positions": len(self.j.positions("OPEN")),
                 "pending_paper": len(self.j.paper_trades(status="PENDING"))}
 
     # ---- the loop ----
@@ -119,6 +132,7 @@ class SignalEngine:
         """One pass of the loop (called every `engine.poll_seconds`). Returns the bar summary when a bar closed."""
         now = now or self.now_fn()
         day = ist_day(now)
+        self.paper.expire_pending(now, self.signals)       # whatever the hour: a late quote never fills it
         if not self.cal.is_trading_day(day):
             return None
         if self.cal.is_open(now):
@@ -269,14 +283,14 @@ class SignalEngine:
         card = build_card(sig, decision, score=sc, regime=regime, bias=bias, events_week=events_week,
                           track=strategy_record(self.store, self.j, self.s, sig.strategy_id), now=now,
                           alert={"allowed": allowed_alert and decision.status == "APPROVED", "why": why})
-        if not self.j.save_signal(sig, decision, now, score=sc["score"], card=card):
+        # the signal and its pending paper trade in one transaction: a crash never leaves one without the other
+        if not self.j.save_signal(sig, decision, now, score=sc["score"], card=card,
+                                  paper=self.paper.pending_row(sig, decision)):
             return None
         self.signals[sig.signal_id] = sig
         quotes = self.paper._quotes(sig, now)
         self.x.record_quotes(sig, SIGNAL, quotes, now, (decision.lots if sig.legs else decision.quantity),
                              self.m.spot(sig.symbol, now))
-        if decision.status == "APPROVED":
-            self.paper.open(sig, decision, now)
         return {"signal_id": sig.signal_id, "status": decision.status, "score": sc["score"], "trade_type": tt,
                 "strategy_id": sig.strategy_id, "card": card, "alert_allowed": card["alert"]["allowed"],
                 "valid_until": sig.valid_until}

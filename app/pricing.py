@@ -79,6 +79,34 @@ class Marker:
         return LegQuote(status if status != "NO_DATA" else MISSING, q["bid"], q["ask"], q["last"], q["at"], "feed tick",
                         note="the feed does not send market depth")
 
+    def first_cash(self, symbol: str, after: datetime, now: datetime) -> LegQuote:
+        """The first quote received at or after `after` (the next bar's first quote), as it was then; MISSING until
+        one has arrived."""
+        q = self.hub.first_quote(symbol, after)
+        if q is None:
+            return LegQuote(MISSING, None, None, None, None, "feed tick",
+                            note="no tick at or after the planned fill yet")
+        status = q["status"]
+        if status == "LIVE" and q["bid"] is not None and q["ask"] is not None and q["bid"] > q["ask"] > 0:
+            status = CROSSED
+        return LegQuote(status if status != "NO_DATA" else MISSING, q["bid"], q["ask"], q["last"], q["at"],
+                        "feed tick", note="first quote at or after the planned fill")
+
+    def first_option(self, underlying: str, expiry: date, strike: float, right: str, after: datetime,
+                     now: datetime) -> LegQuote:
+        """The contract in the first chain snapshot taken at or after `after`, as it was then."""
+        rows = self.store.first_option_chain_after(self.source, underlying, expiry, after, now)
+        r = next((x for x in rows if abs(x["strike"] - strike) < 1e-6 and x["right"] == right), None)
+        if r is None:
+            return LegQuote(MISSING, None, None, None, rows[0]["as_of"] if rows else None, "option chain",
+                            note="no chain snapshot at or after the planned fill with this contract")
+        if not (_pos(r["bid"]) and _pos(r["ask"])):
+            return LegQuote(MISSING, r["bid"], r["ask"], r["last"], r["as_of"], "option chain", note="no bid and ask")
+        if r["bid"] > r["ask"]:
+            return LegQuote(CROSSED, r["bid"], r["ask"], r["last"], r["as_of"], "option chain", note="bid above ask")
+        return LegQuote(LIVE, r["bid"], r["ask"], r["last"], r["as_of"], "option chain",
+                        note="first chain snapshot at or after the planned fill")
+
     def spot(self, symbol: str, now: datetime) -> float | None:
         q = self.cash(symbol, now)
         return q.last if q.usable and _pos(q.last) else None

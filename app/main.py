@@ -46,6 +46,26 @@ SAFE_METHODS = {"GET", "HEAD"}
 _CHAIN_KEEP = timedelta(days=2)      # option-chain snapshots older than this are deleted
 
 
+def loop_threads(engine, notifier, watchdog, stop: threading.Event, poll_seconds: float,
+                 watchdog_seconds: float = 15.0, now_fn=utcnow) -> list[threading.Thread]:
+    """The three background loops of the live system, each on its own thread so none waits for another: the signal
+    loop (`engine.step`), alert dispatch (`notifier.tick`: scheduled messages and Telegram sends) and the watchdog
+    (`watchdog.check`: feed and engine heartbeats). A stuck or slow engine step therefore still gets its heartbeat
+    alert raised and sent. Each loop logs a failure and carries on. Returned not started."""
+    def run(name: str, fn, every: float):
+        def loop() -> None:
+            while not stop.is_set():
+                try:
+                    fn(now_fn())
+                except Exception:
+                    log.exception("%s loop failed (it carries on)", name)
+                stop.wait(every)
+        return threading.Thread(target=loop, name=name, daemon=True)
+
+    return [run("engine", engine.step, poll_seconds), run("alerts", notifier.tick, poll_seconds),
+            run("watchdog", watchdog.check, watchdog_seconds)]
+
+
 def allowed_hosts(port: int) -> set[str]:
     return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
@@ -213,26 +233,6 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     watchdog = Watchdog(settings, hub, journal, alertbook, calendar, feed, engine)
     watchdog.start(utcnow())
 
-    def watchdog_loop() -> None:
-        while not stop.is_set():
-            try:
-                watchdog.check(utcnow())
-            except Exception:
-                log.exception("watchdog check failed (it carries on)")
-            stop.wait(15)
-
-    def engine_loop() -> None:
-        while not stop.is_set():
-            try:
-                engine.step()
-            except Exception:
-                log.exception("signal loop step failed (it carries on)")
-            try:
-                notifier.tick(utcnow())
-            except Exception:
-                log.exception("alert dispatch failed (it carries on)")
-            stop.wait(settings.engine.poll_seconds)
-
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if feed.name == "sim" and settings.history.sim_seed_on_start:
@@ -251,8 +251,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             threading.Thread(target=regime_loop, name="regime", daemon=True).start()
             threading.Thread(target=options_loop, name="options", daemon=True).start()
             if settings.engine.enabled:
-                threading.Thread(target=engine_loop, name="engine", daemon=True).start()
-                threading.Thread(target=watchdog_loop, name="watchdog", daemon=True).start()
+                for t in loop_threads(engine, notifier, watchdog, stop, settings.engine.poll_seconds):
+                    t.start()
         yield
         stop.set()
         feed.stop()

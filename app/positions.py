@@ -25,7 +25,8 @@ Kinds (`exit_calls.kind`):
 Repeats: a call is ACTIVE once raised. TARGET, STOP, TIME, ENTRY_INVALIDATED, STRIKE_BREACHED, TREND_FLIP,
 FORCED_EXPIRY_EXIT and SETTLEMENT stay active until I mark the position closed. BREAKEVEN and TRAIL stay active
 until my confirmed stop is at the suggested level; PARTIAL until a partial close is recorded; REGIME_FLIP and
-KILL_SWITCH while their condition holds. An active call is sent again every `alerts.exit_call_repeat_minutes`
+KILL_SWITCH while their condition holds - resolved only when an evaluation with known inputs finds it no longer
+holds (REGIME_FLIP: a known regime, not UNKNOWN; both: the position's prices known), never by missing data. An active call is sent again every `alerts.exit_call_repeat_minutes`
 (SETTLEMENT: `alerts.settlement_repeat_minutes` of its level; overdue settlement: every evaluation).
 
 A stale price never triggers and never silences a call: with no LIVE price the price rules are not evaluated
@@ -373,9 +374,10 @@ class ExitCallBook:
             return timedelta(minutes=getattr(a.settlement_repeat_minutes, level, a.exit_call_repeat_minutes))
         return timedelta(minutes=a.exit_call_repeat_minutes)
 
-    def apply(self, pos: Position, calls: list[dict], now: datetime) -> list[dict]:
+    def apply(self, pos: Position, calls: list[dict], now: datetime, unresolvable=frozenset()) -> list[dict]:
         """Record this evaluation: activate new calls, refresh active ones, resolve what no longer applies, and return
-        the calls DUE to be sent now (new, or repeated after their interval), each with its alert key."""
+        the calls DUE to be sent now (new, or repeated after their interval), each with its alert key.
+        `unresolvable`: the kinds this evaluation could not judge (its inputs were not known); they stay active."""
         current = {c["kind"]: c for c in calls}
         existing = {c["kind"]: c for c in self.calls(pos.position_id)}
         due = []
@@ -404,7 +406,7 @@ class ExitCallBook:
                 if not old["active"] or kind in current:
                     continue
                 resolve = None
-                if kind in WHILE_TRUE:
+                if kind in WHILE_TRUE and kind not in unresolvable:
                     resolve = "condition no longer holds"
                 elif kind in (BREAKEVEN, TRAIL):
                     sug = (old["values"] or {}).get("suggested_stop")
@@ -442,6 +444,17 @@ class ExitCallBook:
             self._db.commit()
 
 
+def unresolvable_kinds(x: ExitInputs) -> frozenset:
+    """The while-true calls an evaluation cannot resolve: with the position's prices missing, none; with the regime
+    UNKNOWN (or not known), REGIME_FLIP. Missing data never silences a call."""
+    out = set()
+    if x.prices is None:
+        out |= WHILE_TRUE
+    if not x.regime or x.regime == "UNKNOWN":
+        out.add(REGIME_FLIP)
+    return frozenset(out)
+
+
 def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: datetime, inputs_for, costs=None) -> list[dict]:
     """Evaluate every open position I hold (taken or manual; paper trades are managed by app/paper.py): store the
     calls and the plan, resolve the calls of closed positions, and return the calls due to be sent now."""
@@ -460,7 +473,7 @@ def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: dat
         if plan != pos.plan:
             journal.update_plan(pos.position_id, plan)
             pos = replace(pos, plan=plan)
-        for c in book.apply(pos, calls, now):
+        for c in book.apply(pos, calls, now, unresolvable_kinds(x)):
             due.append({**c, "symbol": pos.symbol, "trade_type": pos.trade_type, "hedged": pos.hedged,
                         "origin": pos.origin})
     return due

@@ -636,7 +636,7 @@ async function load(){
    <td>${fmt(r.actual_vs_mid_pct)}</td><td>${fmt(r.actual_vs_touch_pct)}</td><td>${fmt(r.avg_spread_pct_of_mid)}</td><td>${r.avg_depth_at_touch==null?esc(r.depth_note||'-'):fmt(r.avg_depth_at_touch)}</td></tr>`).join('')+'</table>':'No planned-fill records yet.'}
  if(al) document.getElementById('alerts').innerHTML=(al.telegram_enabled?'<span class="ok">Telegram ON</span>':'<span class="warn">Telegram OFF (alerts.telegram_enabled in config.yaml)</span>')+
    '<table><tr><th>Created</th><th>Kind</th><th>Status</th><th>Attempts</th><th>Text</th></tr>'+(al.recent||[]).map(a=>`<tr><td>${esc(new Date(a.created_utc).toLocaleTimeString())}</td><td>${esc(a.kind)}</td>
-   <td class="${a.status==='NOT_DELIVERED'?'red':a.status==='SENT'?'ok':'mute'}">${esc(a.status)}</td><td>${a.attempts}</td><td style="text-align:left;white-space:normal">${esc(a.text)}</td></tr>`).join('')+'</table>';
+   <td class="${a.status==='NOT_DELIVERED'?'red':a.status==='UNCERTAIN'?'warn':a.status==='SENT'?'ok':'mute'}">${esc(a.status)}</td><td>${a.attempts}</td><td style="text-align:left;white-space:normal">${esc(a.text)}</td></tr>`).join('')+'</table>';
 }
 load(); setInterval(load,15000);
 </script></body></html>"""

@@ -77,7 +77,7 @@ def test_restart_monitors_positions_within_one_bar_and_sends_unconfirmed_alerts(
         snd = Sender()
         c2.app.state.alerts.enqueue("exit:p:STOP:1", "EXIT_CALL", "queued", NOW, NOW + timedelta(hours=1))
         c2.app.state.alerts.dispatch(NOW + timedelta(seconds=5), snd)
-        assert "queued" in snd.sent and "unconfirmed before the restart" not in snd.sent
+        assert "queued\nAlert key: exit:p:STOP:1" in snd.sent and not any("unconfirmed before the restart" in t for t in snd.sent)
         w = watchdog(c2.app)
         tick(c2.app, NOW + timedelta(seconds=10), last)
         st = w.status(NOW + timedelta(seconds=20))

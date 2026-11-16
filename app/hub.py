@@ -1,9 +1,14 @@
 """MarketHub: every tick passes the quality gate, then feeds bars and the
-latest-price table. Bad ticks are logged and dropped."""
+latest-price table. Bad ticks are logged and dropped.
+
+It also keeps the first good tick of every 1-minute bucket of each symbol (the last hour), so the paper trader fills
+a pending trade at the first quote after the bar close (`first_quote`) however late its poll runs, never at a
+later tick."""
 from __future__ import annotations
 
 import threading
-from datetime import datetime
+from collections import OrderedDict
+from datetime import datetime, timedelta
 
 from .bars import BarBuilder
 from .calendar import MarketCalendar
@@ -28,6 +33,10 @@ class MarketHub:
         self._first_tick_at = None
         self._bad_count = 0
         self._bars = BarBuilder(lambda bar: store.save_bar(bar, feed_name))
+        # symbol -> {minute start: first good tick at or after it, within that minute}
+        self._first: dict[str, OrderedDict] = {}
+
+    _FIRST_KEEP = 60                  # minutes of first-of-minute ticks kept per symbol
 
     def on_tick(self, tick: Tick) -> None:
         with self._lock:
@@ -43,6 +52,12 @@ class MarketHub:
             if self._first_tick_at is None:
                 self._first_tick_at = tick.received_at
             self._last_good[tick.symbol] = tick
+            minute = tick.received_at.replace(second=0, microsecond=0)
+            firsts = self._first.setdefault(tick.symbol, OrderedDict())
+            if minute not in firsts:
+                firsts[minute] = tick
+                while len(firsts) > self._FIRST_KEEP:
+                    firsts.popitem(last=False)
             day = tick.received_at.astimezone(IST).date()
             seen = self._seen_range.get(tick.symbol)
             if seen is None or seen[0] != day:
@@ -116,6 +131,20 @@ class MarketHub:
             if t is None:
                 return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
             return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
+
+    def first_quote(self, symbol: str, after: datetime) -> dict | None:
+        """The first good tick received at or after `after` (a bar close: a minute boundary), with its status as it
+        was at its own time (LIVE inside market hours); None when none was received yet (or it is older than the
+        kept hour). For an `after` inside a minute, a tick in that minute before `after` is skipped and the first
+        tick of a later minute is used."""
+        floor = after.replace(second=0, microsecond=0)
+        with self._lock:
+            firsts = self._first.get(symbol) or {}
+            t = next((x for m, x in firsts.items() if m >= floor and x.received_at >= after), None)
+            if t is None:
+                return None
+            return {"status": self._status(t, t.received_at), "bid": t.bid, "ask": t.ask, "last": t.last,
+                    "at": t.received_at}
 
     def first_tick_at(self) -> datetime | None:
         """Time of the first good tick since the app started (the "data from" of a restart)."""

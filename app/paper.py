@@ -2,10 +2,12 @@
 alert switch says, and tracked to its stop, target or time exit, with costs. Nothing is sent to the broker.
 
 Fill: at the next bar's open, never on the signal bar: the first LIVE quote received at or after the planned fill
-time (the close of the signal bar). Cash: a purchase at the ask and a sale at the bid when the feed sends them,
+time (the close of the signal bar), captured when it arrived (`MarketHub.first_quote`; options: the first chain
+snapshot at or after it), never a later tick however late the poll runs. Cash: a purchase at the ask and a sale at the bid when the feed sends them,
 else the last trade moved against us by the configured slippage. Options: every leg at its touch (buy at the ask,
 sell at the bid) from a chain snapshot taken at or after the planned fill. No LIVE quote before the signal's
-valid-until: NOT_FILLED. A fill at or beyond the stop or target: NOT_FILLED (FILL_BEYOND_STOP_OR_TARGET), as in
+valid-until: NOT_FILLED. Past its valid-until a pending trade expires whatever the quote (after a restart, a
+laptop sleep or the close too: `expire_pending` runs on every loop step, market open or not). A fill at or beyond the stop or target: NOT_FILLED (FILL_BEYOND_STOP_OR_TARGET), as in
 the backtests.
 
 Exits: cash on each closed 5-minute bar built from the stored 1-minute bars (stop first when one bar touches both,
@@ -46,6 +48,16 @@ class PaperTrader:
         """A pending paper trade for an approved signal (planned fill: the next bar's open = the signal bar's close)."""
         if decision.status != "APPROVED" or self.j.paper_trade(sig.signal_id) is not None:
             return None
+        row = self.pending_row(sig, decision)
+        self.j.upsert_paper(row)
+        return row
+
+    @staticmethod
+    def pending_row(sig, decision) -> dict | None:
+        """The PENDING paper-trade row of an approved signal (None for NO_TRADE); saved with the signal in one
+        transaction by `Journal.save_signal(..., paper=row)`."""
+        if decision.status != "APPROVED":
+            return None
         tt = signal_trade_type(sig)
         units = decision.lots if sig.legs else decision.quantity
         legs = [Leg(x.action, x.right, x.strike, x.expiry, units, x.lot_size, x.price).to_dict() for x in sig.legs] \
@@ -56,26 +68,45 @@ class PaperTrader:
                "target": sig.target, "risk_inr": decision.risk_inr, "margin_inr": decision.margin_inr,
                "horizon": sig.horizon, "strategy_id": sig.strategy_id,
                "note": json.dumps({"valid_until_utc": sig.valid_until.isoformat()})}
-        self.j.upsert_paper(row)
         return row
 
     # ---- fills ----
-    def fill_pending(self, now: datetime, signals: dict) -> list[str]:
-        """Fill every pending paper trade whose next-bar quote has arrived. `signals`: signal_id -> Signal."""
+    def expire_pending(self, now: datetime, signals: dict | None = None) -> list[str]:
+        """NOT_FILLED for every pending paper trade at or past its valid-until, whatever its quote (a pending trade
+        is never filled late: after a restart, a sleep or the close). Its quotes are recorded when the signal is
+        known."""
         done = []
+        for row in self.j.paper_trades(status="PENDING"):
+            try:
+                valid_until = datetime.fromisoformat(json.loads(row["note"] or "{}")["valid_until_utc"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if now < valid_until:
+                continue
+            sig = (signals or {}).get(row["signal_id"])
+            if sig is not None:
+                try:
+                    self.x.record_quotes(sig, PLANNED_FILL, self._quotes(sig, now), now, row["quantity"],
+                                         self._spot(sig, now))
+                except Exception:                      # the record is a report; the expiry must still happen
+                    pass
+            self._finish(row, "NOT_FILLED", now, "valid-until passed before a fill: no LIVE quote at or after the "
+                                                 "planned fill was used in time")
+            done.append(row["signal_id"])
+        return done
+
+    def fill_pending(self, now: datetime, signals: dict) -> list[str]:
+        """Fill every pending paper trade whose next-bar quote has arrived. `signals`: signal_id -> Signal.
+        Expired ones first become NOT_FILLED (`expire_pending`), whatever their quote."""
+        done = self.expire_pending(now, signals)
         for row in self.j.paper_trades(status="PENDING"):
             sig = signals.get(row["signal_id"])
             planned = datetime.fromisoformat(row["planned_fill_utc"])
-            valid_until = datetime.fromisoformat(json.loads(row["note"])["valid_until_utc"])
             if sig is None:
                 continue
-            qs = self._quotes(sig, now)
+            qs = self._first_quotes(sig, planned, now)
             fresh = all(q.usable and q.quote_time is not None and q.quote_time >= planned for q in qs)
             if not fresh:
-                if now >= valid_until:
-                    self.x.record_quotes(sig, PLANNED_FILL, qs, now, row["quantity"], self._spot(sig, now))
-                    self._finish(row, "NOT_FILLED", now, "no LIVE quote at or after the planned fill before valid-until")
-                    done.append(row["signal_id"])
                 continue
             spot = self._spot(sig, now)
             self.x.record_quotes(sig, PLANNED_FILL, qs, now, row["quantity"], spot)
@@ -104,6 +135,12 @@ class PaperTrader:
         if not sig.legs:
             return [self.m.cash(sig.symbol, now)]
         return [self.m.option(sig.symbol, x.expiry, x.strike, x.right, now) for x in sig.legs]
+
+    def _first_quotes(self, sig, planned, now):
+        """Each instrument's first quote at or after the planned fill (as it was then)."""
+        if not sig.legs:
+            return [self.m.first_cash(sig.symbol, planned, now)]
+        return [self.m.first_option(sig.symbol, x.expiry, x.strike, x.right, planned, now) for x in sig.legs]
 
     def _spot(self, sig, now):
         return self.m.spot(sig.symbol, now)

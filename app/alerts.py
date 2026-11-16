@@ -2,10 +2,15 @@
 
 Every alert has a stable key (`signal:<signal_id>`, `exit:<position_id>:<kind>:<repeat number>`, `kill:<day>:<hh:mm>`,
 `dailystop:<pool>:<day>`, `premarket:<day>`, `eod:<day>`, `heartbeat:...`, `asleep:...`, `login:<day>`) and a row
-in `alert_log` (key, channel, kind, text, attempts, sent_at, error, status). The same key is never stored or sent
-twice. A failed send is retried with back-off (`alerts.retry_first_seconds`, doubling, at most `retry_max_seconds`)
-until it is delivered or the alert has expired; then it is shown as NOT_DELIVERED on the dashboard. A Telegram
-failure is logged and the app carries on.
+in `alert_log` (key, channel, kind, text, attempts, sent_at, error, status). The same key is never stored twice.
+A send is recorded as SENDING before it starts. A failed send that certainly did not reach Telegram is retried
+with back-off (`alerts.retry_first_seconds`, doubling, at most `retry_max_seconds`) until it is delivered or the
+alert has expired; then it is shown as NOT_DELIVERED on the dashboard. A send whose delivery is uncertain (a
+timeout or a dropped connection after the request went out, or a crash while SENDING, found at the next start):
+information alerts (signals, pre-market plan, end-of-day summary) are not sent again and are shown as UNCERTAIN;
+exit calls and urgent alerts (`RESEND_IF_UNCERTAIN`: kill switch, daily stop, heartbeat, sleep, expired login) are
+sent again, and their text always ends with their alert key, so a second copy is recognisable as the same alert.
+A Telegram failure is logged and the app carries on.
 
 What is sent (only while `alerts.telegram_enabled` is true; otherwise every alert is still logged, status OFF, and
 shown on the dashboard, and is never sent later):
@@ -27,6 +32,9 @@ from .quality import IST
 log = logging.getLogger("alerts")
 
 PENDING, SENT, NOT_DELIVERED, OFF = "PENDING", "SENT", "NOT_DELIVERED", "OFF"
+SENDING, UNCERTAIN = "SENDING", "UNCERTAIN"
+# a duplicate of these is better than a lost one: resent after an uncertain delivery, always with their key
+RESEND_IF_UNCERTAIN = frozenset({"EXIT_CALL", "KILL_SWITCH", "DAILY_STOP", "HEARTBEAT", "ASLEEP", "LOGIN_EXPIRED"})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS alert_log (
@@ -51,6 +59,25 @@ class AlertBook:
         with self._lock:
             self._db.executescript(SCHEMA)
             self._db.commit()
+        self._recover_sending()
+
+    def _recover_sending(self) -> None:
+        """At start: an alert left SENDING was being sent when the app stopped; its delivery is uncertain."""
+        for a in self.rows("status=?", (SENDING,), 500):
+            self._uncertain(a, "the app stopped while sending: delivery not confirmed", a["last_attempt_utc"])
+
+    def _uncertain(self, a: dict, why: str, at: str | None) -> None:
+        err = (a["error"] + "; " if a["error"] else "") + why
+        if a["kind"] in RESEND_IF_UNCERTAIN:
+            self._set(a["key"], status=PENDING, error=err + " (sent again with its alert key)",
+                      next_attempt_utc=at or a["created_utc"])
+        else:
+            self._set(a["key"], status=UNCERTAIN, error=err + " (not sent again: an information alert)")
+
+    @staticmethod
+    def text_of(a: dict) -> str:
+        """The text sent: exit calls and urgent alerts end with their alert key (a duplicate is recognisable)."""
+        return a["text"] + (f"\nAlert key: {a['key']}" if a["kind"] in RESEND_IF_UNCERTAIN else "")
 
     def enqueue(self, key: str, kind: str, text: str, now: datetime, expires: datetime | None = None,
                 channel: str = "telegram") -> bool:
@@ -91,13 +118,20 @@ class AlertBook:
                 out["expired"] += 1
                 continue
             attempts = a["attempts"] + 1
+            self._set(a["key"], status=SENDING, attempts=attempts, last_attempt_utc=now.isoformat())
             try:
-                sender.send(a["text"])
+                sender.send(self.text_of(a))
             except Exception as e:                      # SendError is already redacted; anything else: type only
                 from .telegram import SendError
                 err = str(e) if isinstance(e, SendError) else f"{type(e).__name__}"
                 wait = min(self.s.alerts.retry_first_seconds * 2 ** (attempts - 1), self.s.alerts.retry_max_seconds)
-                self._set(a["key"], attempts=attempts, last_attempt_utc=now.isoformat(), error=err,
+                if getattr(e, "uncertain", False):
+                    self._uncertain({**a, "error": None}, f"delivery not confirmed ({err})",
+                                    (now + timedelta(seconds=wait)).isoformat())
+                    log.warning("alert %s: delivery not confirmed (attempt %d): %s", a["key"], attempts, err)
+                    out["uncertain"] = out.get("uncertain", 0) + 1
+                    continue
+                self._set(a["key"], status=PENDING, error=err,
                           next_attempt_utc=(now + timedelta(seconds=wait)).isoformat())
                 log.warning("alert %s not sent (attempt %d): %s", a["key"], attempts, err)
                 out["failed"] += 1
@@ -116,7 +150,8 @@ class AlertBook:
     def view(self) -> dict:
         return {"telegram_enabled": self.s.alerts.telegram_enabled, "recent": self.rows(limit=100),
                 "pending": self.rows("status=?", (PENDING,), 100),
-                "not_delivered": self.rows("status=?", (NOT_DELIVERED,), 100)}
+                "not_delivered": self.rows("status=?", (NOT_DELIVERED,), 100),
+                "uncertain": self.rows("status=?", (UNCERTAIN,), 100)}
 
 
 # ---------------- message texts (built by code) ----------------

@@ -150,5 +150,9 @@ class Watchdog:
         nd = self.book.rows("status=?", ("NOT_DELIVERED",), 50)
         if nd:
             banners.append({"colour": "red", "text": f"{len(nd)} alert(s) not delivered (see Alerts)"})
+        unc = self.book.rows("status=?", ("UNCERTAIN",), 50)
+        if unc:
+            banners.append({"colour": "warn", "text": f"{len(unc)} information alert(s) may not have arrived (delivery "
+                                                      f"not confirmed; not sent again - see Alerts)"})
         return {"restart_text": restart, "banners": banners, "login": ls,
                 "stale_since_utc": self.stale_since.isoformat() if self.stale_since else None}

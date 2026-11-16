@@ -640,6 +640,23 @@ class Store:
         keys = ["strike", "right", "as_of", "bid", "ask", "last", "oi", "oi_change", "volume", "spot"]
         return [{**dict(zip(keys, x)), "as_of": _ts(x[2])} for x in rows]
 
+    def first_option_chain_after(self, source: str, underlying: str, expiry: date, after: datetime,
+                                 until: datetime) -> list[dict]:
+        """Rows of the first stored snapshot taken at or after `after` (and not after `until`), one underlying and
+        expiry: the option chain a paper fill planned at `after` meets."""
+        with self._lock:
+            r = self._db.execute("SELECT MIN(as_of_utc) FROM option_chain WHERE underlying=? AND source=? AND expiry=?"
+                                 " AND as_of_utc>=? AND as_of_utc<=?",
+                                 (underlying, source, expiry.isoformat(), after.isoformat(), until.isoformat())).fetchone()
+            if not r or not r[0]:
+                return []
+            rows = self._db.execute(
+                "SELECT strike,right,as_of_utc,bid,ask,last,oi,oi_change,volume,spot FROM option_chain"
+                " WHERE underlying=? AND source=? AND expiry=? AND as_of_utc=? ORDER BY strike, right",
+                (underlying, source, expiry.isoformat(), r[0])).fetchall()
+        keys = ["strike", "right", "as_of", "bid", "ask", "last", "oi", "oi_change", "volume", "spot"]
+        return [{**dict(zip(keys, x)), "as_of": _ts(x[2])} for x in rows]
+
     def prune_option_chain(self, source: str, keep_after: datetime) -> int:
         self._guard(source)
         with self._lock:

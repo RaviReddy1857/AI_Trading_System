@@ -21,7 +21,24 @@ MAX_TEXT = 4000                       # Telegram's limit is 4096 characters
 
 
 class SendError(RuntimeError):
-    """A failed send. The message never contains the token."""
+    """A failed send. The message never contains the token. `uncertain`: the request reached Telegram but no
+    reply was read (a timeout or a dropped connection after the send, or an unreadable reply), so the message
+    may have been delivered; otherwise it was certainly not delivered."""
+
+    def __init__(self, message: str, uncertain: bool = False):
+        super().__init__(message)
+        self.uncertain = uncertain
+
+
+def _after_send(e: BaseException) -> bool:
+    """True when the failure happened after the request was sent (urllib wraps errors while sending the request
+    in URLError; a timeout or a dropped connection while waiting for the reply is raised as is)."""
+    import http.client
+    import socket
+    if isinstance(e, urllib.error.URLError):
+        return False
+    return isinstance(e, (TimeoutError, socket.timeout, http.client.RemoteDisconnected, http.client.IncompleteRead,
+                          ConnectionResetError))
 
 
 def redact(text: str, *secrets: str) -> str:
@@ -60,10 +77,13 @@ class TelegramSender:
         except urllib.error.HTTPError as e:
             raise SendError(redact(f"HTTP {e.code}: {e.reason}", token, chat)) from None
         except Exception as e:                                       # network, timeout, DNS: never echo the URL
-            raise SendError(redact(f"{type(e).__name__}: {e}", token, chat)) from None
+            raise SendError(redact(f"{type(e).__name__}: {e}", token, chat), uncertain=_after_send(e)) from None
         try:
             reply = json.loads(raw.decode("utf-8") or "{}")
         except ValueError:
+            if status == 200:
+                raise SendError("Telegram's reply could not be read (HTTP 200): delivery not confirmed",
+                                uncertain=True) from None
             reply = {}
         if status != 200 or not reply.get("ok"):
             raise SendError(redact(f"Telegram refused the message (HTTP {status}): {reply.get('description', '')}", token, chat))
