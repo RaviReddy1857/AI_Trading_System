@@ -229,6 +229,18 @@ def _hhmm(v: str) -> str:
 HHMM = Annotated[str, AfterValidator(_hhmm)]
 
 
+def _clock(v: str) -> str:
+    """Any IST clock time 'HH:MM' (phase 6: the pre-market plan and the end-of-day summary are outside the session)."""
+    try:
+        _dtime.fromisoformat(v)
+    except ValueError:
+        raise ValueError(f"'{v}' is not a time like 09:00") from None
+    return v
+
+
+CLOCK = Annotated[str, AfterValidator(_clock)]
+
+
 def hhmm(v: str) -> _dtime:
     return _dtime.fromisoformat(v)
 
@@ -905,6 +917,97 @@ class StockOptionSelling(StrictModel):
         return self.time_exit_dte
 
 
+# ---------------- phase 6: live signals, alerts, exit calls ----------------
+class ScoringWeights(StrictModel):
+    """Weights of the six confluence factors of the 0-100 signal score (a ranking aid, never a probability)."""
+    timeframes: float = Field(1.0, ge=0, le=10)
+    volume: float = Field(1.0, ge=0, le=10)
+    relative_strength: float = Field(1.0, ge=0, le=10)
+    regime_fit: float = Field(1.0, ge=0, le=10)
+    fii_bias: float = Field(1.0, ge=0, le=10)
+    room_to_level: float = Field(1.0, ge=0, le=10)
+
+
+class Scoring(StrictModel):
+    weights: ScoringWeights = ScoringWeights()
+    sma_5m: int = Field(12, ge=2, le=75)             # 5-minute closes in the 5-minute trend average (an hour)
+    sma_15m: int = Field(8, ge=2, le=50)             # 15-minute closes in the 15-minute trend average
+    sma_daily: int = Field(20, ge=2, le=200)         # daily closes in the daily trend average
+    sr_lookback_days: int = Field(20, ge=5, le=252)  # sessions of daily highs/lows for the nearest level
+    min_known_factors: int = Field(3, ge=1, le=6)    # fewer known factors: no score (ranked last)
+
+
+class SettlementRepeat(StrictModel):
+    """Minutes between repeats of a settlement-readiness alert, by level (an overdue exit repeats every bar)."""
+    NOTICE: int = Field(240, ge=5, le=1440)
+    WARNING: int = Field(60, ge=5, le=1440)
+    URGENT: int = Field(15, ge=1, le=1440)
+
+    @model_validator(mode="after")
+    def ordered(self) -> "SettlementRepeat":
+        if not self.URGENT <= self.WARNING <= self.NOTICE:
+            raise ValueError("alerts.settlement_repeat_minutes: URGENT <= WARNING <= NOTICE")
+        return self
+
+
+class Alerts(StrictModel):
+    """Telegram and dashboard alerts. OFF until the user switches them on (telegram_enabled)."""
+    telegram_enabled: bool = False                    # master switch: nothing goes to Telegram while false
+    top_per_bar: int = Field(3, ge=1, le=20)          # signal alerts per bar: the highest scores only
+    daily_signal_cap: int = Field(10, ge=0, le=100)   # signal alerts per day (exit calls are not capped)
+    exit_call_repeat_minutes: int = Field(15, ge=1, le=240)
+    settlement_repeat_minutes: SettlementRepeat = SettlementRepeat()
+    retry_first_seconds: int = Field(30, ge=5, le=3600)    # a failed send is retried after this, doubling each time
+    retry_max_seconds: int = Field(600, ge=5, le=86400)
+    max_alert_age_minutes: int = Field(60, ge=5, le=1440)  # an alert without its own expiry is given up after this
+    send_timeout_seconds: float = Field(10, gt=0, le=60)
+    premarket_time: CLOCK = "09:00"
+    end_of_day_time: CLOCK = "15:45"
+    heartbeat_bar_gap_seconds: int = Field(120, ge=60, le=1800)   # no bar processed this long in market hours: alert
+    sleep_gap_seconds: int = Field(300, ge=60, le=86400)          # wall clock this far past the last loop: asleep
+
+    @model_validator(mode="after")
+    def ordered(self) -> "Alerts":
+        if self.retry_max_seconds < self.retry_first_seconds:
+            raise ValueError("alerts.retry_max_seconds must be at least retry_first_seconds")
+        return self
+
+
+class Exits(StrictModel):
+    """Exit-call rules for open positions (R = the initial risk per share: entry to the first stop)."""
+    breakeven_after_r: float = Field(1.0, gt=0, le=10)    # move the stop to the entry after this gain in R
+    trail_after_r: float = Field(1.5, gt=0, le=20)        # trail the stop from this gain in R
+    trail_distance_r: float = Field(1.0, gt=0, le=10)     # the trailing stop stays this many R behind the best price
+    partial_at_r: float = Field(1.0, gt=0, le=10)         # book part of the position at this gain in R (once)
+    partial_pct: float = Field(50, gt=0, lt=100)          # % of the units to book (positions of 2 or more units)
+    invalidation_buffer_pct: float = Field(0.3, ge=0, le=5)   # the underlying must close this far beyond the level
+
+    @model_validator(mode="after")
+    def ordered(self) -> "Exits":
+        if self.trail_after_r < self.breakeven_after_r:
+            raise ValueError("exits.trail_after_r must be at least breakeven_after_r")
+        return self
+
+
+class Execution(StrictModel):
+    """Execution records and the slippage report."""
+    strike_distance_bands_pct: list[float] = [1.0, 2.0, 5.0, 10.0]   # strike distance from spot, % of spot
+
+    @field_validator("strike_distance_bands_pct")
+    @classmethod
+    def increasing(cls, v: list[float]) -> list[float]:
+        if not v or any(b <= 0 for b in v) or v != sorted(set(v)):
+            raise ValueError("execution.strike_distance_bands_pct must be positive and increasing")
+        return v
+
+
+class EngineCfg(StrictModel):
+    """The live signal loop (paper mode). Bars are 5 minutes; nothing is ever sent to the broker."""
+    enabled: bool = True
+    poll_seconds: float = Field(2.0, ge=0.5, le=60)
+    feed_reconnect_after_seconds: int = Field(90, ge=30, le=3600)   # index STALE this long in market hours: reconnect
+
+
 class Settings(StrictModel):
     account: Account
     risk: Risk
@@ -924,6 +1027,11 @@ class Settings(StrictModel):
     external_data: ExternalData = ExternalData()
     data_status: DataStatusLimits = DataStatusLimits()
     data_quality: DataQuality = DataQuality()
+    scoring: Scoring = Scoring()             # phase 6
+    alerts: Alerts = Alerts()
+    exits: Exits = Exits()
+    execution: Execution = Execution()
+    engine: EngineCfg = EngineCfg()
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":

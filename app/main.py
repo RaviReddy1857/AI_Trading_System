@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import uvicorn
 from dotenv import load_dotenv
@@ -186,6 +186,27 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                 log.exception("regime evaluation failed")
             stop.wait(settings.regime.recompute_seconds)
 
+    # ---- phase 6: the live signal loop (paper mode): execution records, paper trader, exit calls ----
+    from .engine import SignalEngine
+    from .execution import ExecutionBook
+    from .paper import PaperTrader
+    from .positions import ExitCallBook
+    execbook = ExecutionBook(store, settings)
+    paper = PaperTrader(settings, journal, marker, store, execbook, calendar, cost_model)
+    exitbook = ExitCallBook(store, settings)
+    engine = SignalEngine(settings=settings, store=store, hub=hub, journal=journal, marker=marker, risk=risk_service,
+                          regime=regime, calendar=calendar, desk=desk, source=feed.name, costs=cost_model,
+                          execbook=execbook, paper=paper, exits=exitbook, now_fn=utcnow)
+    engine_info = {"started_utc": utcnow().isoformat(), "restored": engine.restore(utcnow())}
+
+    def engine_loop() -> None:
+        while not stop.is_set():
+            try:
+                engine.step()
+            except Exception:
+                log.exception("signal loop step failed (it carries on)")
+            stop.wait(settings.engine.poll_seconds)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if feed.name == "sim" and settings.history.sim_seed_on_start:
@@ -203,6 +224,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                 threading.Thread(target=history_job, name="history", daemon=True).start()
             threading.Thread(target=regime_loop, name="regime", daemon=True).start()
             threading.Thread(target=options_loop, name="options", daemon=True).start()
+            if settings.engine.enabled:
+                threading.Thread(target=engine_loop, name="engine", daemon=True).start()
         yield
         stop.set()
         feed.stop()
@@ -386,7 +409,13 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         """I closed all or part of a position: {"exit_price": x} or {"exit_prices": [per leg]}, optional
         "quantity"/"lots" (partial), "exit_time", "note". Exit calls stop once it is fully closed."""
         payload = await _json_body(request)
-        return _journal_result(lambda: journal.close_position(position_id, payload, utcnow(), cost_model))
+
+        def go():
+            res = journal.close_position(position_id, payload, utcnow(), cost_model)
+            if res.get("status") == "CLOSED":
+                exitbook.resolve_closed(position_id, utcnow())          # exit calls stop once it is closed
+            return res
+        return _journal_result(go)
 
     @app.post("/journal/positions/{position_id}/stop")
     async def journal_position_stop(position_id: str, request: Request):
@@ -399,7 +428,21 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         """'I took this trade' / 'I skipped it': {"decision": "TOOK"|"SKIPPED", "note", "fill_price" or
         "fills" (one per leg), "fill_time", "quantity"/"lots"}. Refused after the signal's valid-until."""
         payload = await _json_body(request)
-        return _journal_result(lambda: journal.record_decision(signal_id, payload, utcnow()))
+
+        def go():
+            res = journal.record_decision(signal_id, payload, utcnow())
+            d = journal.decision(signal_id)
+            if d and d["decision"] == "TOOK" and d.get("fills"):        # my actual fill per leg (execution records)
+                from .execution import ACTUAL_FILL, legs_of
+                from .engine import signal_from_dict
+                sig = signal_from_dict(journal.signal(signal_id)["signal"])
+                pos = journal.position(d["position_id"])
+                execbook.record_fill(legs_of(sig), signal_id, ACTUAL_FILL, d["fills"],
+                                     datetime.fromisoformat(d["fill_time_utc"]),
+                                     pos.quantity if not pos.is_option else pos.quantity * pos.legs[0].lot_size,
+                                     "my fill (journal)")
+            return res
+        return _journal_result(go)
 
     @app.post("/journal/{signal_id}/exit")
     async def journal_signal_exit(signal_id: str, request: Request):
@@ -420,7 +463,8 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             return {**p.to_view(), "open_pnl_inr": None if v is None else float(v),
                     "price_note": why or None, "closes": journal.closes(p.position_id)}
         return {"as_of_utc": now.isoformat(),
-                "open": [view(p) for p in journal.positions("OPEN")],
+                "open": [{**view(p), "exit_calls": exitbook.calls(p.position_id, active_only=True)}
+                         for p in journal.positions("OPEN")],
                 "closed": [{**p.to_view(), "closes": journal.closes(p.position_id)}
                            for p in journal.positions("CLOSED")][-50:],
                 "pools": {pool: risk_service.pool_state(pool, now)[1] for pool in POOLS}}
@@ -435,6 +479,62 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                         "you hold are always sent."}
 
     app.state.journal = journal
+    app.state.engine = engine
+
+    # ---- phase 6: read-only views of signals, positions, paper trades and execution ----
+    @app.get("/api/signals")
+    def api_signals(hours: int = 24):
+        from .cards import card_view
+        now = utcnow()
+        rows = journal.signals_since(now - timedelta(hours=min(max(hours, 1), 24 * 14)))
+        decisions = journal.decisions()
+        cards = [card_view(r["card"], now, decisions.get(r["signal_id"])) for r in rows if r["card"]]
+        cards.sort(key=lambda c: (c["status"] != "APPROVED", c["expired"], -((c.get("score") or {}).get("score") or -1)))
+        return {"as_of_utc": now.isoformat(), "cards": cards, "engine": engine.last_summary,
+                "problems": engine.problems,
+                "note": "Research only. APPROVED cards first (highest score first), NO_TRADE cards collapsed. An expired "
+                        "card is greyed out and cannot be acted on."}
+
+    @app.get("/api/signals/{signal_id}")
+    def api_signal(signal_id: str):
+        from .cards import card_view
+        r = journal.signal(signal_id)
+        if r is None:
+            raise HTTPException(404, "unknown signal_id")
+        return {**r, "card": card_view(r["card"], utcnow(), journal.decision(signal_id)) if r["card"] else None,
+                "paper": journal.paper_trade(signal_id), "execution": execbook.rows(signal_id)}
+
+    @app.get("/api/paper")
+    def api_paper():
+        rows = journal.paper_trades()
+        return {"open": [r for r in rows if r["status"] in ("PENDING", "OPEN")],
+                "closed": [r for r in rows if r["status"] in ("CLOSED", "NOT_FILLED")][-200:]}
+
+    @app.get("/api/exit-calls")
+    def api_exit_calls():
+        return {"active": exitbook.calls(active_only=True), "log": exitbook.log()[-200:]}
+
+    @app.get("/api/slippage")
+    def api_slippage():
+        return execbook.report()
+
+    @app.get("/api/slippage.csv")
+    def api_slippage_csv():
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(execbook.csv(), media_type="text/csv",
+                                 headers={"Content-Disposition": "attachment; filename=slippage.csv"})
+
+    @app.get("/api/engine")
+    def api_engine():
+        return {**engine_info, "last_bar_utc": engine.last_bar.isoformat() if engine.last_bar else None,
+                "last": engine.last_summary, "problems": engine.problems,
+                "strategies": {"intraday": [s.id for s in engine.cash], "swing": [s.id for s in engine.swing],
+                               "options": [s.id for s in desk.strategies]}}
+
+    @app.get("/signals", response_class=HTMLResponse)
+    def signals_page():
+        from .page import SIGNALS_HTML
+        return SIGNALS_HTML
 
     @app.get("/", response_class=HTMLResponse)
     def home():

@@ -125,7 +125,9 @@ class OptionDesk:
                 f"IV rank unknown: needs a current value and at least {o.iv_rank_min_history_days} days of history"}
 
     # ---- everything for one underlying ----
-    def view(self, sym: str, now: datetime | None = None) -> dict:
+    def view(self, sym: str, now: datetime | None = None, trigger=None, keep_objects: bool = False) -> dict:
+        """Everything for one underlying. Phase 6: `trigger` = the underlying's own live cash signal (long option
+        buying); `keep_objects` adds the Signal objects under ideas[i]["objects"] for the live engine."""
         now = now or self.now_fn()
         today = now.astimezone(IST).date()
         o = self.s.options
@@ -186,7 +188,7 @@ class OptionDesk:
                 expiries=tuple(ExpiryInfo(s.expiry, s.kind, s.lot_size) for s in specs if s.expiry in quotes_by_expiry),
                 quotes=ChainQuotes(spot or 0.0, quotes_by_expiry), costs=costs, capital_inr=self.s.account.capital_inr,
                 rate=rate, dividend=div, status="LIVE" if spot else "STALE", iv_reference_pct=iv["value_pct"],
-                iv_rank=iv["rank"], trigger=None, allowed_kinds=tuple(cfg.expiries),
+                iv_rank=iv["rank"], trigger=trigger, allowed_kinds=tuple(cfg.expiries),
                 margin=lambda structure, width: margins.lookup(sym, structure, width, today), require_margin=True,
                 historical=False, max_spread_pct=o.chain.max_spread_pct, min_oi_lots=o.chain.min_open_interest_lots,
                 search_steps=o.backtest.strike_search_steps,
@@ -195,11 +197,14 @@ class OptionDesk:
                 sigs = st.evaluate(ctx)
                 reasons = list(st.last_no_trade)
                 if st.id == "long_option" and not sigs and any(r.startswith("NO_TRIGGER") for r in reasons):
-                    reasons = ["NO_TRIGGER: option buying needs a live intraday or swing signal on the underlying; "
-                               "the live signal loop arrives in phase 6"]
-                ideas.append({"strategy_id": st.id, "strategy_version": st.version, "label": st.status_label,
-                              "alerts": st.alerts_enabled, "status": "SIGNAL" if sigs else "NO_TRADE",
-                              "reasons": reasons, "signals": [s.to_dict() for s in sigs]})
+                    reasons = ["NO_TRIGGER: option buying needs a live intraday or swing signal on the underlying "
+                               "(phase 6: the live signal loop passes it when one fires)"]
+                idea = {"strategy_id": st.id, "strategy_version": st.version, "label": st.status_label,
+                        "alerts": st.alerts_enabled, "status": "SIGNAL" if sigs else "NO_TRADE",
+                        "reasons": reasons, "signals": [s.to_dict() for s in sigs]}
+                if keep_objects:
+                    idea["objects"] = (st, list(sigs))
+                ideas.append(idea)
         return {
             "underlying": sym, "kind": kind, "feed": self.source, "as_of_utc": now.isoformat(),
             "spot": spot, "spot_status": "LIVE" if spot else "not LIVE (no option signal)", "regime": regime,

@@ -192,6 +192,14 @@ class Store:
         keys = ["start_utc", "open", "high", "low", "close", "volume", "ticks"]
         return [dict(zip(keys, r)) for r in reversed(rows)]
 
+    def bars_1m_between(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
+        """Stored 1-minute bars of a symbol starting in [start, end), oldest first (phase 6 live loop)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT start_utc,open,high,low,close,volume,ticks FROM bars_1m WHERE symbol=? AND start_utc>=? "
+                "AND start_utc<? ORDER BY start_utc", (symbol, start.isoformat(), end.isoformat())).fetchall()
+        return [Bar(symbol, _ts(r[0]), r[1], r[2], r[3], r[4], r[5], r[6] or 0) for r in rows]
+
     def recent_quality_events(self, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._db.execute(

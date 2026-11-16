@@ -24,7 +24,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
-| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) built and tested | | |
+| 6 | Live signals and alerts (paper mode) | In progress: M1 (journal, positions, two capital pools) and M2 (signal loop, cards, score, paper trader, execution records, exit calls) built and tested | 1054 passing (whole suite) | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2243,6 +2243,61 @@ records and exit calls, **M3** Telegram, the trade-type selector, scheduled mess
   position opened before today without a mark from an earlier day makes its pool unknown (marks are saved on every
   processed bar); the Phase 9 portfolio check's `history_verified` stays False live (stock option selling signals are
   the Phase 9 remainder).
+
+### M2: signal loop, cards, score, paper trader, execution records, exit calls (built)
+- `app/engine.py` `SignalEngine`: on every closed 5-minute bar in market hours (5-minute bars built from the stored
+  1-minute bars): regime and FII bias; the cash strategies not in `strategies.inactive`; the swing strategies once a
+  session, at its first processed bar, on the completed daily bars (a signal valid until 09:30 IST, as in the
+  backtests); the phase 4 option strategies through the Options page's live context (`OptionDesk.view(trigger=,
+  keep_objects=)`), long options with the underlying's own live cash signal as the trigger. Each signal goes through
+  `decide` with the account state of its own pool, gets a score and a card, and is stored (APPROVED or NO_TRADE);
+  approved ones are paper-traded; then exit calls for my open positions, marks for both pools, the day's closing
+  equity after 15:30. A background thread runs it every `engine.poll_seconds`.
+- Duplicates: the deterministic signal_id plus INSERT OR IGNORE (a restart or a repeated bar never issues a signal
+  twice); a signal equal to one still valid (same strategy, symbol, direction and legs) is not issued again.
+- `app/scoring.py`: six factors (timeframes, volume, relative strength, regime fit, FII bias, room to the nearest
+  level), each 0-100 or not known; the score is the weighted mean of the known ones (`scoring` in config.yaml); fewer
+  than 3 known: not scored, ranked last. Shown as "a ranking aid, never a probability".
+- `app/cards.py`: every field of step 2; 'Why now' = the strategy's conditions with values + regime + FII bias + this
+  week's events; the estimate (profit at target, loss at stop, risk-reward, costs, breakevens; option selling also the
+  premium collected and the maximum profit) labelled "Estimate if target is hit, not a forecast"; NO_TRADE collapsed
+  with every reason; expired = greyed and not actionable.
+- `app/track.py`: backtest (newest stored run: trades, hit rate, net, average) and paper results per strategy and per
+  trade type, with the count, "low sample" under 30, no hit rate without trades, "UNPROVEN" when nothing is recorded.
+- `app/paper.py`: fill at the first LIVE quote received at or after the signal bar's close (cash: the ask to buy, the
+  bid to sell, else last + slippage; options: each leg at its touch); NOT_FILLED without one before valid-until or
+  when the fill is at or beyond the stop or target; cash exits on 5-minute bars, stop first (`Engine._hit`); options on
+  LIVE quotes; time exits; a same-day swing exit pays intraday charges; a stale quote never moves a paper trade.
+- `app/execution.py`: `execution_snapshots` (SIGNAL, PLANNED_FILL, PAPER_FILL, ACTUAL_FILL per leg; a moment is
+  recorded once); the slippage report vs mid and touch in rupees and % by stock and strike-distance band
+  (`execution.strike_distance_bands_pct`), spread, depth at the touch ("depth not sent by the feed"), "no quote"
+  count, low sample; CSV at `/api/slippage.csv`. My fills from "I took this trade" are recorded as ACTUAL_FILL.
+- `app/positions.py`: exit calls for every trade type (target, stop, breakeven, trail, partial, time, entry
+  invalidated, regime flip, kill switch; stock option spreads also the phase 9 strike breach, trend flip and forced
+  exit, and SETTLEMENT from `app.options.settlement` with the holiday calendar); `exit_calls` + `exit_call_log`;
+  sticky calls repeat every `alerts.exit_call_repeat_minutes` until the position is closed; breakeven and trail until
+  my stop is moved (`POST /journal/positions/{id}/stop`), partial until a partial close; kill switch and regime flip
+  while they hold. A stale price pauses only the price rules ("price stale: exit calls paused since hh:mm").
+- Config (validated): `scoring`, `alerts` (incl. `telegram_enabled: false`), `exits`, `execution`, `engine`.
+- Routes (read-only): `/api/signals`, `/api/signals/{id}`, `/api/paper`, `/api/exit-calls`, `/api/slippage`,
+  `/api/slippage.csv`, `/api/engine`, the page `/signals` (cards with "I took this trade" / "I skipped it", positions
+  with their exit calls, "I closed it", "I moved my stop", the manual position form, switches, slippage).
+- Tested (92 new tests: `test_phase6_engine.py`, `test_phase6_exits.py`, `test_phase6_paper.py`,
+  `test_phase6_execution.py`, `test_phase6_cards.py`; whole suite 1054 passing): **end to end from fixture 1-minute
+  bars and ticks to a stored card served by `/api/signals`**, paper fill at the next bar's first quote (never the
+  signal bar's), execution records of all three moments; a restart neither duplicates nor revives a signal; the kill
+  switch makes a signal NO_TRADE and it is not paper-traded; **each of the six trade types x each of the nine exit-call
+  kinds** with action and reason; the phase 9 calls and the settlement alert; repeats until closed; stale prices; the
+  paper trader's fills, NOT_FILLED cases, stop first, time exit and P&L to the paise; the slippage report by hand; the
+  card fields and estimate by hand; track-record sample boundaries 29/30; each score factor by hand.
+- Run here: the app in sim mode on port 8765 with a separate database during market hours (15:09 IST): every new route
+  answered 200, the loop processed the 15:10 bar, a manual position received breakeven, partial, trail and kill-switch
+  calls (the simulator injects bad ticks, so the kill switch was on).
+- Known limits: with the default phase 9 stop (buy back at 2x credit) a stock spread's risk equals its credit, so its
+  gain never reaches 1.5R and no trailing call can arise (it can with a tighter stop of your own). Swing strategies use
+  the regime at the first bar of the session, not at the previous close as the backtests do. Market depth is not
+  recorded (the feed is subscribed without it). Index option buying never triggers live: the cash strategies do not
+  run on indices (same as the backtests).
 
 ## Open issues
 

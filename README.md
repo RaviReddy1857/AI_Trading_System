@@ -486,6 +486,21 @@ index pool. See both at `GET /api/positions` (`pools`) and `GET /api/risk` (`poo
 | I moved my stop | `POST /journal/positions/{id}/stop` | `{"stop": x}` |
 | Alerts for one trade type on/off | `POST /journal/alert-switches` | `{"type": "SWING_STOCKS", "on": true}` |
 
+**The live loop (paper mode).** While the app runs in market hours, every closed 5-minute bar runs the strategies,
+the risk engine sizes each signal on its own pool, and a card is stored (APPROVED, or NO TRADE with the reasons).
+Every approved signal is paper-traded at the next bar's first live quote and followed to its stop, target or time
+exit. Open **http://127.0.0.1:8000/signals** for the cards ("I took this trade" / "I skipped it"), your open
+positions with their exit calls ("I closed it", "I moved my stop"), the form for positions you opened yourself, the
+alert switches and the slippage report (CSV: `/api/slippage.csv`). The score on a card is a ranking aid, never a
+probability; the rupee estimate is labelled "Estimate if target is hit, not a forecast".
+
+**Exit calls** (every trade type, taken or entered by you): target, stop, move stop to breakeven, trail the stop,
+book partial profit, time exit, entry reason invalidated, regime flip, kill switch; stock option spreads also strike
+breached, trend flip, forced exit before expiry week and the settlement-readiness alert. Each says what to do and
+why, with the numbers, and repeats every 15 minutes (`alerts.exit_call_repeat_minutes`) until you mark the position
+closed. Thresholds are in `exits` in config.yaml. A stale price pauses the price checks; it never triggers or
+silences a call.
+
 A sold option without a bought option of the same right and expiry is stored and flagged **UNHEDGED** (its maximum
 loss is shown as not known for a call, strike-based for a put). The six alert switches start OFF.
 
@@ -534,6 +549,9 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   JSON body, local Host/Origin only), `/api/backtests`, `/api/backtests/{run_id}` and the page `/backtests`, `/api/options`, `/api/options/{underlying}` and
   the page `/options`; `POST /data/import/margins` for your margin entries; `GET /api/risk` and
   `POST /capital/log` (phase 5)
+- `app/engine.py`, `app/cards.py`, `app/scoring.py`, `app/track.py`, `app/paper.py`, `app/execution.py`,
+  `app/positions.py` - phase 6: the live loop, signal cards, the score, track records, the paper trader, execution
+  records and the slippage report, exit calls
 - `app/journal.py`, `app/pricing.py`, `app/switches.py` - phase 6: signals, decisions, positions, paper trades and the
   account state of each capital pool; quotes with their status; the trade-type alert switches
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside

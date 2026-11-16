@@ -30,6 +30,7 @@ PAGE_HTML = """<!doctype html>
  <a class="tag" href="/backtests">Backtest reports</a>
  <a class="tag" href="/options">Options view</a>
  <a class="tag" href="/stock-option-selling">Stock option selling</a>
+ <a class="tag" href="/signals">Signals and positions</a>
  <span class="tag" id="feed"></span><span class="tag" id="asof"></span></header>
 <a href="/data-status" id="dstrip" style="display:block;padding:8px 20px;border-bottom:1px solid var(--line);color:var(--ink);text-decoration:none;font-size:14px">Data status: loading...</a>
 <main>
@@ -355,6 +356,7 @@ OPTIONS_HTML = """<!doctype html>
  <span class="tag">RESEARCH ONLY: this app cannot place orders</span>
  <a class="tag" href="/">Back to prices</a> <a class="tag" href="/backtests">Backtest reports</a>
  <a class="tag" href="/stock-option-selling">Stock option selling</a>
+ <a class="tag" href="/signals">Signals and positions</a>
  <span class="tag" id="feed"></span></header>
 <main>
  <div class="card"><h2>Underlying</h2>
@@ -513,4 +515,128 @@ async function profile(sym){
  document.getElementById("top").innerHTML=top.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry)}</td><td>${x.score==null?"incomplete":f(x.score)}</td>${["iv_rank","iv_falling","rel_strength","strike_distance","range_profile","liquidity"].map(k=>`<td>${x.scores[k]==null?"-":f(x.scores[k])} <span class="mute">(${x.contributions&&x.contributions[k]!=null?f(x.contributions[k]):"-"})</span></td>`).join("")}<td style="text-align:left;white-space:normal"><span class="tag">${esc(x.label||"research candidate")}${x.snapshot?` - ${esc(x.snapshot.session_date)} close`:""}</span> ${x.actionable?"<b>actionable</b>":`<span class="mute">not actionable: ${esc((x.not_actionable_because||[]).map(s=>s.split(":")[0]).join(", "))}</span>`}<br>${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="12" class="mute">no stock passes every rule today</td></tr>';
  document.getElementById("rest").innerHTML=rest.map(x=>`<tr><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry||"-")}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="4" class="mute">-</td></tr>';
 })();
+</script></body></html>"""
+
+
+SIGNALS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signals and positions</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#16202a;--mute:#5b6875;--line:#dde2e8;--ok:#0a7a45;--bad:#b3261e;--warn:#9a6200}
+ @media (prefers-color-scheme:dark){:root{--bg:#11161c;--card:#1a212a;--ink:#e8edf2;--mute:#9aa7b4;--line:#2c3743;--ok:#4cc38a;--bad:#ff8a80;--warn:#f0b849}}
+ body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+ h1{font-size:18px;margin:0} h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600} h3{font-size:15px;margin:0 0 6px}
+ .tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:2px 8px;color:var(--mute)}
+ main{padding:16px 20px;display:grid;gap:16px;max-width:1100px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+ .sig{border-left:4px solid var(--ok)} .sig.NO_TRADE{border-left-color:var(--mute)} .sig.expired{opacity:.5}
+ .red{color:var(--bad)} .ok{color:var(--ok)} .warn{color:var(--warn)} .mute{color:var(--mute);font-size:13px}
+ .banner{padding:8px 20px;border-bottom:1px solid var(--line);font-size:14px}
+ table{border-collapse:collapse;width:100%} th,td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13px}
+ th{color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
+ .kv{display:flex;flex-wrap:wrap;gap:4px 20px} ul{margin:4px 0 0;padding-left:20px}
+ input,select,button,textarea{font:inherit;padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+ textarea{width:100%;box-sizing:border-box;min-height:70px;font:13px ui-monospace,Consolas,monospace}
+ .call{border:1px solid var(--bad);border-radius:6px;padding:6px 8px;margin:4px 0} .UNHEDGED{color:var(--bad);font-weight:700}
+ details summary{cursor:pointer;color:var(--mute);font-size:13px;font-weight:600}
+</style></head><body>
+<header><h1>Signals and positions</h1>
+ <span class="tag">RESEARCH ONLY: you place every order yourself in ICICI Direct</span>
+ <a class="tag" href="/">Prices</a> <a class="tag" href="/options">Options view</a>
+ <a class="tag" href="/stock-option-selling">Stock option selling</a> <span class="tag" id="asof"></span></header>
+<div class="banner" id="banner">loading...</div>
+<main>
+ <div class="card"><h2>Signal cards (approved first; NO TRADE collapsed)</h2><div id="cards" class="mute">loading...</div></div>
+ <div class="card"><h2>Open positions and exit calls</h2><div id="positions" class="mute">loading...</div></div>
+ <div class="card"><h2>Alert switches by trade type (alerts only; every strategy keeps paper-trading)</h2><div id="switches"></div></div>
+ <div class="card"><h2>Add a position I opened myself</h2>
+  <div class="mute">Cash: symbol, trade type, direction, quantity, entry price, entry date, optional stop and target.
+   Options: choose the kind and put the legs as JSON, e.g. [{"action":"SELL","right":"PE","strike":1300,"expiry":"2026-11-24","lots":1,"lot_size":500,"price":12.5}, ...]</div>
+  <div class="kv" style="margin:6px 0">
+   <input id="m_symbol" placeholder="symbol" size="10"> <select id="m_tt"><option>SWING_STOCKS</option><option>INTRADAY_STOCKS</option></select>
+   <select id="m_dir"><option>LONG</option><option>SHORT</option></select> <input id="m_qty" placeholder="quantity" size="7">
+   <input id="m_entry" placeholder="entry price" size="9"> <input id="m_date" placeholder="YYYY-MM-DD" size="10">
+   <input id="m_stop" placeholder="stop" size="8"> <input id="m_target" placeholder="target" size="8">
+   <select id="m_kind"><option value="">cash</option><option value="index">index options</option><option value="stock">stock options</option></select>
+   <input id="m_margin" placeholder="margin blocked (options)" size="14"></div>
+  <textarea id="m_legs" placeholder="option legs as JSON (leave empty for cash)"></textarea>
+  <button onclick="addPos()">Add position</button> <span id="m_out" class="mute"></span></div>
+ <div class="card"><h2>Slippage report (paper and my fills against the mid and the touch at the planned fill)</h2>
+  <div id="slip" class="mute"></div><a class="tag" href="/api/slippage.csv">Download CSV</a></div>
+ <div class="card"><h2>Alerts</h2><div id="alerts" class="mute">loading...</div></div>
+</main>
+<script>
+const fmt=v=>v==null?'-':(typeof v==='number'?v.toLocaleString('en-IN',{maximumFractionDigits:2}):v);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ let j={};try{j=await r.json()}catch(e){} return {ok:r.ok,json:j}}
+function cardHtml(c){
+ const est=c.estimate, tr=c.track_record||{}, sc=c.score||{};
+ let h=`<div class="card sig ${c.status} ${c.expired?'expired':''}"><h3>${esc(c.instrument)} - ${c.direction} - ${c.status}${c.expired?' (expired)':''}</h3>`;
+ h+=`<div class="kv"><span>${esc(c.trade_type_name)}</span><span>strategy ${esc(c.strategy_id)} v${esc(c.strategy_version)}</span>
+  <span>regime ${esc(c.regime)}</span><span>data ${esc(c.data_as_of)}</span><span>valid until ${esc(c.valid_until)}</span>
+  <span>score ${sc.score==null?'not scored':sc.score} (ranking aid, not a probability)</span></div>`;
+ if(c.status!=='APPROVED'){h+=`<details><summary>NO TRADE: ${esc(c.reason_codes.join(', '))}</summary><ul>${c.reasons.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul></details></div>`;return h}
+ h+=`<div class="kv"><span>entry zone <b>${fmt(c.entry_zone[0])} - ${fmt(c.entry_zone[1])}</b></span><span>stop <b>${fmt(c.stop)}</b></span>
+  <span>target <b>${fmt(c.target)}</b></span><span>${c.lots?('lots <b>'+c.lots+'</b>'):('quantity <b>'+fmt(c.quantity)+'</b>')}</span>
+  <span>risk Rs ${fmt(c.risk_inr)} (${fmt(c.risk_pct)}%)</span><span>margin/cash Rs ${fmt(c.margin_inr)}</span><span>${esc(c.capital_fit||'')}</span></div>`;
+ h+=`<b>Why now</b><ul>${c.why_now.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul>`;
+ if(est){h+=`<b>${esc(est.label)}</b><div class="kv"><span>profit if target Rs ${fmt(est.profit_if_target_inr)}</span>
+  <span>loss if stop Rs ${fmt(est.loss_if_stop_inr)}</span><span>risk-reward ${fmt(est.risk_reward)}</span><span>costs Rs ${fmt(est.costs_inr)}</span>
+  <span>breakeven ${esc((est.breakevens||[]).map(fmt).join(' / '))}</span>${est.max_profit_inr!=null?'<span>max profit (premium less charges) Rs '+fmt(est.max_profit_inr)+'</span>':''}</div>`}
+ const bt=tr.backtest||{}, pp=tr.paper||{};
+ h+=`<div class="mute">Track record - backtest: ${bt.trades||0} trades, hit rate ${fmt(bt.win_rate_pct)}%, avg Rs ${fmt(bt.avg_inr)} (${esc(bt.note)});
+  paper: ${pp.trades||0} trades, hit rate ${fmt(pp.win_rate_pct)}%, avg Rs ${fmt(pp.avg_inr)} (${esc(pp.note)}). Label: ${esc(tr.label)}</div>`;
+ if(c.warnings.length) h+=`<div class="warn">${c.warnings.map(esc).join('<br>')}</div>`;
+ h+=`<div class="mute">Alert: ${c.alert&&c.alert.allowed?'yes':'no'} - ${esc(c.alert?c.alert.why:'')}</div>`;
+ if(c.my_decision) h+=`<div class="ok">My decision: ${esc(c.my_decision.decision)} ${c.my_decision.fill_price?('at '+fmt(c.my_decision.fill_price)):''}</div>`;
+ else if(c.actionable) h+=`<div style="margin-top:6px"><input id="f_${c.signal_id}" placeholder="my fill price${c.legs&&c.legs.length>1?'s, comma separated':''}" size="22">
+  <input id="n_${c.signal_id}" placeholder="note" size="20"> <button onclick="decide('${c.signal_id}','TOOK',${c.legs?c.legs.length:1})">I took this trade</button>
+  <button onclick="decide('${c.signal_id}','SKIPPED',1)">I skipped it</button></div>`;
+ return h+'</div>'}
+async function decide(id,d,n){const f=document.getElementById('f_'+id).value.trim(), note=document.getElementById('n_'+id).value;
+ const body={decision:d,note:note}; if(f&&d==='TOOK'){const xs=f.split(',').map(Number); if(n>1) body.fills=xs; else body.fill_price=xs[0]}
+ const r=await post('/journal/'+id+'/decision',body); alert(r.ok?'Recorded':(r.json.errors||['failed']).join('; ')); load()}
+async function closePos(id,n){const v=prompt('Exit price'+(n>1?'s (one per leg, comma separated)':'')+'; add ":quantity" for a partial close');
+ if(!v) return; const parts=v.split(':'); const xs=parts[0].split(',').map(Number); const body=n>1?{exit_prices:xs}:{exit_price:xs[0]};
+ if(parts[1]) body.quantity=Number(parts[1]); const r=await post('/journal/positions/'+id+'/close',body); alert(r.ok?('Recorded: net Rs '+fmt(r.json.net_inr)):(r.json.errors||['failed']).join('; ')); load()}
+async function moveStop(id){const v=prompt('My new stop'); if(!v) return; const r=await post('/journal/positions/'+id+'/stop',{stop:Number(v)});
+ alert(r.ok?'Stop recorded':(r.json.errors||['failed']).join('; ')); load()}
+async function sw(t,on){const r=await post('/journal/alert-switches',{type:t,on:on}); if(!r.ok) alert((r.json.errors||['failed']).join('; ')); load()}
+async function addPos(){const g=id=>document.getElementById(id).value.trim(); const body={symbol:g('m_symbol'),entry_date:g('m_date')};
+ if(g('m_kind')){body.kind=g('m_kind'); try{body.legs=JSON.parse(g('m_legs'))}catch(e){document.getElementById('m_out').textContent='legs are not valid JSON';return}
+  if(g('m_margin')) body.margin_inr=Number(g('m_margin'))}
+ else {body.trade_type=g('m_tt'); body.direction=g('m_dir'); body.quantity=Number(g('m_qty')); body.entry_price=Number(g('m_entry'))}
+ if(g('m_stop')) body.stop=Number(g('m_stop')); if(g('m_target')) body.target=Number(g('m_target'));
+ const r=await post('/journal/positions',body); document.getElementById('m_out').textContent=r.ok?'added':(r.json.errors||['failed']).join('; '); load()}
+async function load(){
+ const [s,p,w,e,sl,al]=await Promise.all(['/api/signals','/api/positions','/api/alert-switches','/api/engine','/api/slippage','/api/alerts']
+   .map(u=>fetch(u).then(r=>r.ok?r.json():null).catch(()=>null)));
+ document.getElementById('asof').textContent=new Date().toLocaleTimeString();
+ if(e){const st=e.status||{}; let b=`Engine: last bar ${esc(e.last_bar_utc?new Date(e.last_bar_utc).toLocaleTimeString():'none yet')}; started ${esc(new Date(e.started_utc).toLocaleTimeString())}`;
+  if(st.restart_text) b=esc(st.restart_text)+' - '+b; if(st.banners) b+=st.banners.map(x=>' <span class="'+(x.colour||'warn')+'">'+esc(x.text)+'</span>').join('');
+  if(e.problems&&e.problems.length) b+=' <span class="red">'+esc(e.problems.join('; '))+'</span>'; document.getElementById('banner').innerHTML=b}
+ if(s) document.getElementById('cards').innerHTML=s.cards.length?s.cards.map(cardHtml).join(''):'No signals in the last 24 hours.';
+ if(p){document.getElementById('positions').innerHTML=p.open.length?p.open.map(x=>{
+   let h=`<div class="card"><h3>${esc(x.symbol)} ${esc(x.trade_type_name)} ${x.flag?'<span class="UNHEDGED">UNHEDGED</span>':''} (${esc(x.origin)})</h3>
+   <div class="kv"><span>${x.quantity} ${x.unit}</span><span>entry ${fmt(x.entry_price)}</span><span>stop ${fmt(x.stop)}</span><span>target ${fmt(x.target)}</span>
+   <span>open P&amp;L Rs ${fmt(x.open_pnl_inr)}</span>${x.price_note?'<span class="red">price stale: exit calls paused'+(x.plan&&x.plan.stale_since_utc?' since '+new Date(x.plan.stale_since_utc).toLocaleTimeString():'')+' ('+esc(x.price_note)+')</span>':''}</div>`;
+   h+=(x.exit_calls||[]).map(c=>`<div class="call"><b>${esc(c.action)}</b> <span class="mute">[${esc(c.kind)}${c.level?' '+esc(c.level):''}, sent ${c.repeat_no} time(s)]</span><br>${esc(c.reason)}</div>`).join('');
+   return h+`<button onclick="closePos('${x.position_id}',${x.legs?x.legs.length:1})">I closed it</button> <button onclick="moveStop('${x.position_id}')">I moved my stop</button></div>`}).join(''):'No open positions.';}
+ if(w) document.getElementById('switches').innerHTML='<table><tr><th>Trade type</th><th>Alerts</th><th>Label</th><th>Backtest</th><th>Paper</th><th></th></tr>'+
+   w.switches.map(x=>{const r=x.track||{}, b=r.backtest||{}, pp=r.paper||{}; return `<tr><td>${esc(x.name)}</td><td class="${x.on?'ok':'mute'}">${x.on?'ON':'off'}</td>
+   <td>${esc(r.label||'')}</td><td>${b.trades||0} trades, ${fmt(b.win_rate_pct)}%, Rs ${fmt(b.net_inr)} ${b.low_sample?'(low sample)':''}</td>
+   <td>${pp.trades||0} trades, ${fmt(pp.win_rate_pct)}%, Rs ${fmt(pp.net_inr)} ${pp.low_sample?'(low sample)':''}</td>
+   <td><button onclick="sw('${x.type}',${!x.on})">${x.on?'Switch off':'Switch on'}</button></td></tr>`}).join('')+'</table><div class="mute">'+esc(w.note)+'</div>';
+ if(sl){const rows=sl.by_stock.concat(sl.by_strike_band.map(r=>({...r,group:'band '+r.group})));
+  document.getElementById('slip').innerHTML=rows.length?'<table><tr><th>Group</th><th>Trades</th><th>No quote</th><th>Paper vs mid %</th><th>Paper vs touch %</th><th>Mine vs mid %</th><th>Mine vs touch %</th><th>Avg spread %</th><th>Depth at touch</th></tr>'+
+   rows.map(r=>`<tr><td>${esc(r.group)}${r.low_sample?' (low sample)':''}</td><td>${r.trades}</td><td>${r.no_quote}</td><td>${fmt(r.paper_vs_mid_pct)}</td><td>${fmt(r.paper_vs_touch_pct)}</td>
+   <td>${fmt(r.actual_vs_mid_pct)}</td><td>${fmt(r.actual_vs_touch_pct)}</td><td>${fmt(r.avg_spread_pct_of_mid)}</td><td>${r.avg_depth_at_touch==null?esc(r.depth_note||'-'):fmt(r.avg_depth_at_touch)}</td></tr>`).join('')+'</table>':'No planned-fill records yet.'}
+ if(al) document.getElementById('alerts').innerHTML=(al.telegram_enabled?'<span class="ok">Telegram ON</span>':'<span class="warn">Telegram OFF (alerts.telegram_enabled in config.yaml)</span>')+
+   '<table><tr><th>Created</th><th>Kind</th><th>Status</th><th>Attempts</th><th>Text</th></tr>'+(al.recent||[]).map(a=>`<tr><td>${esc(new Date(a.created_utc).toLocaleTimeString())}</td><td>${esc(a.kind)}</td>
+   <td class="${a.status==='NOT_DELIVERED'?'red':a.status==='SENT'?'ok':'mute'}">${esc(a.status)}</td><td>${a.attempts}</td><td style="text-align:left;white-space:normal">${esc(a.text)}</td></tr>`).join('')+'</table>';
+}
+load(); setInterval(load,15000);
 </script></body></html>"""

@@ -514,3 +514,44 @@ backtest:
     1day: 2026-06-08
   test_start:                   # first session tested (older bars still feed averages); see STATUS phase 3b
     1day: 2019-01-22            # Breeze daily history before this has wrong-scale days (stocks) and x100 VIX values
+
+# ---------------- phase 6: live signals and alerts (paper mode) ----------------
+scoring:                        # 0-100 signal score from confluence: a ranking aid, never a probability
+  weights: {timeframes: 1, volume: 1, relative_strength: 1, regime_fit: 1, fii_bias: 1, room_to_level: 1}
+  sma_5m: 12                    # 5-minute trend: close vs the average of the last 12 five-minute closes (an hour)
+  sma_15m: 8                    # 15-minute trend: last 8 fifteen-minute closes
+  sma_daily: 20                 # daily trend: last 20 daily closes
+  sr_lookback_days: 20          # nearest resistance/support among the last 20 daily highs/lows
+  min_known_factors: 3          # fewer known factors: not scored, ranked after the scored signals
+
+alerts:
+  telegram_enabled: false       # MASTER SWITCH. Nothing is sent to Telegram until you set this to true.
+                                # Bot token and chat id are read from .env (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
+  top_per_bar: 3                # signal alerts per bar: only the highest scores
+  daily_signal_cap: 10          # signal alerts per day (exit calls and system alerts are never capped)
+  exit_call_repeat_minutes: 15  # an active exit call is sent again every 15 minutes until you mark the position closed
+  settlement_repeat_minutes: {NOTICE: 240, WARNING: 60, URGENT: 15}   # stock option settlement alerts by level
+  retry_first_seconds: 30       # a failed Telegram send is retried after 30 s, then 60, 120, ... up to retry_max_seconds
+  retry_max_seconds: 600
+  max_alert_age_minutes: 60     # an alert without its own expiry is given up after this (shown "not delivered")
+  send_timeout_seconds: 10
+  premarket_time: "09:00"       # pre-market plan
+  end_of_day_time: "15:45"      # end-of-day summary
+  heartbeat_bar_gap_seconds: 120  # market hours: no bar processed for 2 minutes -> heartbeat alert
+  sleep_gap_seconds: 300        # the loop was not run for 5 minutes (laptop asleep) -> "system was asleep" alert
+
+exits:                          # exit calls for open positions (R = entry to the first stop)
+  breakeven_after_r: 1.0        # move the stop to the entry after 1R of gain
+  trail_after_r: 1.5            # from 1.5R, trail the stop...
+  trail_distance_r: 1.0         # ...1R behind the best price seen
+  partial_at_r: 1.0             # book part of the position at 1R (once; 2 or more shares or lots)
+  partial_pct: 50
+  invalidation_buffer_pct: 0.3  # "entry reason no longer holds": the underlying 0.3% beyond the entry level
+
+execution:
+  strike_distance_bands_pct: [1, 2, 5, 10]   # slippage report groups: strike within 1%, 1-2%, 2-5%, 5-10%, 10%+ of spot
+
+engine:
+  enabled: true                 # the live signal loop (paper mode; nothing is ever sent to the broker)
+  poll_seconds: 2
+  feed_reconnect_after_seconds: 90   # NIFTY STALE this long in market hours: the feed reconnects itself
