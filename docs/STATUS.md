@@ -2426,6 +2426,40 @@ completed windows); the confirmations trail the matching washed-out baseline at 
 3. Not rerun on the truncated copy (they take about 1.5 hours): `stock_option_selling` and the two reversal reports.
    For these the evidence is item 1 only (trade dates and the code's cut-off), not the truncation test.
 
+## Review fixes: Codex review of 307b192..9dd57af (nine findings) and issue 108, 2026-11-16
+
+Each fix has a test in `tests/test_review7_fixes.py` that failed before the fix and passes after.
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | HIGH: a pending paper trade reserved nothing, so three RELIANCE signals approved before any fill were all approved | `Journal.pending_reservations`: an approved paper trade not filled yet (within its valid-until, not taken by me) is passed to the risk engine as a position with its approved risk and margin and no P&L (origin PENDING), so the sector, correlated-group, capital-pool and selling-spread limits count it from approval until fill or expiry, as the backtests reserve accepted entries. Test: the third RELIANCE signal is NO_TRADE (SECTOR_LIMIT), the second is sized on the budget left in its group |
+| 2 | HIGH: realised P&L today counted a closed position from its entry, while its open P&L counted from the previous close | `Journal.realised(since=...)`: a close of a position opened before the window counts its net less the last closing mark before the window x units closed (the open P&L's basis); same at the month boundary; no mark -> not known (PORTFOLIO_UNKNOWN). Test: bought 1,000, closed 1,100 yesterday, sold 1,050 today -> today -4,000, DAILY_STOP stays on after closing |
+| 3 | HIGH: equity left deposits out while the drawdown took them out of the equity change, so a deposit alone showed as a loss | One rule (documented in `app/journal.py`): equity = capital + net deposits dated after the pool's first equity point (cash and index pool only) + realised + open, in `pool_account` and `close_equity_day` (`net_flows`); the drawdown keeps taking the same flows out. Tests: a deposit alone and a withdrawal alone give 0%; a 15,000 loss after a 1,00,000 deposit on 2,00,000 gives 5.00% (15,000 / 3,00,000) |
+| 4 | HIGH: a pending paper trade could fill after its valid-until when a fresh quote was there (after a restart or sleep) | `PaperTrader.expire_pending` on every loop step, market open or not, and without the signal: at or past valid-until it is NOT_FILLED whatever the quote |
+| 5 | HIGH: an alert was not marked before the send; a timeout after Telegram accepted it resent it | SENDING is recorded before each send. `SendError.uncertain` for a timeout or dropped connection after the request went out (or an unreadable 200 reply). Information alerts (signals, pre-market plan, end-of-day) then become UNCERTAIN and are never resent (amber banner, shown under Alerts); exit calls and urgent alerts (kill switch, daily stop, heartbeat, sleep, expired login) are resent and always end with "Alert key: ...", so a second copy is recognisable. A row left SENDING by a crash is treated the same at the next start |
+| 6 | HIGH: a crash between saving a signal and opening its paper trade lost the paper trade | `Journal.save_signal(..., paper=row)` stores both in one transaction; `SignalEngine.restore` re-creates the pending paper trade of an unexpired approved signal that has none (`paper_trades_recreated`) |
+| 7 | MEDIUM: a REGIME_FLIP or KILL_SWITCH call was resolved when the regime was UNKNOWN or prices were missing | `positions.unresolvable_kinds`: those calls stay active (and keep repeating) until an evaluation with a known regime and known prices finds the condition gone |
+| 8 | MEDIUM: a pending fill used the latest tick at the poll, not the first quote after the bar close | `MarketHub` keeps the first good tick of each minute per symbol (last hour); cash fills use `Marker.first_cash` (first quote at or after the planned fill, as it was then), option fills `Marker.first_option` (first chain snapshot at or after it). Test: two ticks before the poll -> the fill is at the first |
+| 9 | MEDIUM: alert dispatch ran after `engine.step()` in the same thread, so a stuck step stopped the heartbeat alert | `main.loop_threads`: engine step, alert dispatch and watchdog each on their own thread. Test: a blocked step still gets its HEARTBEAT alert sent |
+| 108 | Phase 4 index option reports run from `python -m app.options.stock_backtest --download` used the stock-option capital | `stock_backtest.run_index_reports` runs them on the settings as loaded (account.capital_inr); only the Phase 9 reports use `phase9_settings` |
+
+Also: `tests/test_step1.sim_settings` pins `alerts.telegram_enabled: false` (as it already pinned `feed.mode`), so app tests
+do not depend on the local switch.
+
+Known consequence of fix 2 (by design, nothing assumed): a position entered by hand with an earlier entry date and closed
+before any closing mark was recorded makes its pool's realised P&L for today (and this month) not known, so that pool is
+PORTFOLIO_UNKNOWN until the day (month) ends - as its open P&L already was while it was open.
+
+Not tested here: a real Telegram timeout (the uncertain path is tested with a fake transport that accepts then times out);
+how urllib reports a timeout while Telegram's reply is being read is taken from the standard library's behaviour (errors
+while sending the request are wrapped in URLError and treated as not delivered; a timeout while reading the reply is
+uncertain). The threads of fix 9 are tested with a blocked step on the in-memory app, not over a market day.
+
+Tests: whole suite 1,100 of 1,102 passing; two tests fail only on this machine's local state and pass on the committed files:
+`test_phase6_telegram.py::test_alerts_are_off_until_switched_on` (asserts the shipped config.yaml has Telegram off; the
+local config.yaml has it on, not committed) and `test_review6_fixes.py::test_ACCEPTANCE_future_dated_rows_are_ignored_...`
+(reads a download-progress record dated after today in the local data).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2536,7 +2570,7 @@ completed windows); the confirmations trail the matching washed-out baseline at 
 | 105 | 6 | Market depth is not recorded (quote stream subscribed without depth; the chain has none) | Open: subscribing with depth is a later change if wanted |
 | 106 | 6 | With the default stock-spread stop (buy back at 2x credit) the risk equals the credit, so no 1.5R trailing call can arise for a stock spread | Closed 2026-11-16: left as is (user) |
 | 107 | 6 | Phase 9 portfolio check needs `history_verified`, which stays False live: stock option selling signals would be PORTFOLIO_UNKNOWN | Open: phase 9 remainder (stock option selling signals are not generated in phase 6) |
-| 108 | data | `python -m app.options.stock_backtest` runs the Phase 4 option reports (long_option, credit_spread, iron_condor) at the stock-option capital Rs 10,00,000, not account.capital_inr | Reported 2026-11-16; nothing changed |
+| 108 | data | `python -m app.options.stock_backtest` runs the Phase 4 option reports (long_option, credit_spread, iron_condor) at the stock-option capital Rs 10,00,000, not account.capital_inr | Closed 2026-11-16: `run_index_reports` uses account.capital_inr (review 7 fixes) |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 
 ## Decisions log

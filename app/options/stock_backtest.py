@@ -871,6 +871,24 @@ def coverage(status: dict, stocks: list[str], years: list[int]) -> tuple[list[in
     return sorted(use), [s for s in stocks if use and set(use) <= done.get(s, set())]
 
 
+def run_index_reports(user_settings: Settings, store: Store, hist, calendar) -> None:
+    """The Phase 4 index option reports (long_option, credit_spread, iron_condor) the download step refreshes
+    (issue 54). They run on the user's settings as loaded - capital account.capital_inr, the cash and index pool -
+    never on the Phase 9 stock-option capital (issue 108)."""
+    base = Engine(user_settings, store, "breeze", calendar=calendar)
+    index_strategies = build_option_strategies(user_settings)
+    for r in prepare_history(user_settings, store, base, hist, index_strategies, None):
+        print(f"expiries {r['underlying']} {r['kind']}: found {r['found']} new, not found {r['not_found']}"
+              + (f", stopped: {r['stopped']}" if r["stopped"] else ""))
+    index_eng = OptionEngine(user_settings, store, "breeze", hist, base)
+    print(f"capital for the Phase 4 index option reports: Rs {user_settings.account.capital_inr:,.0f} "
+          f"(account.capital_inr)")
+    for st in index_strategies:
+        res = run_option_backtest(user_settings, store, "breeze", st, hist, None, engine=index_eng,
+                                  save=hist.error is None)
+        print_report(res["report"], "breeze")
+
+
 def main(argv: list[str] | None = None) -> int:
     from ..config import ROOT, load_settings
     ap = argparse.ArgumentParser(description="Stock option selling: backtest with a no-filter baseline, and its download")
@@ -903,7 +921,8 @@ def main(argv: list[str] | None = None) -> int:
                                                    "store and shown on the Data status page; config.yaml is not changed")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    settings = phase9_settings(load_settings())
+    user_settings = load_settings()                  # the Phase 4 index reports keep account.capital_inr (issue 108)
+    settings = phase9_settings(user_settings)
     if args.day_budget is not None and not 0 <= args.day_budget <= 20000:
         ap.error("--day-budget must be between 0 and 20000")
     print(f"capital for the Phase 9 backtests: Rs {settings.account.capital_inr:,.0f} "
@@ -957,17 +976,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.download:
         run = {"at": utcnow().isoformat(timespec="seconds")}
         if not args.skip_index:
-            # issue 54: the contracts the index baselines want since the fixed-schedule change
-            index_strategies = build_option_strategies(settings)
-            for r in prepare_history(settings, store, base, hist, index_strategies, None):
-                print(f"expiries {r['underlying']} {r['kind']}: found {r['found']} new, not found {r['not_found']}"
-                      + (f", stopped: {r['stopped']}" if r["stopped"] else ""))
-            index_eng = OptionEngine(settings, store, "breeze", hist, base)
+            # issue 54: the contracts the index baselines want since the fixed-schedule change; issue 108: on
+            # the cash and index capital (account.capital_inr), not the stock-option capital
             before = fetcher.requests
-            for st in index_strategies:
-                res = run_option_backtest(settings, store, "breeze", st, hist, None, engine=index_eng,
-                                          save=hist.error is None)
-                print_report(res["report"], "breeze")
+            run_index_reports(user_settings, store, hist, base.calendar)
             run["index_requests"] = fetcher.requests - before
             run["index_contracts_still_missing"] = len(hist.not_stored)
             hist.not_stored.clear()

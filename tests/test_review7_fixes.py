@@ -500,3 +500,35 @@ def test_9_a_blocked_engine_step_still_raises_and_sends_the_heartbeat_alert():
             release.set()
             for t in threads:
                 t.join(2)
+
+
+# ---------------- issue 108: the Phase 4 index reports of the download command use account.capital_inr ----------------
+def test_108_index_option_reports_from_the_download_command_use_the_cash_and_index_capital(monkeypatch):
+    from app.options import stock_backtest as sb
+    from app.options.stock_selling import phase9_settings
+    from app.store import Store
+    from tests.test_step1 import sim_settings
+    user = sim_settings()
+    assert user.account.capital_inr != user.stock_option_selling.backtest.capital_inr     # the fixture tells them apart
+    seen = {}
+
+    class Hist:
+        error, not_stored = None, []
+
+    def fake_prepare(settings, store, base, hist, strategies, symbols):
+        seen["prepare"] = settings.account.capital_inr
+        seen["base"] = base.s.account.capital_inr if hasattr(base, "s") else base.settings.account.capital_inr
+        return []
+
+    def fake_run(settings, store, source, st, hist, symbols, engine=None, save=True):
+        seen.setdefault("runs", []).append((st.id, settings.account.capital_inr, engine.s.account.capital_inr))
+        return {"report": {}}
+
+    monkeypatch.setattr(sb, "prepare_history", fake_prepare)
+    monkeypatch.setattr(sb, "run_option_backtest", fake_run)
+    monkeypatch.setattr(sb, "print_report", lambda *a, **k: None)
+    sb.run_index_reports(user, Store(":memory:"), Hist(), calendar=None)
+    cap = user.account.capital_inr
+    assert seen["prepare"] == cap and seen["base"] == cap
+    assert seen["runs"] and all(c == cap and e == cap for _, c, e in seen["runs"]), seen["runs"]
+    assert phase9_settings(user).account.capital_inr == user.stock_option_selling.backtest.capital_inr

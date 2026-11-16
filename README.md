@@ -475,7 +475,11 @@ Research and suggestions only: nothing is ever sent to the broker. Every write b
 `stock_option_selling.backtest.capital_inr` (Rs 10,00,000); everything else - intraday and swing stocks, index options,
 stock option buying - uses `account.capital_inr` (Rs 2,00,000). Each pool has its own realised and open P&L and its own
 equity history, so a loss in one pool never stops or halves the other. Deposits (`/capital/log`) belong to the cash and
-index pool. See both at `GET /api/positions` (`pools`) and `GET /api/risk` (`pools`).
+index pool: they are part of its equity (capital + deposits since the journal began + realised + open P&L) but never
+profit, so a deposit or withdrawal alone never moves the drawdown. Today's and this month's P&L of a position held
+from an earlier day count from its previous closing mark, whether it is still open or closed. An approved paper trade
+that has not filled yet already counts against the risk, capital, sector and correlation limits until it fills or
+expires. See both pools at `GET /api/positions` (`pools`) and `GET /api/risk` (`pools`).
 
 **Journal routes** (JSON body, from this computer only):
 | What | Route | Body |
@@ -488,8 +492,9 @@ index pool. See both at `GET /api/positions` (`pools`) and `GET /api/risk` (`poo
 
 **The live loop (paper mode).** While the app runs in market hours, every closed 5-minute bar runs the strategies,
 the risk engine sizes each signal on its own pool, and a card is stored (APPROVED, or NO TRADE with the reasons).
-Every approved signal is paper-traded at the next bar's first live quote and followed to its stop, target or time
-exit. Open **http://127.0.0.1:8000/signals** for the cards ("I took this trade" / "I skipped it"), your open
+Every approved signal is paper-traded at the next bar's first live quote (the first quote after the bar close, kept
+when it arrives, never a later tick) and followed to its stop, target or time exit; one not filled by its valid-until
+is NOT_FILLED, even after a restart or a sleep. Open **http://127.0.0.1:8000/signals** for the cards ("I took this trade" / "I skipped it"), your open
 positions with their exit calls ("I closed it", "I moved my stop"), the form for positions you opened yourself, the
 alert switches and the slippage report (CSV: `/api/slippage.csv`). The score on a card is a ranking aid, never a
 probability; the rupee estimate is labelled "Estimate if target is hit, not a forecast".
@@ -508,7 +513,10 @@ sends to that chat and never reads incoming messages. Then, per trade type, swit
 `alerts: true`; today every strategy says `false` (their backtests show no edge), so only exit calls, settlement
 alerts, the kill switch, the daily stop, the pre-market plan (09:00) and the end-of-day summary (15:45) are sent.
 Every alert and its delivery state is listed under "Alerts" on `/signals` (`GET /api/alerts`); a failed send is
-retried and shown as "not delivered" if it expires first.
+retried and shown as "not delivered" if it expires first. If Telegram may have received a message but did not
+confirm it (a timeout after sending), a signal, pre-market or end-of-day alert is not sent again (shown as UNCERTAIN);
+an exit call or urgent alert is sent again, and these always end with "Alert key: ...", so you can tell a repeat
+from a new alert. Alerts and the heartbeat run on their own threads, so a stuck signal loop still raises its alert.
 
 **When something fails** the app stays safe and tells you: a stale or dropped feed gives no signals, a red banner
 "feed stale since hh:mm", one heartbeat alert and an automatic reconnect; an expired Breeze login shows red on
@@ -577,6 +585,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Review 7 fixes** (docs/STATUS.md): the uncertain-delivery path is tested with a fake Telegram transport, not a real
+  timeout; the separate alert and watchdog threads are tested with a blocked step, not over a market day.
 - **Phase 6 live.** No real Telegram message has been sent (alerts are off until you switch them on); no full market
   day has run with live Breeze data; a real feed drop, the Breeze reconnect and the expired-login message are tested on
   a fake SDK only; market depth is not recorded. Every strategy's status has `alerts: false`, so no signal alert is sent
