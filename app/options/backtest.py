@@ -476,7 +476,9 @@ class OptionEngine:
             prev = self._ref_iv.get(dates[i - 1]) if 0 < i < len(dates) and dates[i] == d else None
             now = self._ref_iv.get(d)
             if self._vix_spike is None:
-                self._vix_spike = vix_spike_series(self.base.daily(self.o.iv_reference_symbol),
+                floor = self.s.backtest.test_start.get("1day")   # older Breeze VIX bars are wrong-scale (issue 30)
+                self._vix_spike = vix_spike_series([b for b in self.base.daily(self.o.iv_reference_symbol)
+                                                    if floor is None or bar_date(b) >= floor],
                                                    self.s.stock_option_selling.profile)
             self._market[d] = {"fii_bias": None if bias == "UNKNOWN" else bias,
                                "vix_change_pct": round((now / prev - 1) * 100, 2) if now and prev else None,

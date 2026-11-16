@@ -17,6 +17,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 4 | Option strategies | Built and tested; Breeze has historical option prices, so option backtests use real stored prices; no option strategy shows an edge vs its no-filter baseline (selling strategies: 7 trades in total, low sample); live chain refresh and live signals not yet seen in market hours | 410 passing (whole suite) | 2026-11-13 |
 | - | Phase 4 review fixes (review of commit 033782e, 6 findings) | Fixed and tested; phase 4 backtests rerun: strategy results identical, baselines changed (fixed schedule), no verdict changes; 31 baseline contracts not stored yet | 437 passing (whole suite) | 2026-11-13 |
 | - | Phase 9 time-ordering fixes (events of all stocks in time order; intraday roll correlation from completed sessions) | Fixed and tested; stored-data rerun: one trade changed (30 stocks 2026 synchronized: -3,688 -> -7,584), everything else identical | 613 passing (whole suite) | 2026-11-15 |
+| - | Phase 9 M4: profiles and scenario history - exclusions counted, breach history from 2019-01-22 at every decision, VIX spikes from post-2019 VIX only | Built and tested; stored-data results unchanged | 661 passing (whole suite) | 2026-11-16 |
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
@@ -1837,6 +1838,44 @@ No default changed; variants A-D unchanged. Whole suite: **655 passing**. Each n
   is waiting for its first synchronized bar near a limit.
 - **Not tested here:** the live path (no positions are recorded before phase 6).
 
+## Phase 9 M4 and M5: requirement-to-code/test table, and M4 gaps built (2026-11-16)
+
+Phase 5 not started; variants A-D and every default unchanged; no holdout opened. Requirements from docs/implementation.md
+(Phase 9 core additions 14, 15 and 23, the parameter table, P9.16, P9.17, P9.25, P9.26) and the specification rows 0,
+5.1-5.3, 7, 8.6 and 8.7 of the table above. C = compliant before this work, B = gap built now.
+
+### M4: range and speed profiles, scenario history
+| Requirement | Code | Tests | State |
+|---|---|---|---|
+| Profile per stock over 2 and 5 years, data from 2019-01-22 only | `stock_profile.range_speed_profile` (`profile.windows_years`), `shortlist.stock_view` (floor, after the last price break) | `test_range_speed_profile_windows_floor_and_implied_move` | C |
+| Typical monthly high-low range; sessions swing low to swing high (confirmed 5-bar pivots); ranging or trending now | `range_speed_profile`, `pivots`, `alternating`, `state_now` | `test_swings_state_and_breach_frequency_by_hand`, `test_range_speed_profile_...` | C (pivots since M1) |
+| How often a strike at the proposed distance was passed within the holding period, beside the option-implied move (expected_move = spot x IV x sqrt(DTE/365)) | `breach_frequency`, `expected_move` | as above | C |
+| Shown on the stock option page; route read-only | `/api/stock-option-selling/profile/{stock}`, page card | `test_profile_route_is_read_only_and_unknown_stock_is_404` | C |
+| Breach history at a backtest decision: point in time and nothing before 2019-01-22 | was `closes[-504:]` of whatever the context held (bars before 2019-01-22 for decisions before 2021) | - | **B**: `stock_profile.stats_closes` (the last 504 closes from the statistics floor) in `score.candidate_score` (range_profile) and the signal's `breach_history_pct`; `test_ACCEPTANCE_a_decision_in_2020_reads_no_breach_history_before_2019_01_22` |
+| Scenario history: 30-day moves after FII selling streaks, India VIX spikes, RBI decisions, own results | `scenario_history`, `shortlist.scenario_triggers`, `fii_streak_starts`, `vix_spike_dates` | `test_scenario_history_...`, `test_fii_streaks_...`, `test_scenarios_use_the_stored_...` | C |
+| Point in time: only cases whose horizon had passed; the move starts at the close of the trigger day (the newest price known when the trigger is known) | `scenario_history` | `test_scenario_history_counts_only_completed_cases...` | C (the starting price is now documented in the function) |
+| Case counts; under 10 LOW SAMPLE; missing inputs "no data" naming the file; "history, not a forecast" | `scenario_history`, `DATA_NEEDED` | `test_ACCEPTANCE_scenarios_without_input_data_say_no_data...` | C |
+| Exclusions counted (spec 8.7) | trigger dates not counted were dropped silently; breach start days without a complete holding period were not reported | - | **B**: `excluded` by reason and `triggers` on every scenario, the count in its note and a column on the page; `not_yet_complete` on the breach history; `test_ACCEPTANCE_every_trigger_that_is_not_a_case_is_counted_by_reason`, `test_the_breach_history_counts_the_start_days...`, page test |
+| VIX spike (section 2) from usable data | the spike series read the whole stored VIX history, including the wrong-scale Breeze bars before 2019-01-22 (issue 30): the floor's first session looked like a +10,000% rise | - | **B**: VIX bars from the floor on only, for the scenario triggers and the backtest's open-position alert (`OptionEngine.market_at`); the first year after the floor has no known non-spike day, so no episode starts in it; `test_ACCEPTANCE_vix_spike_triggers_come_from_vix_bars_on_or_after_the_floor_only`, `test_the_backtest_engine_reads_vix_spikes_from_the_floor_on_too` |
+
+### M5: reversal detector and study
+| Requirement | Code | Tests | State |
+|---|---|---|---|
+| Washed-out list: 25% below the 52-week high, 63 sessions in a row below sma_long; shown as "watch", never a signal | `reversal.ReversalScanner`, `shortlist.reversal_watch`, page card | `test_ACCEPTANCE_washed_out_then_base_forming_then_reversal_confirmed`, `test_ACCEPTANCE_washed_out_stocks_are_shown_as_watch_never_as_a_signal` | C |
+| Base forming: 52-week low at least 15 sessions old, ATR(10) < 0.8 x ATR(20) | `ReversalScanner._scan` | as above, `test_each_confirmation_condition_is_needed` | C |
+| REVERSAL_CONFIRMED: close above the 20-day average and the last swing high (newest CONFIRMED 5-bar pivot high, usable only after its 5 later sessions), volume above its 20-day average, 10-day return ahead of NIFTY; point in time | `ReversalScanner` (pivots per unbroken stretch, `by_confirm`) | `test_each_confirmation_condition_is_needed`, `test_the_state_of_a_day_never_uses_later_bars` | C (pivots since M1) |
+| Lifts the falling-stock block only for put spreads below the base low | `stock_selling.assess` | `test_ACCEPTANCE_reversal_lifts_the_falling_stock_block_only_for_a_put_spread_below_the_base_low` | C |
+| Two research candidates (bull call spread; put credit spread sold below the base low) with stall zones (confirmed pivot lows of the 52-week window above the price) | `BullCallSpread`, `ReversalPutSpread`, `ReversalScanner.stall_zones` | `test_ACCEPTANCE_confirmation_gives_a_put_credit_spread_below_the_base_low`, `..._a_bull_call_spread_with_stall_zones` | C |
+| Nothing alerts until approved; the reversal alert goes to every open position once approved | `reversal.alerts_approved`, `alert_kinds` | `test_ACCEPTANCE_reversal_alert_goes_to_every_open_position_only_after_approval` | C |
+| Study: 10/20/40-session outcome of every confirmation, the share making a new low, LOW SAMPLE | `reversal_outcomes`, `run_reversal_reports` | `test_reversal_outcomes_by_hand_and_low_sample` | C |
+| Both candidates against their no-filter baselines (same structure, same stocks and period; the put candidate against baseline:PE, the bull call against the bull call schedule) | `run_reversal_reports` | `test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline` | C |
+| The outcome study against matching baselines | the outcomes had no baseline: a median move after a confirmation could not be told apart from what washed-out stocks did anyway | - | **B (next commit)** |
+
+### M4 result on stored data
+The strategy's portfolio runs on stored data (16 stocks 2025-2026 and 30 stocks 2026, both executions) give the same
+trades, statistics and skipped counts as before: every decision there is after 2021, so the floor on the breach history
+changes nothing, and the VIX change only touches 2019. Whole suite: **661 passing**.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2030,3 +2069,5 @@ No default changed; variants A-D unchanged. Whole suite: **655 passing**. Each n
 | 2026-11-15 | Backtest: forced exit at the first session inside the last 5 trading days (FORCED_EXPIRY_EXIT), after the time exit; the time exit can be switched off on the strategy object for tests, the forced exit cannot |
 | 2026-11-16 | Backtest: an accepted entry reserves its estimated maximum loss in the portfolio book until it fills (then the maximum loss recomputed at the fill) or is not made (released); every gate counts reservations |
 | 2026-11-16 | Delivery estimate: bought legs in the money are allocated once across the position, to the most exposed sold legs first (puts: highest strike; calls: lowest), deepest bought leg first; unallocated sold quantity is fully deliverable (user) |
+| 2026-11-16 | Scenario history: every trigger date that is not a case is counted by reason (before the floor, no session within 5 days, same starting session, horizon not passed); the breach history counts its incomplete start days |
+| 2026-11-16 | Statistics floor: the breach history a decision reads is the last 504 closes on or after 2019-01-22; India VIX spikes are computed from VIX bars on or after 2019-01-22 only (older Breeze VIX is wrong-scale) |

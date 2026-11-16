@@ -344,7 +344,9 @@ Research only, no alerts yet. Signal cards, Telegram alerts and the manual posit
 
 **See it:** `python -m app.main`, then http://127.0.0.1:8000/stock-option-selling : the daily shortlist, the reversal
 watch list ("watch only, never a signal"), campaigns, and a per-stock profile with scenario history ("history, not a
-forecast"). Backtest results are on http://127.0.0.1:8000/backtests.
+forecast"). Each scenario shows its cases and how many trigger dates were not counted (before 2019-01-22, no stored
+price near the date, the same starting day as another trigger, or its 30 days not over yet). Backtest results are on
+http://127.0.0.1:8000/backtests.
 
 **Settlement readiness (phase 9 M3).** The same page has a "Settlement readiness" card (and
 `GET /api/stock-option-selling/settlement`): ICICI's physical-settlement rules as you entered them in `config.yaml`

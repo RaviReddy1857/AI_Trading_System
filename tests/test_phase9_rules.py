@@ -161,9 +161,11 @@ def test_swings_state_and_breach_frequency_by_hand():
     assert state_now([100 + (i % 2) for i in range(31)], 20, 0.3) == ("RANGING", 0.0)
     assert state_now([100, 101], 20, 0.3) == (None, None)
     # a put strike 5% below: starts at 100 (95 level; lows ahead 96, 94 -> breached), 96 (91.2; 94, 97 -> no), 94 (89.3; no)
-    assert breach_frequency([100, 96, 94, 97, 99], 5.0, "PE", 2) == {"cases": 3, "breached": 1, "breached_pct": 33.3}
-    assert breach_frequency([100, 104, 106, 103, 99], 5.0, "CE", 2) == {"cases": 3, "breached": 1, "breached_pct": 33.3}
-    assert breach_frequency([100, 99], 5.0, "PE", 5) == {"cases": 0, "breached": 0, "breached_pct": None}
+    assert breach_frequency([100, 96, 94, 97, 99], 5.0, "PE", 2) == {"cases": 3, "breached": 1, "breached_pct": 33.3,
+                                                                     "not_yet_complete": 2}
+    assert breach_frequency([100, 104, 106, 103, 99], 5.0, "CE", 2) == {"cases": 3, "breached": 1, "breached_pct": 33.3,
+                                                                       "not_yet_complete": 2}
+    assert breach_frequency([100, 99], 5.0, "PE", 5) == {"cases": 0, "breached": 0, "breached_pct": None, "not_yet_complete": 2}
 
 
 def test_range_speed_profile_windows_floor_and_implied_move():
@@ -512,7 +514,12 @@ def test_ACCEPTANCE_report_shows_the_effect_of_each_rule_and_alert_against_the_b
     t0 = next(t for t in res["trades"] if t["variant"] == "baseline:PE")
     ec = t0["entry_conditions"]
     assert ec["state"] in ("TRENDING_UP", "TRENDING_DOWN", "RANGING") and ec["short_strike_distance_pct"] > 0
-    assert ec["breach_history_pct"] is not None and ec["fii_bias"] is None and ec["vix_spike"] in (True, False, None)
+    # the breach history reads no bar before the statistics floor (backtest.test_start, 2025-06-02 in this
+    # fixture): a signal with fewer than holding_sessions completed starts since then has none (unknown)
+    since = [d for d in base.session_dates() if cfg.backtest.test_start["1day"] <= d <= ist_date(t0["signal_time"])]
+    known = len(since) > cfg.stock_option_selling.profile.holding_sessions
+    assert (ec["breach_history_pct"] is not None) == known
+    assert ec["fii_bias"] is None and ec["vix_spike"] in (True, False, None)
     assert "expected_move_inr" in ec and "short_strike_beyond_expected_move" in ec
 
 

@@ -64,7 +64,7 @@ from .campaign import after_roll
 from .score import candidate_score
 from .sizing import ZERO_SIZE, size_spread
 from .payoff import InvalidStructure, OptionLeg, credit_spread
-from .stock_profile import (DOWNTREND_BLOCK, MARKET_UNKNOWN, MARKET_WEAK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, state_now, stock_loss_limit,
+from .stock_profile import (DOWNTREND_BLOCK, MARKET_UNKNOWN, MARKET_WEAK, expected_move, support_resistance, STOCK_LOSS_LIMIT, Snapshot, market_weak, alert_kinds, breach_frequency, stats_closes, state_now, stock_loss_limit,
                             trend_block)
 
 SIDE_BY_TREND = {"UP": "PE", "DOWN": "CE"}
@@ -435,7 +435,8 @@ class StockOptionSelling(CreditSpread):
             return stop()
         s = sig[0]
         distance = abs(ctx.spot - ks) / ctx.spot * 100
-        floor_closes = closes[-504:]                         # about two years, all on or before today
+        # about two years, all on or before today and none before the statistics floor (2019-01-22)
+        floor_closes = stats_closes(ctx.daily, (ctx.market or {}).get("stats_floor"))
         s.details.update({"side": right, "trend": direction, "support": support, "resistance": resistance,
                           "hedge_strikes_out": n_out,
                           "score": out.score,

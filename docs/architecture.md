@@ -317,6 +317,10 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   `support_resistance_lookback_days`. A roll needs the roll rules (new credit after costs, strike moved with the market,
   falling-stock block passed, fewer than `max_rolls`), is one lot, and never raises size. Reversal candidates are watch
   only: `REVERSAL_CONFIRMED` lifts the falling-stock block only for a put spread sold below the base low.
+- Scenario history and the range profile are point in time and never read a bar before 2019-01-22: a scenario case
+  needs its whole horizon passed and starts at the trigger day's close; trigger dates that are not cases are counted by
+  reason; the breach history a decision reads is the last 504 closes from the floor; India VIX spikes use VIX bars from
+  the floor only (older Breeze VIX is wrong-scale).
 - Option backtests use stored Breeze option prices if they exist, else they are labelled "payoff simulation"; each is
   compared with a no-filter baseline (the same structure every month or week, no entry rules). Phase 4 finding: Breeze
   has them (expired contracts too, back to at least 2017, with volume and OI; trades only, no bid/ask), so breeze-source

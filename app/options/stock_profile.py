@@ -207,7 +207,8 @@ def state_now(closes: Sequence[float], lookback: int, trending_efficiency: float
 def breach_frequency(closes: Sequence[float], distance_pct: float, right: str, holding: int) -> dict:
     """How often a strike `distance_pct` % away from the close (below it for a put, above it for a
     call) was passed by a later close within `holding` sessions. Every start day whose whole holding
-    period lies inside the data is one case."""
+    period lies inside the data is one case; the newest start days, whose holding period has not ended
+    by the last close given, are not cases and are counted in `not_yet_complete` (point in time)."""
     n = hit = 0
     for i in range(len(closes) - holding):
         level = closes[i] * (1 - distance_pct / 100.0) if right == "PE" else closes[i] * (1 + distance_pct / 100.0)
@@ -215,7 +216,16 @@ def breach_frequency(closes: Sequence[float], distance_pct: float, right: str, h
         n += 1
         if (min(ahead) < level) if right == "PE" else (max(ahead) > level):
             hit += 1
-    return {"cases": n, "breached": hit, "breached_pct": round(hit / n * 100, 1) if n else None}
+    return {"cases": n, "breached": hit, "breached_pct": round(hit / n * 100, 1) if n else None,
+            "not_yet_complete": min(holding, len(closes))}
+
+
+def stats_closes(daily: Sequence, stats_floor, sessions: int = 504) -> list[float]:
+    """The closes a decision's breach history reads: the last `sessions` (about two years) of the bars
+    given, none before the statistics floor (2019-01-22: older Breeze bars are unreliable). `stats_floor`:
+    a UTC datetime or None (no floor known)."""
+    bars = [b for b in daily if stats_floor is None or b.start >= stats_floor]
+    return [b.close for b in bars[-sessions:]]
 
 
 def _window(daily: Sequence, years: int, floor: date | None) -> list:
@@ -356,41 +366,60 @@ def scenario_history(daily: Sequence, triggers: dict[str, dict], cfg, floor: dat
     """For each scenario, the distribution of the stock's move over `scenario_horizon_days` calendar
     days after each past trigger date. `triggers`: name -> {"dates": [...] or None, "missing": what
     to fill in when dates is None}. The move runs from the close of the trigger day (the first
-    session on or after it) to the close of the first session on or after trigger + horizon. Only
-    cases whose whole horizon had passed by the last bar given are counted, so nothing looks ahead.
-    A scenario without input data reports "no data"; fewer than `scenario_min_cases` cases are
-    marked LOW SAMPLE."""
+    session on or after it: the newest price known when the trigger is known, since FII figures and
+    most results come out after the close) to the close of the first session on or after trigger +
+    horizon. Only cases whose whole horizon had passed by the last bar given are counted, so nothing
+    looks ahead. A scenario without input data reports "no data"; fewer than `scenario_min_cases`
+    cases are marked LOW SAMPLE.
+
+    Every trigger date that is not a case is counted in `excluded`, by reason: before the floor
+    (2019-01-22), no session within 5 days on or after it (outside the stored prices or a gap), the
+    same starting session as an earlier trigger (counted once), or its horizon not passed yet."""
     dates = [bar_date(b) for b in daily]
     closes = [b.close for b in daily]
     out = []
     for name, t in triggers.items():
         row = {"scenario": name, "label": HISTORY_LABEL, "horizon_days": cfg.scenario_horizon_days, "cases": 0,
-               "status": "no data", "note": ""}
+               "status": "no data", "note": "", "triggers": 0, "excluded": {}}
         if t.get("dates") is None:
             row["note"] = t.get("missing") or "input data not available"
             out.append(row)
             continue
         moves, seen = [], set()
-        for d in sorted(set(t["dates"])):
+        excluded: dict[str, int] = {}
+
+        def skip(why: str) -> None:
+            excluded[why] = excluded.get(why, 0) + 1
+
+        triggers = sorted(set(t["dates"]))
+        for d in triggers:
             if floor is not None and d < floor:
+                skip("before the data floor")
                 continue
             i = bisect.bisect_left(dates, d)
-            if i >= len(dates) or (dates[i] - d).days > 5 or i in seen:
+            if i >= len(dates) or (dates[i] - d).days > 5:
+                skip("no stored session within 5 days")
+                continue
+            if i in seen:
+                skip("same starting session as an earlier trigger")
                 continue
             j = bisect.bisect_left(dates, dates[i] + timedelta(days=cfg.scenario_horizon_days))
             if j >= len(dates):
-                continue                                   # the horizon has not passed yet: not a case
+                skip("horizon not passed yet")            # point in time: not a case
+                continue
             seen.add(i)
             moves.append((closes[j] / closes[i] - 1) * 100)
-        row["cases"] = len(moves)
+        row["cases"], row["triggers"], row["excluded"] = len(moves), len(triggers), excluded
+        left_out = (f"; {sum(excluded.values())} of {len(triggers)} trigger dates not counted ("
+                    + ", ".join(f"{k}: {v}" for k, v in excluded.items()) + ")") if excluded else ""
         if not moves:
-            row["note"] = "no past case inside the stored price history"
+            row["note"] = "no past case inside the stored price history" + left_out
             out.append(row)
             continue
         row.update({
             "status": "LOW SAMPLE" if len(moves) < cfg.scenario_min_cases else "ok",
             "note": (f"LOW SAMPLE: {len(moves)} cases (fewer than {cfg.scenario_min_cases})"
-                     if len(moves) < cfg.scenario_min_cases else f"{len(moves)} cases"),
+                     if len(moves) < cfg.scenario_min_cases else f"{len(moves)} cases") + left_out,
             "median_pct": round(statistics.median(moves), 2), "mean_pct": round(statistics.mean(moves), 2),
             "p10_pct": round(percentile(moves, 10), 2), "p25_pct": round(percentile(moves, 25), 2),
             "p75_pct": round(percentile(moves, 75), 2), "p90_pct": round(percentile(moves, 90), 2),

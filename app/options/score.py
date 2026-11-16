@@ -34,7 +34,7 @@ from collections.abc import Sequence
 
 from ..indicators import percentile
 from ..strategies.base import ok
-from .stock_profile import breach_frequency, expected_move
+from .stock_profile import breach_frequency, expected_move, stats_closes
 
 FACTORS = ("iv_rank", "iv_falling", "rel_strength", "strike_distance", "range_profile", "liquidity")
 
@@ -138,7 +138,6 @@ def candidate_score(ctx, right: str, short_strike: float, oi_lots: float | None,
     """The score of a candidate from what is known at its decision time (ctx.market carries the inputs
     the strategy cannot compute itself: the IV window, the index and sector returns)."""
     m = ctx.market or {}
-    closes = [b.close for b in ctx.daily]
     distance = abs(ctx.spot - short_strike) / ctx.spot * 100 if ok(ctx.spot) else None
     em = expected_move(ctx.spot, ctx.iv_reference_pct, dte_days)
     em_pct = None if em is None else em / ctx.spot * 100
@@ -153,7 +152,8 @@ def candidate_score(ctx, right: str, short_strike: float, oi_lots: float | None,
         "rel_strength": rel_strength_points(m.get("stock_ret_pct"), m.get("index_ret_pct"), m.get("peer_rets_pct") or (), right),
         "strike_distance": strike_distance_points(distance, em_pct, fall),
         "range_profile": range_profile_points(
-            breach_frequency(closes[-504:], distance, right, sos.profile.holding_sessions)["breached_pct"]
+            breach_frequency(stats_closes(ctx.daily, m.get("stats_floor")), distance, right,
+                             sos.profile.holding_sessions)["breached_pct"]
             if distance is not None else None),
         "liquidity": liquidity_points(oi_lots, sos.min_open_interest_lots),
     }

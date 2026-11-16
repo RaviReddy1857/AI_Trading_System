@@ -136,7 +136,10 @@ def scenario_triggers(settings: Settings, store: Store, source: str, sym: str, f
     events = store.events_between(floor, session)
     rbi = [e["date"] for e in events if e["type"] == "RBI_POLICY"]
     results = [e["date"] for e in events if e["type"] == "RESULTS" and e["symbol"] == sym]
-    vix = store.history_bars("bars_1d", settings.options.iv_reference_symbol, source)   # the percentile looks back a year
+    # the percentile looks back a year, but never before the floor: older Breeze VIX bars are wrong-scale
+    # (issue 30). In the first year after the floor the percentile part is unknown, so no day is a KNOWN
+    # non-spike day and no episode can start there (vix_spike_dates needs one before the first spike day)
+    vix = [b for b in store.history_bars("bars_1d", settings.options.iv_reference_symbol, source) if bar_date(b) >= floor]
     return {
         "after an FII selling streak": {
             "dates": fii_streak_starts(fii, settings.bias.streak_days, True, sessions) if fii else None,

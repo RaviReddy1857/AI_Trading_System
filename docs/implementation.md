@@ -651,8 +651,8 @@ their tests are built in M3. New settings in `stock_option_selling.settlement` (
 | P9.13 | Option-history download within a daily request budget, most liquid stocks first, resumable | Stops at the budget or on a Breeze error and carries on the next day (built) |
 | P9.14 | Falling-stock block and its mirror (DOWNTREND_BLOCK / UPTREND_BLOCK) | No put signal in a falling stock (test); effect shown against the baseline (built) |
 | P9.15 | Per-stock campaign limit (STOCK_LOSS_LIMIT), manual positions included | No signal during the cooling-off period (test) (built) |
-| P9.16 | Range and speed profile per stock, 2 and 5 years, with the option-implied move | Shown on the stock option page (built) |
-| P9.17 | Scenario history: FII streaks, VIX spikes, RBI decisions, own results; "history, not a forecast" | Cases counted, under 10 LOW SAMPLE, missing inputs "no data" (built; needs the user's data files) |
+| P9.16 | Range and speed profile per stock, 2 and 5 years, with the option-implied move | Shown on the stock option page (built; M4 2026-11-16: the breach history at every decision from 2019-01-22 only, incomplete start days counted) |
+| P9.17 | Scenario history: FII streaks, VIX spikes, RBI decisions, own results; "history, not a forecast" | Cases counted, under 10 LOW SAMPLE, missing inputs "no data" (built; needs the user's data files; M4 2026-11-16: trigger dates not counted are counted by reason; VIX spikes from post-2019 VIX only) |
 | P9.18 | Open-position alerts with exit and roll numbers | Each alert fires once in a test (built); Telegram and repeats in phase 6 |
 | P9.19 | Campaign tracking: rolls linked to the original trade, hedge cost, charges, best possible outcome | "recovery not possible from this position" shown when the best case is a loss (built) |
 | P9.20 | Roll rules (a)-(d), max_rolls 1; otherwise "exit" | Each rule refuses a roll in a test (built) |
