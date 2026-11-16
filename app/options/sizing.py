@@ -37,7 +37,7 @@ def size_spread(kind: str, legs_one: list[OptionLeg], lot_size: int, costs, budg
     lot. `max_lots`: a cap (a roll never grows the position)."""
     legs1, pay1 = _spread(kind, legs_one, 1, lot_size, costs)
     one = float(pay1.max_loss_inr)
-    if one <= 0 or one > budget_inr:
+    if not math.isfinite(budget_inr) or one <= 0 or one > budget_inr:     # a NaN budget is unknown: no size
         return 0, None, pay1
     n = max(1, math.floor(Decimal(str(budget_inr)) / Decimal(str(one))))
     if max_lots is not None:

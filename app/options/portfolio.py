@@ -60,9 +60,10 @@ def correlation(a: dict[date, float], b: dict[date, float], window: Sequence[dat
     ma, mb = sum(x for x, _ in xs) / n, sum(y for _, y in xs) / n
     va = sum((x - ma) ** 2 for x, _ in xs)
     vb = sum((y - mb) ** 2 for _, y in xs)
-    if va <= 0 or vb <= 0:
+    if not (math.isfinite(va) and math.isfinite(vb)) or va <= 0 or vb <= 0:
         return None
-    return sum((x - ma) * (y - mb) for x, y in xs) / math.sqrt(va * vb)
+    c = sum((x - ma) * (y - mb) for x, y in xs) / math.sqrt(va * vb)
+    return c if math.isfinite(c) else None          # never NaN: NaN >= threshold is False (a silent 'not linked')
 
 
 class Correlations:
@@ -120,6 +121,8 @@ def _components(symbols: Sequence[str], sectors: dict[str, str | None], corr: Ca
                 parent[find(a)] = find(b)
                 continue
             c = corr(a, b)
+            if c is not None and not (isinstance(c, (int, float)) and math.isfinite(c)):
+                c = None                                 # NaN or infinity: unknown, never 'not linked'
             if c is None:
                 problems.append(((a, b), f"{a}-{b}: correlation not measurable (too little common return history)"))
             elif c >= threshold:
@@ -179,6 +182,10 @@ def portfolio_check(symbol: str, risk_inr: float, holdings: Sequence[Holding] | 
     universe, the same groups as displayed); the holdings and the proposed stock are always included."""
     if holdings is None:
         return PORTFOLIO_UNKNOWN, "open positions are not known: exposure and losses cannot be checked", {}
+    bad = [h.symbol for h in list(holdings) + [Holding(symbol, risk_inr)]
+           if not (isinstance(h.risk_inr, (int, float)) and math.isfinite(h.risk_inr) and h.risk_inr >= 0)]
+    if bad:                                          # a negative or NaN risk would pass every sum below
+        return PORTFOLIO_UNKNOWN, f"risk not a non-negative finite number for {', '.join(bad)}", {}
     if not history_verified:
         return (PORTFOLIO_UNKNOWN, "closed and manual-trade history is not verified: losses and exposure cannot be "
                                    "checked", {})

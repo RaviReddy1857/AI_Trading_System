@@ -2116,6 +2116,56 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
   size factor 0.5, and the wider spread chosen with the full limit is refused (ZERO_SIZE)**; the Options page uses the
   limit it is given; the live service gives the full limit while equity is unknown.
 
+## Review fixes: Codex review of d7581e7..0f908c2 (2026-11-16)
+
+Three findings, all confirmed and fixed. New tests in `tests/test_review_phase5.py` (45): run against the code before
+the fixes (app/ stashed), 39 fail for the reason named in each test and 6 already passed - zero risk/commitment is
+valid, negative/zero/NaN/infinite capital was already blocked (CAPITAL_UNKNOWN), and a sold-leg failure already ended
+the evaluation; they stay as regression guards.
+
+**1 (HIGH) Negative inputs.** `position_problems` now refuses a negative `risk_inr` or `committed_inr` (a P&L may be
+negative), so it is never summed: the review case (Rs 3,00,000 and -Rs 2,00,000 committed, a new Rs 20,000 position)
+is NO_TRADE (PORTFOLIO_UNKNOWN, "committed_inr is negative"). Also: `capital_fit` raises on a non-positive or
+non-finite capital and on a negative or non-finite commitment; `cash_quantity` on non-finite or non-positive inputs;
+every option leg needs a whole number of lots of at least 1 (DATA_MISSING); the engine turns any ValueError from
+sizing into NO_TRADE (DATA_MISSING), never a size.
+
+**2 (HIGH) NaN and infinity.** NaN > x and NaN < x are both false, so a NaN passed every "above the limit" check.
+Sweep of app/risk and app/options; each place found is fixed and tested:
+| Place | Before | Now |
+|---|---|---|
+| `risk/limits.correlated_group` (phase 5 correlation) | NaN or infinite correlation = not linked | unknown: CORRELATION_UNKNOWN |
+| `options/portfolio._components` and `correlation()` (phase 9 groups) | NaN = not linked; Pearson could return NaN | unknown: CORRELATION_UNKNOWN; Pearson returns None, never NaN |
+| `options/portfolio.portfolio_check` (phase 9 limits) | NaN or negative risk passed the total and group sums | PORTFOLIO_UNKNOWN |
+| `options/base.liquidity_problem` | NaN open interest passed the minimum | "open interest unknown" (ILLIQUID) |
+| `credit_spread`, `iron_condor`, `long_option`, `stock_selling` IV-rank rules | NaN IV rank passed min / max IV rank | IV_RANK_UNKNOWN |
+| `credit_spread.finish` and the width search: margin entry | NaN, infinite, zero or negative margin counted as known | MARGIN_UNKNOWN |
+| width search budget (`option_risk_budget_inr`) | NaN raised an error | NO_TRADE (ZERO_SIZE, limit not known) |
+| `options/sizing.size_spread` (phase 9 sizing) | NaN budget raised an error | 0 lots (ZERO_SIZE) |
+| `risk/sizing.lots_within`, `option_lots`, `cash_quantity` | NaN raised a decimal or float error | ValueError -> NO_TRADE (DATA_MISSING) |
+| `risk/limits.loss_stops` | NaN capital raised an error | PORTFOLIO_UNKNOWN |
+| `models.RiskDecision` | an APPROVED decision with NaN risk passed its own check | refused (ValueError) |
+Checked and already safe: every stored price, bar and chain value is parsed with `history._num` (NaN and infinity
+are missing) and option quotes go through `_pos`; IV and delta (`greeks._ok`), IV rank (`greeks.iv_rank`), the
+drawdown (`drawdown_state`), the kill switch and the account capital (`known`) already rejected non-finite values.
+
+**3 (MEDIUM) Width search.** `credit_spread.choose_width` replaces `fit_width`. The sold strikes are chosen once (a
+failure there ends the evaluation: it is the same at every width). The configured width is tried first, then each
+listed narrower width down to 100 points; a failure of one width - hedge missing, illiquid or unpriced, no credit,
+credit too small, one lot above the option risk limit, no margin entry for that width - moves on to the next. The
+first width that passes every rule is used and the card lists the wider widths and why each failed; if none passes,
+one NO_TRADE reason (the first width's code) lists every width tried with its reason. Tests: the review's zero-OI
+250-point hedge (200 points used), margin only for 100 points (250, 200, 150 fail on margin, 100 used with its own
+margin), no width passing (every width and reason listed, one record), a sold-leg failure still ends it, the condor
+moves past an illiquid call hedge.
+
+**Behaviour change to know (yours to reverse):** "credit too small" is a failure of one width too, so a spread whose
+configured hedge pays too little is now tried narrower. One Phase 4 test asserted the old result (a far sold strike:
+CREDIT_TOO_SMALL at 200 points); it now asserts the new one (100 points, credit at least 8% of the width, "200:
+CREDIT_TOO_SMALL" on the card) and keeps a case with no narrower strike, which is still CREDIT_TOO_SMALL. If you want
+the credit rule to end the search instead, it is one line in `_candidate_problem`. Strategy versions do not change
+(no setting changed); stored Phase 4 option backtests stay as before (issue 96, rerun later).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2208,6 +2258,9 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
 | 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Decided 2026-11-16 (user): two pools - stock options, and cash plus index. Each pool's daily stop, monthly pause and drawdown (halve and pause) count only that pool's P&L and equity, as % of that pool's capital. To build in phase 6 (the journal records positions and P&L per pool); until then `decide` receives one account state |
 | 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun later (user, 2026-11-16) |
 | 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
+| 98 | review | Negative commitment or risk was summed into the pool and limits | Fixed 2026-11-16: refused (PORTFOLIO_UNKNOWN) |
+| 99 | review | NaN or infinite correlation, open interest, IV rank, margin, risk or budget passed limit checks | Fixed 2026-11-16: unknown everywhere (table in "Review fixes: Codex review of d7581e7..0f908c2") |
+| 100 | review | Width search ended on a failure of one width (illiquid hedge, margin for that width) | Fixed 2026-11-16: moves on to the next narrower width; credit too small moves on too (user to confirm) |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
 | 27 | 3 | holidays.csv has no rows: sessions after a holiday get an UNKNOWN regime | Waiting for user |
@@ -2327,4 +2380,5 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
 | 2026-11-16 | Stock option spreads: every rupee figure of the risk decision is a % of `stock_option_selling.backtest.capital_inr`, never `account.capital_inr` |
 | 2026-11-16 | User: the daily stop, monthly pause and drawdown rules run per pool (stock options; cash and index), each on its own pool's P&L and capital - for phase 6 (issue 95) |
 | 2026-11-16 | User: the index spread width search fits the EFFECTIVE option risk limit, after drawdown halving (built) |
+| 2026-11-16 | Review fixes: negative risk or commitment is invalid input (never summed); NaN or infinity is unknown in every limit check; the width search tries every width down to 100 points and uses the first that passes every rule |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

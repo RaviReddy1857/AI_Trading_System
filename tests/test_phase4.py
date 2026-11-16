@@ -433,7 +433,15 @@ def test_bear_call_spread_in_a_down_trend_and_the_oi_rule_moves_the_strike():
     sell, buy = sig.legs
     assert (sell.right, buy.right) == ("CE", "CE") and buy.strike > sell.strike > 24500
     far_wall = {EXP_M: bs_chain(put_wall=23000)}
-    assert cs.evaluate(make_ctx(chains=far_wall)) == [] and codes(cs) == ["CREDIT_TOO_SMALL"]   # that far out pays too little
+    # that far out the 200-point hedge pays too little; since the review of 2026-11-16 a failure of one width moves
+    # on to the next narrower width (down to 100 points), where the credit rule passes - checked on the result
+    narrowed = cs.evaluate(make_ctx(chains=far_wall))[0]
+    w = narrowed.legs[0].strike - narrowed.legs[1].strike
+    assert w == 100 and narrowed.entry >= w * 0.08
+    assert any("200: CREDIT_TOO_SMALL" in x for x in narrowed.why_now)
+    # with no narrower listed width the credit rule still ends it (CREDIT_TOO_SMALL, one reason)
+    no_narrower = {EXP_M: [q for q in bs_chain(put_wall=23000) if not (q.right == "PE" and q.strike == 22800)]}
+    assert cs.evaluate(make_ctx(chains=no_narrower)) == [] and codes(cs) == ["CREDIT_TOO_SMALL"]
     cs = strat("credit_spread", settings(strategies={"credit_spread": {"min_credit_pct_of_width": 0}}))
     sig2 = cs.evaluate(make_ctx(chains=far_wall))[0]
     assert sig2.legs[0].strike == 22900.0                        # first strike beyond the highest-OI put at 23000

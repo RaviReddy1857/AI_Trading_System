@@ -75,6 +75,11 @@ def position_problems(positions) -> list[str]:
         for name in ("risk_inr", "committed_inr", "open_pnl_today_inr", "open_pnl_month_inr"):
             if not known(getattr(p, name)):
                 out.append(f"position {p.position_id} ({p.symbol}): {name} not known")
+        for name in ("risk_inr", "committed_inr"):           # a P&L may be negative; risk and capital in use may not
+            v = getattr(p, name)
+            if known(v) and v < 0:
+                out.append(f"position {p.position_id} ({p.symbol}): {name} is negative ({v:,.2f}): invalid, never "
+                           f"netted against other positions")
     return out
 
 
@@ -86,7 +91,13 @@ def committed_inr(positions) -> Decimal:
 def capital_fit(capital: float, committed, new_inr, uncommitted_pct: float) -> tuple[str, float, dict]:
     """(label, shortfall in rupees, facts). FITS: committed + new within capital x (1 - uncommitted_pct);
     TIGHT: within capital but not within that; NEEDS_MORE_CAPITAL: above capital (shortfall = the excess).
-    Exactly at a boundary is inside it."""
+    Exactly at a boundary is inside it. Raises ValueError for a capital that is not a positive finite number
+    or a commitment that is negative or not finite (never summed)."""
+    if not (known(capital) and capital > 0):
+        raise ValueError(f"capital {capital!r} is not a positive finite number")
+    for name, v in (("committed", committed), ("new_inr", new_inr)):
+        if not (known(float(v)) and v >= 0):
+            raise ValueError(f"{name} {v!r} is negative or not finite")
     cap = paise(capital)
     after = paise(committed) + paise(new_inr)
     usable = paise(cap * (Decimal(100) - Decimal(str(uncommitted_pct))) / Decimal(100))

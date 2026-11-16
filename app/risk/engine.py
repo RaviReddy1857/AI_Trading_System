@@ -150,6 +150,8 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
                 _option(signal, settings, costs, cap, factor, positions, problems, corr, sectors, no, out, facts)
         except MissingCostRates as e:
             no(DATA_MISSING, f"cost rates missing: {e}")
+        except ValueError as e:                  # an invalid number (negative, NaN, infinity) never becomes a size
+            no(DATA_MISSING, f"invalid input: {e}")
 
     codes = tuple(dict.fromkeys(c for c, _ in block))
     reasons = tuple(f"{c}: {t}" for c, t in block)
@@ -159,7 +161,7 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
     # last guard: whatever happened above, an approval never carries more risk than the budget
     if not codes:
         limit = _budget(signal, settings, cap, factor)
-        if out["risk"] is None or Decimal(str(out["risk"])) > limit:
+        if out["risk"] is None or not Decimal(str(out["risk"])).is_finite() or Decimal(str(out["risk"])) > limit:
             codes, reasons = ("RISK_BUDGET_USED",), (f"RISK_BUDGET_USED: risk {out['risk']} above Rs {limit}",)
     status = NO_TRADE if codes else APPROVED
     risk = out["risk"]
@@ -251,6 +253,9 @@ def _legs_known(signal, no) -> bool:
         return False
     if not all(getattr(x, "lot_size", None) and x.lot_size > 0 for x in legs):
         no(LOT_SIZE_UNKNOWN, "lot size not known for every leg")
+        return False
+    if not all(isinstance(x.lots, int) and not isinstance(x.lots, bool) and x.lots >= 1 for x in legs):
+        no(DATA_MISSING, "every leg needs a whole number of lots, at least 1")
         return False
     if unhedged_short_legs(legs):
         no(UNHEDGED_SHORT, "a sold option has no bought option of the same right and expiry")

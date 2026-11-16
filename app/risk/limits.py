@@ -58,7 +58,9 @@ def correlated_group(symbol: str, positions, corr: Callable[[str, str], float | 
 
     def strict(a: str, b: str):
         c = corr(a, b)
-        return c if c is None else (c if c > threshold else -1.0)
+        if not known(c):                         # None, NaN and infinity are unknown (NaN > 0.8 is False)
+            return None
+        return c if c > threshold else -1.0
 
     groups, problems = _components(syms, own, strict, threshold)
     comp = {s: k for k, g in enumerate(groups) for s in g}
@@ -88,6 +90,8 @@ def loss_stops(capital: float, realised_today, realised_month, positions, daily_
     """([(code, why)], facts) on realised plus open P&L. DAILY_STOP when today's loss reaches
     daily_loss_stop_pct of capital; MONTHLY_PAUSE when the month's loss reaches monthly_loss_pause_pct.
     Any part not known -> PORTFOLIO_UNKNOWN (never treated as zero)."""
+    if not (known(capital) and capital > 0):
+        return [(PORTFOLIO_UNKNOWN, f"capital {capital!r} not known: the loss stops cannot be computed")], {}
     if positions is None or not known(realised_today) or not known(realised_month) or not all(
             known(p.open_pnl_today_inr) and known(p.open_pnl_month_inr) for p in positions):
         return [(PORTFOLIO_UNKNOWN, "realised or open P&L not known: the loss stops cannot be checked")], {}

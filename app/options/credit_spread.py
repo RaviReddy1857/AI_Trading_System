@@ -21,12 +21,13 @@ Signal prices are per share of the SPREAD: entry = net credit, target and stop =
 """
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 from ..config import CreditSpreadParams
 from ..strategies.base import fmt
-from .base import (OptionContext, OptionStrategy, leg_view, liquidity_problem, pick_expiry, pick_hedge_strike,
-                   pick_short_strike, round_trip_costs)
+from .base import (OptionContext, OptionStrategy, _pos, finite, leg_view, liquidity_problem, pick_expiry,
+                   pick_hedge_strike, pick_short_strike, round_trip_costs)
 from .greeks import days_to_expiry
 from .margin import MARGIN_UNKNOWN
 from .payoff import InvalidStructure, OptionLeg, credit_spread, iron_condor
@@ -92,50 +93,100 @@ def one_lot_loss(ctx: OptionContext, exp, sides) -> Decimal | None:
         return None
 
 
-def fit_width(strategy: OptionStrategy, ctx: OptionContext, exp, p: CreditSpreadParams, first: list):
-    """The sides to trade, or None after recording ZERO_SIZE. `first`: the sides at the configured width.
-    Unchanged when no budget is given or one lot already fits it. Otherwise every listed width narrower than
-    the configured one and at least `min_hedge_width_points` is tried, widest first (both sides of a condor at
-    the same width); the first that is priced, liquid, gives a credit of at least `min_credit_pct_of_width`
-    and whose one lot's cost-inclusive max loss fits the budget is used. The budget is never raised."""
+def _margin_per_lot(ctx: OptionContext, structure: str, width: float) -> float | None:
+    """The user's margin entry for one lot, or None when it is not a positive finite number."""
+    m = ctx.margin(structure, width) if ctx.margin is not None else None
+    return m if _pos(m) else None
+
+
+def _candidate_problem(strategy: OptionStrategy, ctx: OptionContext, exp, p: CreditSpreadParams, sides,
+                       budget) -> tuple[str, str] | None:
+    """Why the spread (or condor) at one width cannot be traded, or None. Every rule that depends on the width."""
+    credit, width = sum(s[2] for s in sides), max(s[3] for s in sides)
+    if not ctx.no_filter and credit < width * p.min_credit_pct_of_width / 100:
+        return "CREDIT_TOO_SMALL", f"credit {credit:.2f} under {p.min_credit_pct_of_width:g}% of the width"
+    loss = one_lot_loss(ctx, exp, sides)
+    if loss is None:
+        return "NO_CREDIT", "not a valid spread at these prices"
+    if budget is not None and loss > Decimal(str(budget)):
+        return "ZERO_SIZE", f"one lot Rs {fmt(float(loss))} above the option risk limit Rs {fmt(budget)}"
+    if ctx.require_margin and _margin_per_lot(ctx, strategy.structure, width) is None:
+        return MARGIN_UNKNOWN, f"no margin entry for {strategy.structure} width {width:g}"
+    return None
+
+
+def choose_width(strategy: OptionStrategy, ctx: OptionContext, exp, p: CreditSpreadParams, rights: list[str]):
+    """The sides to trade (one for a credit spread, put then call for a condor), or None after recording ONE
+    NO_TRADE reason.
+
+    The sold strikes are chosen first; a failure there (no strike, sold option illiquid or unpriced) is the same
+    at every width and ends the evaluation. Then the widths are tried, the configured one first (each side's
+    hedge about `hedge_width_pct` of spot out), then every listed narrower width of at least
+    `min_hedge_width_points`, widest first (a condor at the same width on both sides). A failure that belongs to
+    one width - hedge missing, illiquid or unpriced, no credit, credit too small, one lot above the option risk
+    limit (`option_risk_budget_inr`), no margin entry for that width - moves on to the next narrower width. The
+    first width that passes every rule is used; the card says which wider widths failed and why. If none passes:
+    NO_TRADE with the first width's code and every width tried with its reason. The limit is never raised."""
     budget = ctx.option_risk_budget_inr
-    loss = one_lot_loss(ctx, exp, first)
-    if budget is None or (loss is not None and loss <= Decimal(str(budget))):
-        return first
-    configured = max(s[3] for s in first)
+    if budget is not None and not (isinstance(budget, (int, float)) and math.isfinite(budget)):
+        strategy.no("ZERO_SIZE", f"option risk limit {budget!r} not known: no width can be checked")
+        return None
+    shorts = {}
+    for r in rights:
+        got = pick_short_strike(ctx, exp.expiry, r, p.max_short_delta)
+        if got[0] is None:
+            strategy.no("NO_STRIKE", got[1])
+            return None
+        ks, qs = got[0], got[1]
+        lp = liquidity_problem(ctx, qs, exp.lot_size)
+        if lp:
+            strategy.no("ILLIQUID", lp)
+            return None
+        if qs.sell_price(ctx.historical) is None:
+            strategy.no("DATA_MISSING", f"no usable price for {ks:g} {r}")
+            return None
+        shorts[r] = ks
+    first = {}
+    for r in rights:
+        h = pick_hedge_strike(ctx, exp.expiry, r, shorts[r], p.hedge_width_pct)
+        first[r] = h[0] if h else None
+    known_first = [abs(shorts[r] - first[r]) for r in rights if first[r] is not None]
+    configured = max(known_first) if known_first else ctx.spot * p.hedge_width_pct / 100
     widths = set()
-    for s in first:
-        sold = s[0][0]
-        further = [abs(k - sold.strike) for k in ctx.quotes.strikes(exp.expiry)
-                   if (k < sold.strike if sold.right == "PE" else k > sold.strike)]
-        widths |= {w for w in further if p.min_hedge_width_points <= w < configured}
+    for r in rights:
+        ks = shorts[r]
+        widths |= {abs(k - ks) for k in ctx.quotes.strikes(exp.expiry)
+                   if (k < ks if r == "PE" else k > ks) and p.min_hedge_width_points <= abs(k - ks) < configured}
+    candidates = [(configured, first)] + [
+        (w, {r: shorts[r] - w if r == "PE" else shorts[r] + w for r in rights}) for w in sorted(widths, reverse=True)]
     tried = []
-    for w in sorted(widths, reverse=True):
-        sides = []
-        for s in first:
-            sold = s[0][0]
-            k = sold.strike - w if sold.right == "PE" else sold.strike + w
-            side = build_side(strategy, ctx, exp, sold.right, p, hedge_strike=k,
-                              no=lambda code, text="", w=w: tried.append(f"{w:g}: {code}"))
+    for w, hedges in candidates:
+        failed, sides = None, []
+        for r in rights:
+            if hedges[r] is None:
+                failed = ("UNHEDGED_SHORT", f"no usable hedge strike beyond {shorts[r]:g}{r}: a sold option is never "
+                                            f"left alone")
+                break
+            rec = []
+            side = build_side(strategy, ctx, exp, r, p, hedge_strike=hedges[r],
+                              no=lambda code, text="": rec.append((code, text)))
             if side is None:
+                failed = rec[0] if rec else ("DATA_MISSING", "side not built")
                 break
             sides.append(side)
-        else:
-            credit = sum(s[2] for s in sides)
-            if not ctx.no_filter and credit < w * p.min_credit_pct_of_width / 100:
-                tried.append(f"{w:g}: credit {credit:.2f} under {p.min_credit_pct_of_width:g}% of the width")
-                continue
-            got = one_lot_loss(ctx, exp, sides)
-            if got is not None and got <= Decimal(str(budget)):
-                note = (f"hedge width narrowed from {configured:g} to {w:g} points: one lot at {configured:g} would risk "
-                        f"Rs {fmt(float(loss)) if loss is not None else 'n/a'}, above the option risk budget Rs "
-                        f"{fmt(budget)}; one lot at {w:g} risks Rs {fmt(float(got))}")
-                return [(legs, views, cr, wd, notes + [note]) for legs, views, cr, wd, notes in sides]
-            tried.append(f"{w:g}: one lot Rs {fmt(float(got)) if got is not None else 'n/a'}")
-    strategy.no("ZERO_SIZE", f"one lot at the {configured:g}-point width risks Rs "
-                             f"{fmt(float(loss)) if loss is not None else 'n/a'}, above the option risk budget Rs "
-                             f"{fmt(budget)}; no width from {configured:g} down to {p.min_hedge_width_points:g} points "
-                             f"fits one lot" + (f" (tried {'; '.join(tried[:6])})" if tried else " (no narrower listed strike)"))
+        if failed is None:
+            failed = _candidate_problem(strategy, ctx, exp, p, sides, budget)
+        if failed is None:
+            if not tried:
+                return sides
+            loss = one_lot_loss(ctx, exp, sides)
+            note = (f"hedge width narrowed from {configured:g} to {w:g} points (one lot Rs {fmt(float(loss))}"
+                    + (f", option risk limit Rs {fmt(budget)}" if budget is not None else "") + "); wider widths: "
+                    + "; ".join(f"{tw:g}: {c}: {t}" for tw, (c, t) in tried))
+            return [(legs, views, cr, wd, notes + [note]) for legs, views, cr, wd, notes in sides]
+        tried.append((w, failed))
+    strategy.no(tried[0][1][0], f"no width from {configured:g} down to {p.min_hedge_width_points:g} points passes every "
+                                f"rule: " + "; ".join(f"{tw:g}: {c}: {t}" for tw, (c, t) in tried))
     return None
 
 
@@ -160,7 +211,7 @@ class CreditSpread(OptionStrategy):
         if ctx.regime not in self.allowed_regimes:
             self.no("OUTSIDE_REGIME", f"regime {ctx.regime} not in {sorted(self.allowed_regimes)}")
             return False
-        if ctx.iv_rank is None:
+        if not finite(ctx.iv_rank):                       # NaN < min_iv_rank is False: unknown, never a pass
             self.no("IV_RANK_UNKNOWN", "not enough implied-volatility history")
             return False
         if ctx.iv_rank < p.min_iv_rank:
@@ -186,7 +237,7 @@ class CreditSpread(OptionStrategy):
             return self.no("CREDIT_TOO_SMALL", f"credit {credit:.2f} is under {p.min_credit_pct_of_width:g}% of the "
                                                f"{width:g}-point width")
         lots = legs[0].lots
-        per_lot = ctx.margin(self.structure, width) if ctx.margin is not None else None
+        per_lot = _margin_per_lot(ctx, self.structure, width)      # NaN, infinity, zero or negative = unknown
         margin = None if per_lot is None else per_lot * lots
         if margin is None and ctx.require_margin:
             return self.no(MARGIN_UNKNOWN, f"enter the margin for one lot of {ctx.underlying} {self.structure} "
@@ -227,10 +278,7 @@ class CreditSpread(OptionStrategy):
         exp = self.pick(ctx)
         if exp is None:
             return []
-        side = build_side(self, ctx, exp, right, p)
-        if side is None:
-            return []
-        sides = fit_width(self, ctx, exp, p, [side])
+        sides = choose_width(self, ctx, exp, p, [right])
         if sides is None:
             return []
         legs, views, credit, width, notes = sides[0]

@@ -19,7 +19,7 @@ from datetime import timedelta
 
 from ..config import LongOptionParams
 from ..strategies.base import fmt
-from .base import OptionContext, OptionStrategy, leg_view, liquidity_problem, metrics, pick_expiry, round_trip_costs
+from .base import OptionContext, OptionStrategy, finite, leg_view, liquidity_problem, metrics, pick_expiry, round_trip_costs
 from .greeks import days_to_expiry
 from .payoff import OptionLeg, long_option
 
@@ -48,7 +48,7 @@ class LongOption(OptionStrategy):
                 return self.no("NO_TRIGGER", f"signal {t.strategy_id} on {t.symbol} is not a configured trigger")
             if ctx.regime == "EVENT" or ctx.regime == "UNKNOWN":
                 return self.no("OUTSIDE_REGIME", f"regime {ctx.regime}")
-            if ctx.iv_rank is None:
+            if not finite(ctx.iv_rank):                   # NaN > max_iv_rank is False: unknown, never a pass
                 return self.no("IV_RANK_UNKNOWN", "not enough implied-volatility history")
             if ctx.iv_rank > p.max_iv_rank:
                 return self.no("IV_RANK_TOO_HIGH", f"IV rank {ctx.iv_rank:.0f} above {p.max_iv_rank:g}: options are expensive")

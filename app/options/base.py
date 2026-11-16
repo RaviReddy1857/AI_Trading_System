@@ -70,6 +70,11 @@ def _pos(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
 
 
+def finite(x) -> bool:
+    """A real, finite number: None, NaN and infinity are unknown (NaN compares False both ways)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
 @dataclass(frozen=True)
 class ExpiryInfo:
     expiry: date
@@ -330,8 +335,11 @@ def liquidity_problem(ctx: OptionContext, q: OptionQuote, lot_size: int) -> str 
             return f"{q.strike:g}{q.right}: no bid/ask"
         if q.spread_pct > ctx.max_spread_pct:
             return f"{q.strike:g}{q.right}: bid-ask width {q.spread_pct:.1f}% of mid, above {ctx.max_spread_pct:g}%"
-    if ctx.min_oi_lots and q.oi is not None and q.oi < ctx.min_oi_lots * lot_size:
-        return f"{q.strike:g}{q.right}: open interest {q.oi / lot_size:,.0f} lots, below {ctx.min_oi_lots}"
+    oi = q.oi if finite(q.oi) else None          # NaN or infinite open interest is unknown, never a pass
+    if ctx.min_oi_lots and oi is not None and oi < ctx.min_oi_lots * lot_size:
+        return f"{q.strike:g}{q.right}: open interest {oi / lot_size:,.0f} lots, below {ctx.min_oi_lots}"
+    if ctx.min_oi_lots and q.oi is not None and oi is None:
+        return f"{q.strike:g}{q.right}: open interest unknown ({q.oi!r})"
     if ctx.min_oi_lots and q.oi is None and not ctx.historical:
         return f"{q.strike:g}{q.right}: open interest unknown"
     return None

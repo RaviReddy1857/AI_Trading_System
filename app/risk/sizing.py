@@ -44,6 +44,12 @@ def cash_quantity(capital: float, risk_pct: float, cap_pct: float, entry: float,
     0 = ZERO_SIZE."""
     if not (0 < size_factor <= 1):
         raise ValueError("size_factor must be in (0, 1]: sizing may only be reduced")
+    import math as _m
+    vals = {"capital": capital, "risk_pct": risk_pct, "cap_pct": cap_pct, "entry": entry, "stop": stop,
+            "held_risk_inr": held_risk_inr}
+    bad = [k for k, v in vals.items() if not (isinstance(v, (int, float)) and _m.isfinite(v))]
+    if bad or capital <= 0 or risk_pct <= 0 or cap_pct <= 0 or entry <= 0 or stop < 0:
+        raise ValueError(f"sizing inputs not positive finite numbers: {bad or vals}")
     base = capital * size_factor
     by_formula = position_size(base, risk_pct, cap_pct, entry, stop)
     if held_risk_inr < 0:
@@ -74,6 +80,8 @@ def lots_within(budget_inr: float, loss_for: Callable[[int], Decimal], max_lots:
     recomputed n-lot loss (charges for n lots) is above the budget. 0 when one lot does not fit."""
     one = _d(loss_for(1))
     budget = _d(budget_inr)
+    if not (one.is_finite() and budget.is_finite()):
+        raise ValueError(f"budget {budget_inr!r} or one lot's loss {one} is not a finite number")
     if one <= 0 or one > budget:
         return 0
     n = int(math.floor(budget / one))
@@ -107,6 +115,8 @@ def option_lots(legs, costs, budget_inr: float, max_lots: int | None = None) -> 
     """(lots, payoff for that many lots - or for one lot when 0 -, structure). `legs`: the signal's
     option legs (any lot count; sized again from one lot). Raises ValueError for a structure it does not
     know (the engine turns that into NO_TRADE)."""
+    if not _d(budget_inr).is_finite():
+        raise ValueError(f"budget {budget_inr!r} is not a finite number")
     legs1 = _scaled([x for x in legs], 1)
     if not legs1 or len({x.lot_size for x in legs1}) != 1 or not all(x.lot_size and x.lot_size > 0 for x in legs1):
         raise ValueError("lot size unknown or different between legs")

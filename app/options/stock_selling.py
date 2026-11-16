@@ -55,7 +55,7 @@ from ..indicators import atr, last, sma
 from ..models import Signal
 from ..quality import IST
 from ..strategies.base import fmt, ok
-from .base import (ExpiryInfo, OptionContext, OptionQuote, add_costs, leg_view, liquidity_problem, metrics,
+from .base import (ExpiryInfo, OptionContext, OptionQuote, add_costs, finite, leg_view, liquidity_problem, metrics,
                    pick_short_strike,
                    round_trip_costs)
 from .credit_spread import SIDE_NAME, CreditSpread
@@ -211,7 +211,7 @@ class StockOptionSelling(CreditSpread):
         if direction is None:
             self.no("NO_TREND", text)
             return False
-        if ctx.iv_rank is None:
+        if not finite(ctx.iv_rank):                       # NaN < min_iv_rank is False: unknown, never a pass
             self.no("IV_RANK_UNKNOWN", "not enough implied-volatility history for this stock")
             return False
         if ctx.iv_rank < p.min_iv_rank:

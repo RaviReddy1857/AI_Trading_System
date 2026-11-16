@@ -224,6 +224,12 @@ class RiskDecision:
     def __post_init__(self):
         if self.status not in (APPROVED, NO_TRADE):
             raise ValueError(f"status {self.status!r} must be APPROVED or NO_TRADE")
+        import math
+        for name in ("risk_inr", "risk_pct", "est_profit_inr", "est_loss_inr", "costs_inr", "margin_inr",
+                     "size_factor"):
+            v = getattr(self, name)
+            if v is not None and not (isinstance(v, (int, float)) and math.isfinite(v)):
+                raise ValueError(f"{name} {v!r} is not a finite number")
         if self.status == NO_TRADE and not self.reason_codes:
             raise ValueError("a NO_TRADE decision needs at least one reason code")
         if self.status == APPROVED and (self.reason_codes or not self.risk_inr or self.risk_inr <= 0
