@@ -2455,10 +2455,28 @@ how urllib reports a timeout while Telegram's reply is being read is taken from 
 while sending the request are wrapped in URLError and treated as not delivered; a timeout while reading the reply is
 uncertain). The threads of fix 9 are tested with a blocked step on the in-memory app, not over a market day.
 
-Tests: whole suite 1,100 of 1,102 passing; two tests fail only on this machine's local state and pass on the committed files:
-`test_phase6_telegram.py::test_alerts_are_off_until_switched_on` (asserts the shipped config.yaml has Telegram off; the
-local config.yaml has it on, not committed) and `test_review6_fixes.py::test_ACCEPTANCE_future_dated_rows_are_ignored_...`
-(reads a download-progress record dated after today in the local data).
+Tests: whole suite 1,100 of 1,102 passing at that commit; the two failures came from this machine's local state and are
+resolved in the next section (local config overrides; the download-progress file path).
+
+## Local config overrides and the "future-dated" download record (2026-11-16)
+
+**config.local.yaml.** `app.config.load_settings()` merges an optional `config.local.yaml` (in `.gitignore`, never
+committed) over `config.yaml`: sections key by key, other values replaced whole. A key that config.yaml does not have is
+refused (a typo would otherwise be silently ignored). The test suite reads only config.yaml: `tests/conftest.py` sets
+`TRADING_NO_LOCAL_CONFIG=1`, and an explicit `load_settings(path)` never merges. The local
+`alerts.telegram_enabled: true` moved there; config.yaml is back to the committed `false`.
+
+**The download-progress record "dated after today".** It was the `updated` field of this machine's real
+`data/option_download_status.json`, `2026-11-16T10:19:50+00:00` (15:49 IST, written by the download run of 16 November):
+a correct past timestamp, not a time-zone bug and not a planned future date. The review 6 acceptance test runs on a
+fixed clock (2026-11-15 08:00 UTC) and sends every data path to a temporary folder except this one, which
+`app/data_status.py` read from a hard-wired `data/...` path - so the test read the real file, written a day after its
+clock. Fix: the path is a validated setting, `data_status.download_status_file` (default unchanged), used by the Data
+status page, the download command (`read_status` / `write_status`) and `external_data`; the data-import test fixture
+points it at the temporary folder. The future-date check is unchanged and still flags a record dated after now
+(`tests/test_local_config.py`).
+
+Tests: whole suite 1,108 passing, 0 failing.
 
 ## Open issues
 

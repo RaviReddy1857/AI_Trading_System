@@ -1,4 +1,6 @@
 .env
+# your machine's own config overrides (merged over config.yaml by app.config.load_settings; tests ignore it)
+config.local.yaml
 data/*.db
 data/*.tmp
 __pycache__/

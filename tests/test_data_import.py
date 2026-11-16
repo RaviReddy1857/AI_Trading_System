@@ -116,7 +116,8 @@ def manual_in(tmp_path, events="date,type,note,symbol\n", fii="date,fii_net_cr,d
     raw = sim_settings().model_dump()
     raw["calendar"] = {"events_csv": str(tmp_path / "events.csv"), "holidays_csv": str(tmp_path / "holidays.csv"),
                        "fii_dii_csv": str(tmp_path / "fii_dii.csv")}
-    raw["data_status"] = {**raw["data_status"], "inbox_dir": str(tmp_path / "inbox")}
+    raw["data_status"] = {**raw["data_status"], "inbox_dir": str(tmp_path / "inbox"),
+                          "download_status_file": str(tmp_path / "option_download_status.json")}
     s = Settings.model_validate(raw)
     (tmp_path / "events.csv").write_text(events, encoding="utf-8")
     (tmp_path / "holidays.csv").write_text("date,note\n", encoding="utf-8")

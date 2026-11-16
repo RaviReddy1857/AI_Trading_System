@@ -319,7 +319,7 @@ def run_import(settings: Settings, store: Store, repo: Path | None = None, now: 
 
 
 def _priority(settings: Settings) -> list[str]:
-    p = settings.path("data/option_download_status.json")
+    p = settings.path(settings.data_status.download_status_file)
     if p.exists():
         try:
             return list(json.loads(p.read_text(encoding="utf-8")).get("stocks") or [])

@@ -51,7 +51,6 @@ from .reversal import build_reversal_strategies, reversal_outcomes
 from .stock_selling import StockOptionSelling, build_stock_selling, phase9_settings
 
 log = logging.getLogger("stock_backtest")
-STATUS_FILE = "data/option_download_status.json"
 # What a "complete" (stock, year) in the status file covers. Raised when the backtest starts wanting
 # contracts it did not want before (2: the roll exit policies); older marks are then checked again.
 PLAN_VERSION = 7        # 7: corporate-action adjustment of daily history: more decision days, other contracts are wanted
@@ -694,7 +693,7 @@ def run_reversal_reports(settings: Settings, store: Store, eng: OptionEngine, op
 
 
 def read_status(settings: Settings) -> dict:
-    p = settings.path(STATUS_FILE)
+    p = settings.path(settings.data_status.download_status_file)
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -702,7 +701,7 @@ def read_status(settings: Settings) -> dict:
 
 
 def write_status(settings: Settings, status: dict) -> Path:
-    p = settings.path(STATUS_FILE)
+    p = settings.path(settings.data_status.download_status_file)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")

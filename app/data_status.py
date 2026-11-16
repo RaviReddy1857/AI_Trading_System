@@ -135,7 +135,7 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     lim = settings.data_status
     rows = []
     stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
-    status_file = settings.path("data/option_download_status.json")
+    status_file = settings.path(lim.download_status_file)
     try:
         dl = json.loads(status_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):

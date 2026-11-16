@@ -507,7 +507,8 @@ closed. Thresholds are in `exits` in config.yaml. A stale price pauses the price
 silences a call.
 
 **Telegram alerts are OFF until you switch them on.** To switch on: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-(your own chat with the bot) in `.env`, set `alerts.telegram_enabled: true` in config.yaml and restart. The app only
+(your own chat with the bot) in `.env`, set `alerts.telegram_enabled: true` in `config.local.yaml` (your own
+overrides of config.yaml, never committed; the tests ignore it) and restart. The app only
 sends to that chat and never reads incoming messages. Then, per trade type, switch alerts on at `/signals` (or
 `POST /journal/alert-switches`). A signal alert also needs its strategy's `strategies.status` entry to say
 `alerts: true`; today every strategy says `false` (their backtests show no edge), so only exit calls, settlement

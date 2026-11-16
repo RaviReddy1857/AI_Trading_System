@@ -9,6 +9,10 @@ import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
+# Your own overrides, never committed (.gitignore): any keys of config.yaml, merged over it when the file exists.
+LOCAL_CONFIG = ROOT / "config.local.yaml"
+# Set to "1" to read config.yaml only (the test suite does: tests/conftest.py), whatever config.local.yaml says.
+NO_LOCAL_ENV = "TRADING_NO_LOCAL_CONFIG"
 
 
 class StrictModel(BaseModel):
@@ -208,6 +212,8 @@ class DataStatusLimits(StrictModel):
     corporate_actions_max_age_days: int = Field(7, ge=1, le=60)
     rbi_decision_grace_days: int = Field(3, ge=0, le=30)      # a scheduled meeting without a decision row after this
     inbox_dir: str = "data/inbox"
+    # progress of the stock option history download (written by app.options.stock_backtest, read by this page)
+    download_status_file: str = "data/option_download_status.json"
     # a board-meetings export gives coverage only if it can be the whole list: at least this many companies,
     # and meetings within this many days of both ends of the declared range
     board_meetings_min_symbols: int = Field(100, ge=10, le=5000)
@@ -1092,7 +1098,31 @@ class Settings(StrictModel):
         }
 
 
-def load_settings(path: str | Path | None = None) -> Settings:
+def _merge(base: dict, over: dict, where: str = "") -> dict:
+    """`over` merged into `base`: nested sections key by key; any other value (lists too) replaced whole. A key
+    that config.yaml does not have is refused (a typo in the local file would otherwise be silently ignored)."""
+    out = dict(base)
+    for k, v in over.items():
+        if k not in out:
+            raise ValueError(f"config.local.yaml: {where}{k} is not a key of config.yaml")
+        out[k] = _merge(out[k], v, f"{where}{k}.") if isinstance(v, dict) and isinstance(out[k], dict) else v
+    return out
+
+
+def load_settings(path: str | Path | None = None, local_path: str | Path | None = None) -> Settings:
+    """config.yaml (or `path`), validated. With the default file, `config.local.yaml` (or `local_path`) is merged
+    over it when it exists - your machine's own switches, e.g. alerts.telegram_enabled - unless the environment
+    variable TRADING_NO_LOCAL_CONFIG is "1" (the tests set it, so they read only the committed settings). An
+    unknown key or a bad value in the local file fails validation like one in config.yaml."""
+    import os
     p = Path(path) if path else ROOT / "config.yaml"
     with open(p, "r", encoding="utf-8") as f:
-        return Settings.model_validate(yaml.safe_load(f))
+        raw = yaml.safe_load(f)
+    local = Path(local_path) if local_path else LOCAL_CONFIG
+    if path is None and os.environ.get(NO_LOCAL_ENV) != "1" and local.exists():
+        with open(local, "r", encoding="utf-8") as f:
+            over = yaml.safe_load(f) or {}
+        if not isinstance(over, dict):
+            raise ValueError(f"{local.name} must hold config.yaml keys (a mapping), not {type(over).__name__}")
+        raw = _merge(raw, over)
+    return Settings.model_validate(raw)
