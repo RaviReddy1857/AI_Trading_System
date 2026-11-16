@@ -285,6 +285,12 @@ Live signals in paper mode.
       until fresh ticks arrive; exit calls due during the gap are re-evaluated on fresh prices and sent; one alert says
       "system was asleep from hh:mm to hh:mm"; signals whose valid-until passed are not sent.
 
+15. **Two capital pools for the loss rules (user decision 2026-11-16, docs/STATUS.md issue 95).** Stock options
+    (`stock_option_selling.backtest.capital_inr`) and cash plus index (`account.capital_inr`). The journal and paper
+    trader record realised and open P&L and the equity history per pool, and the engine passes the risk engine the
+    account state of the signal's own pool, so each pool's daily stop, monthly pause and drawdown halving and pause
+    count only that pool's P&L, as % of that pool's capital. Test: a loss in one pool never stops or halves the other.
+
 ### Acceptance checks
 
 - An end-to-end test from fixture bars to a stored signal card

@@ -23,7 +23,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex review of 2e3e2c4..42784c7): pending entries keep a risk reservation until they fill; settlement hedges allocated once across the position | Fixed and tested; stored-data rerun identical | 655 passing (whole suite) | 2026-11-16 |
 | - | Phase 9 M3 follow-ups: settlement day count by the holiday calendar (conservative when it does not cover the expiry month); forced exit at E-5 in the backtest | Built and tested; stored-data strategy results unchanged | 647 passing (whole suite) | 2026-11-15 |
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
-| 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-up (user decisions): index spreads narrow to the widest width down to 100 points that fits one lot; stock option spreads use the stock-option capital | 863 passing (whole suite) | 2026-11-16 |
+| 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
 | 6 | Live signals and alerts (paper mode) | Not started | | |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
@@ -2094,6 +2094,28 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
   (Rs 20,000 and Rs 60,000), while open positions and P&L will come from one account-wide journal (phase 6). Whether
   the stops should count only stock option P&L is for phase 6 to settle with the user (issue 95).
 
+## Phase 5 follow-up 2: the user's decisions of 2026-11-16 (evening)
+
+- **Issue 96:** the Phase 4 option backtests are rerun later; left open.
+- **Issue 95, recorded for phase 6:** there are two capital pools, stock options (`stock_option_selling.backtest.capital_inr`)
+  and cash plus index (`account.capital_inr`). Each pool's daily stop, monthly pause and drawdown halving and pause count
+  only that pool's realised and open P&L and that pool's equity history, as percentages of that pool's capital. Phase 6
+  records positions and P&L per pool and passes `decide` the account state of the signal's pool. **Not built yet:**
+  today `decide` gets one account state, and the stock spread path already uses the stock capital for the thresholds.
+- **Width search on the effective limit (built):** the option risk limit the index spread width search must fit is now
+  capital x `risk.max_loss_per_option_pct` x the drawdown factor (0.5 from a 10% drawdown), the same figure, to the
+  paise, as the risk engine's own limit (`risk.engine.effective_option_budget`, `options.base.index_option_budget`
+  with a size factor). The Options page gets it from `RiskService.option_budget` (`OptionDesk(option_budget_fn=...)`).
+  Until the phase 6 journal records the equity history the drawdown is not known, so the page uses the full limit as an
+  upper bound and the engine blocks the signal (PORTFOLIO_UNKNOWN) anyway. The Phase 4 option backtest does not model
+  account equity, so it keeps the full limit.
+- **Tested (8 new tests, `tests/test_phase5_width.py`):** effective limit at 0 / 9.99 / 10 / 10.01 % drawdown
+  (5,000 / 5,000 / 2,500 / 2,500 at Rs 2,00,000); unknown drawdown -> full limit, unknown capital -> none; **after a
+  10% drawdown the width search picks the widest spread that fits the halved limit (100 points, at a capital where the
+  halved limit equals one lot at 100 exactly), the engine approves exactly 1 lot with risk equal to the halved limit and
+  size factor 0.5, and the wider spread chosen with the full limit is refused (ZERO_SIZE)**; the Options page uses the
+  limit it is given; the live service gives the full limit while equity is unknown.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -2183,8 +2205,8 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
 | 92 | 5 | NIFTY and BANKNIFTY share the sector tag "Index": at most two open index trades together | Closed 2026-11-16: kept (user) |
 | 93 | 5 | Kill-switch quarantine spike (20 ticks in 5 minutes) is a starting value | Open: check against a live market day (phase 6) |
 | 94 | 5 | Loss stops, drawdown pause and kill switch also stop stock option spread signals (phase 9 capital stays advisory) | Closed 2026-11-16: confirmed (user) |
-| 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Open: settle in phase 6 with the user |
-| 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun when wanted |
+| 95 | 5 | Stock spreads' loss-stop thresholds are % of the stock-option capital (Rs 10,00,000) while P&L will come from one account-wide journal | Decided 2026-11-16 (user): two pools - stock options, and cash plus index. Each pool's daily stop, monthly pause and drawdown (halve and pause) count only that pool's P&L and equity, as % of that pool's capital. To build in phase 6 (the journal records positions and P&L per pool); until then `decide` receives one account state |
+| 96 | 5 | `credit_spread` and `iron_condor` versions changed (width search); stored Phase 4 option backtests not rerun | Open: rerun later (user, 2026-11-16) |
 | 97 | 5 | Risk engine read `account.capital_inr` for stock option spreads | Fixed 2026-11-16: `stock_option_selling.backtest.capital_inr` |
 | 25 | 3 | Breeze history is not adjusted for corporate actions; gaps above 25% are treated as data breaks | Open: an adjustment source would let older history be used |
 | 26 | 3 | All five strategies lose after costs on real data (development period) | Waiting for user: decide what to change before opening the holdout |
@@ -2303,4 +2325,6 @@ capital-fit label, Phase 9 portfolio limits, the loss-stop thresholds and risk %
 | 2026-11-16 | Phase 5: deposits and withdrawals in `capital_log` (`POST /capital/log`); drawdown uses a deposit-neutral equity index |
 | 2026-11-16 | User: decisions 1, 4, 5 confirmed; shared "Index" sector tag kept; option risk limit not raised - index spreads narrow down to 100 points (widest that fits one lot), else NO TRADE |
 | 2026-11-16 | Stock option spreads: every rupee figure of the risk decision is a % of `stock_option_selling.backtest.capital_inr`, never `account.capital_inr` |
+| 2026-11-16 | User: the daily stop, monthly pause and drawdown rules run per pool (stock options; cash and index), each on its own pool's P&L and capital - for phase 6 (issue 95) |
+| 2026-11-16 | User: the index spread width search fits the EFFECTIVE option risk limit, after drawdown halving (built) |
 | 2026-11-16 | Reversal study windows: a horizon is h market sessions from the holiday calendar (the NIFTY sessions in a year holidays.csv has no holidays for, since only 2026 is entered); a window with a session the stock has no price for, or an unadjusted price break inside it, is excluded by reason, for the confirmations and both baselines alike; every_session includes the confirmation dates. Scenario triggers read inputs inside [floor, as-of date] only |

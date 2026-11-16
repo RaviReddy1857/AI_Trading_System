@@ -103,7 +103,9 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
             log.exception("regime evaluation failed")
             return "UNKNOWN"
 
-    desk = OptionDesk(settings, store, feed.name, live_price, regime_name)
+    from .risk.engine import RiskService
+    risk_service = RiskService(settings, store, hub, calendar)     # phase 5: also the Options page's option risk limit
+    desk = OptionDesk(settings, store, feed.name, live_price, regime_name, option_budget_fn=risk_service.option_budget)
     book = InstrumentBook(store, feed.name)
     if feed.name == "breeze":
         chain_source = BreezeChainSource(feed)
@@ -308,9 +310,6 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         return JSONResponse(result, status_code=200 if result["ok"] else 400)
 
     # ---- phase 5: risk engine (read-only status) and the capital log (deposits never count as profit) ----
-    from .risk.engine import RiskService
-    risk_service = RiskService(settings, store, hub, calendar)
-
     @app.get("/api/risk")
     def risk_status():
         return risk_service.status(utcnow())

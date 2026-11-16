@@ -160,10 +160,16 @@ class OptionContext:
             raise ValueError("a live option context must require margin (require_margin=False is for backtests only)")
 
 
-def index_option_budget(settings) -> float:
-    """The option risk budget the index spread width search uses: capital x risk.max_loss_per_option_pct, to
-    the paise (the risk engine's own budget before any drawdown halving)."""
-    return round(settings.account.capital_inr * settings.risk.max_loss_per_option_pct / 100.0, 2)
+def index_option_budget(settings, size_factor: float = 1.0, capital_inr: float | None = None) -> float:
+    """The option risk budget the index spread width search uses: capital x risk.max_loss_per_option_pct x the
+    drawdown size factor (1.0, or 0.5 while sizes are halved), to the paise - the same figure as the risk
+    engine's budget. `capital_inr`: default account.capital_inr."""
+    from decimal import Decimal
+    if not (0 < size_factor <= 1):
+        raise ValueError("size_factor must be in (0, 1]: the limit may only be reduced")
+    cap = settings.account.capital_inr if capital_inr is None else capital_inr
+    b = Decimal(str(cap)) * Decimal(str(settings.risk.max_loss_per_option_pct)) / 100 * Decimal(str(size_factor))
+    return float(b.quantize(Decimal("0.01")))          # same rounding as the risk engine's budget (risk.portfolio.paise)
 
 
 class OptionStrategy(Strategy):

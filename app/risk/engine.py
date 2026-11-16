@@ -371,6 +371,22 @@ def _stock_spread(signal, settings, costs, cap, factor, positions, problems, cor
         no(code, text)
 
 
+def effective_option_budget(settings, account: AccountState) -> tuple[float | None, float, bool]:
+    """(budget, size factor, drawdown known): the option risk limit an index spread's width search must fit,
+    capital x risk.max_loss_per_option_pct x the drawdown factor - the same figure `decide` uses for the
+    option budget. A drawdown that is not known gives the full limit (an upper bound: `decide` then blocks
+    the signal with PORTFOLIO_UNKNOWN anyway). Capital not known: None (no width search; `decide` blocks)."""
+    from ..options.base import index_option_budget
+    r = settings.risk
+    _, factor, code, _ = drawdown_state(account.equity_curve, account.flows, r.drawdown_halve_pct,
+                                        r.drawdown_pause_pct)
+    known_dd = code != PORTFOLIO_UNKNOWN
+    cap = account.capital_inr
+    if not (known(cap) and cap > 0):
+        return None, factor, known_dd
+    return index_option_budget(settings, factor if known_dd else 1.0, cap), factor, known_dd
+
+
 # ---------------- live service ----------------
 class RiskService:
     """Gathers the live inputs for the risk engine: capital from config.yaml, kill-switch inputs from the
@@ -390,6 +406,11 @@ class RiskService:
                            market_open=is_market_hours(now, self.calendar.holidays),
                            index_status=self._status_of(self.s.regime.index_symbol, now),
                            quarantined_recent=self.store.quality_event_count_since(since))
+
+    def option_budget(self) -> float | None:
+        """The effective option risk limit for the Options page's index spread width search (drawdown halving
+        included once the phase 6 journal records the equity history; until then the full limit)."""
+        return effective_option_budget(self.s, self.account_state())[0]
 
     def correlations(self, source: str):
         """60-session daily-return correlations from the stored daily bars with the phase 5 window

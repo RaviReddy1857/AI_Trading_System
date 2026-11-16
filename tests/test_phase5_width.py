@@ -151,3 +151,83 @@ def test_phase4_option_backtest_context_carries_the_index_budget():
     eng = OptionEngine(s, store, "sim", model, base, lot_sizes={"NIFTY": 50})
     c = eng.context(strat("credit_spread", s), "NIFTY", date(2025, 7, 1), 24000.0, "strategy")
     assert c.kind == "index" and c.option_risk_budget_inr == index_option_budget(s)
+
+
+# ---------------- the effective limit after drawdown halving (user, 2026-11-16) ----------------
+from datetime import date as _date
+
+from app.risk.engine import RiskService, effective_option_budget
+
+D1, D2 = _date(2026, 11, 11), _date(2026, 11, 12)
+
+
+def dd_account(capital, drawdown_pct):
+    """Equity 1,00,000 at the peak, then drawdown_pct lower (deposits none)."""
+    return account(capital_inr=capital,
+                   equity_curve=((D1, 100000.0), (D2, 100000.0 * (1 - drawdown_pct / 100))))
+
+
+@pytest.mark.parametrize("drawdown, budget, factor", [
+    (0.0, 5000.0, 1.0),        # 2.5% of 2,00,000
+    (9.99, 5000.0, 1.0),       # just under the halving
+    (10.0, 2500.0, 0.5),       # at: 2.5% x 0.5
+    (10.01, 2500.0, 0.5),
+])
+def test_effective_option_budget_after_drawdown(drawdown, budget, factor):
+    got, f, known = effective_option_budget(settings(), dd_account(200000.0, drawdown))
+    assert (got, f, known) == (budget, factor, True)
+
+
+def test_effective_option_budget_unknown_inputs():
+    """Unknown drawdown: the full limit as an upper bound (decide blocks it with PORTFOLIO_UNKNOWN anyway);
+    unknown capital: no budget (no width search; decide blocks with CAPITAL_UNKNOWN)."""
+    assert effective_option_budget(settings(), account(equity_curve=None)) == (5000.0, 1.0, False)
+    assert effective_option_budget(settings(), account(capital_inr=None))[0] is None
+
+
+def test_after_a_10pct_drawdown_the_chosen_width_sizes_to_one_lot_and_is_approved():
+    """Capital C = one lot at 100 points / 1.25%, so the full limit (2.5% of C) is twice that loss and the
+    halved limit (1.25% of C, at a 10% drawdown) equals it exactly. Without a drawdown a wider spread is chosen;
+    at 10% the width search uses the halved limit, picks the widest that fits (100 points: every wider width is
+    above it), and the engine approves exactly 1 lot with risk = the halved limit. The wider spread chosen with
+    the full limit would be refused by the engine at that drawdown (ZERO_SIZE)."""
+    l100 = loss_at("credit_spread", 100)
+    capital = float(l100 / Decimal("0.0125"))
+    s = settings().model_copy(update={"account": settings().account.model_copy(update={"capital_inr": capital})})
+    cs = strat("credit_spread", s)
+    healthy, halved = dd_account(capital, 0.0), dd_account(capital, 10.0)
+    full, _, _ = effective_option_budget(s, healthy)
+    half, factor, _ = effective_option_budget(s, halved)
+    assert factor == 0.5 and Decimal(str(half)) == l100 and Decimal(str(full)) == 2 * l100
+    wide = cs.evaluate(ctx(full))[0]
+    assert width_of(wide) > 100
+    narrow = cs.evaluate(ctx(half))[0]
+    assert width_of(narrow) == 100 and Decimal(str(narrow.details["max_loss_inr"])) == l100
+
+    def with_margin(sig):
+        return sig.__class__(**{**{k: getattr(sig, k) for k in sig.__dataclass_fields__},
+                                "details": {**sig.details, "margin_per_lot_inr": 40000.0}})
+
+    d = decide(with_margin(narrow), halved, market(now=narrow.created_at), s, make_ctx().costs, no_corr, SECTORS)
+    assert d.status == "APPROVED" and d.lots == 1 and d.size_factor == 0.5
+    assert Decimal(str(d.risk_inr)) == l100 == Decimal(str(half))
+    refused = decide(with_margin(wide), halved, market(now=wide.created_at), s, make_ctx().costs, no_corr, SECTORS)
+    assert refused.reason_codes == ("ZERO_SIZE",)
+
+
+def test_options_page_uses_the_effective_limit():
+    """The Options page asks for the limit through option_budget_fn (the live app passes
+    RiskService.option_budget); a smaller effective limit narrows or removes the spread."""
+    s, store, desk = desk_world(capital=1000000.0)
+    ideas = lambda: {i["strategy_id"]: i for i in desk.view("NIFTY")["ideas"]}["credit_spread"]
+    assert ideas()["status"] == "SIGNAL"
+    desk.option_budget_fn = lambda: 1.0
+    assert ideas()["status"] == "NO_TRADE" and ideas()["reasons"][0].startswith("ZERO_SIZE")
+
+
+def test_risk_service_option_budget_until_equity_is_known():
+    """Live, before the phase 6 journal: equity history not known -> the full limit (decide still blocks)."""
+    from tests.test_step1 import sim_settings
+    from app.store import Store
+    svc = RiskService(sim_settings(), Store(":memory:"), None, None)
+    assert svc.option_budget() == 5000.0

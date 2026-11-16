@@ -84,8 +84,12 @@ def chain_table(quotes: list[OptionQuote], spot: float | None, t: float | None, 
 
 
 class OptionDesk:
-    def __init__(self, settings: Settings, store: Store, source: str, spot_fn, regime_fn, now_fn=utcnow):
-        """spot_fn(symbol) -> price if its status is LIVE, else None. regime_fn() -> regime name."""
+    def __init__(self, settings: Settings, store: Store, source: str, spot_fn, regime_fn, now_fn=utcnow,
+                 option_budget_fn=None):
+        """spot_fn(symbol) -> price if its status is LIVE, else None. regime_fn() -> regime name.
+        option_budget_fn() -> the effective option risk limit in rupees after drawdown halving (phase 5,
+        `RiskService.option_budget`); default: the full limit, capital x risk.max_loss_per_option_pct."""
+        self.option_budget_fn = option_budget_fn or (lambda: index_option_budget(settings))
         self.s, self.store, self.source = settings, store, source
         self.spot_fn, self.regime_fn, self.now_fn = spot_fn, regime_fn, now_fn
         self.book = InstrumentBook(store, source)
@@ -186,7 +190,7 @@ class OptionDesk:
                 margin=lambda structure, width: margins.lookup(sym, structure, width, today), require_margin=True,
                 historical=False, max_spread_pct=o.chain.max_spread_pct, min_oi_lots=o.chain.min_open_interest_lots,
                 search_steps=o.backtest.strike_search_steps,
-                option_risk_budget_inr=index_option_budget(self.s) if kind == "index" else None)
+                option_risk_budget_inr=self.option_budget_fn() if kind == "index" else None)
             for st in self.strategies:
                 sigs = st.evaluate(ctx)
                 reasons = list(st.last_no_trade)
