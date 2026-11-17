@@ -1,7 +1,11 @@
 """Phase 6 step 9: the pre-market plan (`alerts.premarket_time`, 09:00 IST) and the end-of-day summary
-(`alerts.end_of_day_time`, 15:45 IST), built by code from stored data. Each is logged once a trading day
-(key `premarket:<day>` / `eod:<day>`); the plan is not sent once the market has opened, the summary any time
-that evening. Both are also served at GET /api/plan."""
+(`alerts.end_of_day_time`, 15:45 IST: signals, paper P&L and positions), built by code from stored data. Each is
+logged once a trading day (key `premarket:<day>` / `eod:<day>`); the plan is not sent once the market has opened,
+the summary any time that evening. Both are also served at GET /api/plan.
+
+The stock option shortlist is its own message (user, 2026-11-17; key `shortlist:<day>`): sent when the after-close
+job completes, or at `after_close.bars_deadline` (17:30) when it has not, with the same wording rules
+(`app.options.after_close.shortlist_message`)."""
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
@@ -89,11 +93,10 @@ def eod_summary(settings, journal, now: datetime, risk=None) -> str:
                      f"{fmt(p.entry_price)}, stop {fmt(stop)}" + (" UNHEDGED" if not p.hedged else ""))
     open_paper = journal.paper_trades(status="OPEN")
     lines.append(f"Open paper trades: {len(open_paper)}")
-    from .options.after_close import summary_lines
-    try:
-        lines += summary_lines(settings, journal, day, now)
-    except Exception as e:                       # noqa: BLE001 - the summary is sent whatever happens here
-        lines.append(f"Stock option shortlist: NOT KNOWN - its result could not be read ({type(e).__name__})")
+    ac = settings.stock_option_selling.after_close
+    if ac.enabled:
+        lines.append(f"Stock option shortlist: its own message when it completes (or at {ac.bars_deadline} if it "
+                     f"has not)")
     return "\n".join(lines)
 
 
@@ -110,3 +113,14 @@ def scheduled(notifier, now: datetime) -> None:
     if t >= hhmm(s.alerts.end_of_day_time) and notifier.book.get(f"eod:{day}") is None:
         notifier.book.enqueue(f"eod:{day}", "EOD", eod_summary(s, notifier.j, now), now,
                               datetime.combine(day, time(23, 59), IST).astimezone(timezone.utc))
+    if notifier.book.get(f"shortlist:{day}") is None:
+        from .options.after_close import shortlist_message
+        try:
+            text = shortlist_message(s, notifier.j, day, now)
+        except Exception as e:                   # noqa: BLE001 - at the deadline, say so rather than stay silent
+            text = None if t < hhmm(s.stock_option_selling.after_close.bars_deadline) else (
+                f"STOCK OPTION SHORTLIST {day:%a %d-%b-%Y}\nStock option shortlist: NOT KNOWN - its result "
+                f"could not be read ({type(e).__name__})")
+        if text:
+            notifier.book.enqueue(f"shortlist:{day}", "SHORTLIST", text, now,
+                                  datetime.combine(day, time(23, 59), IST).astimezone(timezone.utc))

@@ -268,15 +268,72 @@ def test_summary_when_the_job_did_not_run_has_not_finished_or_failed(tmp_path):
     assert summary_lines(s, j, DAY, AT)[0].startswith("Stock option shortlist: FAILED - no daily bars")
 
 
-def test_the_end_of_day_summary_includes_the_shortlist(tmp_path):
+def test_the_shortlist_is_its_own_message_when_the_job_completes_not_in_the_1545_summary(tmp_path):
+    """User, 2026-11-17: the 15:45 summary keeps signals, paper P&L and positions; the shortlist is sent on its own
+    when the after-close job completes (or at 17:30 when it has not), with the same wording rules."""
+    from app.options.after_close import shortlist_message
     from app.schedule import eod_summary
     job, s, store, j, _ = _job(tmp_path)
     job.run(CHAINS_AT.astimezone(timezone.utc))
+    assert shortlist_message(s, j, DAY, AT.astimezone(timezone.utc)) is None        # chains only: not finished
     job.run(AT.astimezone(timezone.utc))
-    text = eod_summary(s, j, datetime(2026, 11, 16, 15, 45, tzinfo=IST).astimezone(timezone.utc))
+    eod = eod_summary(s, j, datetime(2026, 11, 16, 15, 45, tzinfo=IST).astimezone(timezone.utc))
+    assert "Stock option shortlist (session" not in eod and "its own message when it completes" in eod
+    text = shortlist_message(s, j, DAY, (AT + timedelta(minutes=1)).astimezone(timezone.utc))
+    assert text.startswith("STOCK OPTION SHORTLIST Mon 16-Nov-2026" + chr(10))
     assert "Stock option shortlist (session 2026-11-16, 2 priority stocks, 11 Breeze calls):" in text
     assert "NO RESULT" in text and "data missing: EVENT_COVERAGE_UNKNOWN 2, NO_CHAIN 2" in text, text
     assert "No candidates" not in text
+
+
+class _Book:
+    def __init__(self):
+        self.sent = {}
+
+    def get(self, key):
+        return self.sent.get(key)
+
+    def enqueue(self, key, kind, text, now, expires=None):
+        self.sent[key] = (kind, text)
+        return True
+
+
+def _notifier(s, j):
+    return type("N", (), {"s": s, "j": j, "book": _Book(), "cal": MarketCalendar(), "store": None, "regime": None})()
+
+
+def test_the_shortlist_message_is_sent_once_on_completion(tmp_path):
+    from app.schedule import scheduled
+    job, s, store, j, _ = _job(tmp_path)
+    n = _notifier(s, j)
+    job.run(CHAINS_AT.astimezone(timezone.utc))
+    scheduled(n, datetime(2026, 11, 16, 15, 30, tzinfo=IST).astimezone(timezone.utc))
+    assert "shortlist:2026-11-16" not in n.book.sent
+    job.run(AT.astimezone(timezone.utc))
+    scheduled(n, datetime(2026, 11, 16, 15, 42, tzinfo=IST).astimezone(timezone.utc))
+    kind, text = n.book.sent["shortlist:2026-11-16"]
+    assert kind == "SHORTLIST" and "Stock option shortlist (session 2026-11-16" in text
+    assert "eod:2026-11-16" not in n.book.sent                              # the 15:45 summary is separate
+
+
+def test_a_shortlist_not_finished_by_1730_is_sent_then_saying_so(tmp_path):
+    from app.options.after_close import shortlist_message
+    from app.schedule import scheduled
+    job, s, store, j, _ = _job(tmp_path)
+    n = _notifier(s, j)
+    j.set_state(STATE_KEY.format(day=DAY), json.dumps({"status": WAITING, "chains_status": DONE, "steps": {},
+                                                       "next_retry_utc": "2026-11-16T11:50:00+00:00",
+                                                       "bar_attempts": 6, "session_bars": {"missing": {"NIFTY": "x"}}}), AT)
+    scheduled(n, datetime(2026, 11, 16, 17, 29, tzinfo=IST).astimezone(timezone.utc))
+    assert "shortlist:2026-11-16" not in n.book.sent
+    scheduled(n, datetime(2026, 11, 16, 17, 30, tzinfo=IST).astimezone(timezone.utc))
+    assert "NOT FINISHED by 17:30" in n.book.sent["shortlist:2026-11-16"][1]
+    # never started: NOT RUN at 17:30; a step still RUNNING at 17:30 is waited for 30 minutes
+    j2 = Journal(Store(":memory:"), s)
+    assert "NOT RUN" in shortlist_message(s, j2, DAY, datetime(2026, 11, 16, 17, 30, tzinfo=IST).astimezone(timezone.utc))
+    j2.set_state(STATE_KEY.format(day=DAY), json.dumps({"status": RUNNING, "step": "shortlist"}), AT)
+    assert shortlist_message(s, j2, DAY, datetime(2026, 11, 16, 17, 45, tzinfo=IST).astimezone(timezone.utc)) is None
+    assert "NOT FINISHED" in shortlist_message(s, j2, DAY, datetime(2026, 11, 16, 18, 0, tzinfo=IST).astimezone(timezone.utc))
 
 
 # ---------------- the pieces ----------------

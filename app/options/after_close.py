@@ -328,6 +328,28 @@ def _side(side: str | None) -> str:
     return {"PE": "bull put", "CE": "bear call"}.get(side or "", "-")
 
 
+RUNNING_GRACE_MINUTES = 30      # a step still RUNNING at the deadline: its result is waited for this long more
+
+
+def shortlist_message(settings, journal, day: date, now: datetime) -> str | None:
+    """The stock option shortlist as its own Telegram message (user, 2026-11-17), or None while it is not due:
+    sent once the after-close job has finished (DONE: a result, or a failure it reached), or at
+    `after_close.bars_deadline` (17:30) when it has not - then saying NOT RUN / NOT FINISHED, as the summary rules
+    say. A step still RUNNING at the deadline is waited for `RUNNING_GRACE_MINUTES` more. None when the job is off."""
+    cfg = settings.stock_option_selling.after_close
+    if not cfg.enabled:
+        return None
+    raw = journal.get_state(STATE_KEY.format(day=day.isoformat()))
+    st = json.loads(raw) if raw else {}
+    deadline = datetime.combine(day, hhmm(cfg.bars_deadline), IST).astimezone(timezone.utc)
+    if st.get("status") != DONE:
+        if now < deadline:
+            return None
+        if st.get("status") == RUNNING and now < deadline + timedelta(minutes=RUNNING_GRACE_MINUTES):
+            return None
+    return "\n".join([f"STOCK OPTION SHORTLIST {day:%a %d-%b-%Y}"] + summary_lines(settings, journal, day, now))
+
+
 def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
     """The shortlist part of the end-of-day summary. "No candidates" only when every step succeeded and no stock
     lacks data; anything else says what failed, is missing or has not finished."""
