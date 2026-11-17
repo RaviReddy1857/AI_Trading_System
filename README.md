@@ -586,6 +586,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Event coverage wording** (docs/STATUS.md): the plan and the cards say "EVENT COVERAGE MISSING: results dates
+  unknown" until every stock has a current COVERAGE row; tested on fixtures, not yet seen in a live pre-market plan.
 - **Review 8 fixes** (docs/STATUS.md): first-quote captures across a restart are tested on a fixture hub, not on a
   restart of the live app; a late cash fill is caught up on stored 1-minute bars only (the minute still forming is
   checked later); the Telegram reply check is tested with fake replies.

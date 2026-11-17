@@ -159,6 +159,7 @@ class SignalEngine:
             events_week = [{**e, "date": e["date"].isoformat()} for e in self.store.events_between(monday, monday + timedelta(days=6))]
         except Exception:
             events_week = None
+        self._week_events = None                  # read once per bar, for the week's event coverage on the cards
         bars = {i.symbol: self.store.bars_1m_between(i.symbol, session_open_utc(day), b) for i in self.s.watchlist}
         five = {s: five_minute_bars(v, s, day, b) for s, v in bars.items()}
         daily = {i.symbol: self.store.history_bars("bars_1d", i.symbol, self.source, before=session_open_utc(day),
@@ -212,6 +213,21 @@ class SignalEngine:
         return {**self.last_summary, "stored": stored, "due": due}
 
     # ---- helpers ----
+    def _coverage(self, sig, now):
+        """The week's event coverage for a card (None when the events cannot be read: shown as missing)."""
+        from .manual_data import week_coverage
+        try:
+            day = ist_day(now)
+            friday = day - timedelta(days=day.weekday()) + timedelta(days=4)
+            if getattr(self, "_week_events", None) is None:
+                self._week_events = self.store.all_events()
+            stocks = [i.symbol for i in self.s.watchlist if i.kind == "stock"]
+            return week_coverage(self._week_events, stocks, day, friday, self.s.data_status.coverage_max_age_days,
+                                 extra=[sig.symbol])
+        except Exception:
+            log.exception("event coverage not known")
+            return None
+
     def _safe(self, st, ctx) -> list[Signal]:
         try:
             return st.evaluate(ctx)
@@ -282,7 +298,8 @@ class SignalEngine:
         allowed_alert, why = alert_allowed(self.j.switches(), tt, status)
         card = build_card(sig, decision, score=sc, regime=regime, bias=bias, events_week=events_week,
                           track=strategy_record(self.store, self.j, self.s, sig.strategy_id), now=now,
-                          alert={"allowed": allowed_alert and decision.status == "APPROVED", "why": why})
+                          alert={"allowed": allowed_alert and decision.status == "APPROVED", "why": why},
+                          coverage=self._coverage(sig, now))
         # the signal and its pending paper trade in one transaction: a crash never leaves one without the other
         if not self.j.save_signal(sig, decision, now, score=sc["score"], card=card,
                                   paper=self.paper.pending_row(sig, decision)):

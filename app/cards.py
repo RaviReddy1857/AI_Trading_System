@@ -32,18 +32,26 @@ def instrument(sig) -> str:
     return f"{sig.symbol} options: " + "; ".join(parts)
 
 
-def why_now(sig, regime: str | None, bias: str | None, events_week: list[dict] | None) -> list[str]:
-    """The rule conditions that fired (from the strategy, with their values), then the market facts."""
+def why_now(sig, regime: str | None, bias: str | None, events_week: list[dict] | None, coverage=None) -> list[str]:
+    """The rule conditions that fired (from the strategy, with their values), then the market facts. `coverage`
+    (`manual_data.WeekCoverage`): "no event" is said only when the instrument's results dates are covered for the
+    week (an index: every watchlist stock's); otherwise EVENT COVERAGE MISSING, with any events that are known."""
+    from .manual_data import EVENT_COVERAGE_MISSING
     out = list(sig.why_now)
     out.append(f"market regime is {regime or 'UNKNOWN'}")
     out.append(f"FII bias is {bias or 'UNKNOWN'}")
     if events_week is None:
         out.append("events this week not known (events.csv not loaded)")
+        return out
+    mine = [e for e in events_week if e.get("symbol") in ("", None, sig.symbol) and e.get("type") != "COVERAGE"]
+    listed = "; ".join(f"{e['date']} {e['type']}" + (f" {e['symbol']}" if e.get("symbol") else "") for e in mine[:4])
+    symbols = None if sig.asset_class == "INDEX_OPTION" else [sig.symbol]
+    missing = (coverage.text(symbols) if coverage is not None
+               else f"{EVENT_COVERAGE_MISSING} (coverage not checked)")
+    if missing:
+        out.append(missing + (f"; known: {listed}" if listed else ""))
     else:
-        mine = [e for e in events_week if e.get("symbol") in ("", None, sig.symbol)]
-        out.append("no event for this instrument or the market this week" if not mine else
-                   "events this week: " + "; ".join(f"{e['date']} {e['type']}" + (f" {e['symbol']}" if e.get("symbol") else "")
-                                                     for e in mine[:4]))
+        out.append("events this week: " + listed if listed else "no event for this instrument or the market this week")
     return out
 
 
@@ -74,7 +82,8 @@ def estimate(sig, decision) -> dict | None:
 
 
 def build_card(sig, decision, *, score: dict | None, regime: str | None, bias: str | None,
-               events_week: list[dict] | None, track: dict | None, alert: dict | None, now: datetime) -> dict:
+               events_week: list[dict] | None, track: dict | None, alert: dict | None, now: datetime,
+               coverage=None) -> dict:
     tt = signal_trade_type(sig)
     approved = decision.status == "APPROVED"
     zone = list(sig.entry_zone) if sig.entry_zone else [sig.entry, sig.entry]
@@ -94,7 +103,7 @@ def build_card(sig, decision, *, score: dict | None, regime: str | None, bias: s
         "strategy_id": sig.strategy_id, "strategy_version": sig.strategy_version, "regime": sig.regime,
         "regime_now": regime, "data_as_of_utc": sig.data_as_of.isoformat(), "data_as_of": ist(sig.data_as_of),
         "created": ist(sig.created_at), "built": ist(now),
-        "why_now": why_now(sig, regime, bias, events_week) if approved else list(sig.why_now),
+        "why_now": why_now(sig, regime, bias, events_week, coverage) if approved else list(sig.why_now),
         "estimate": estimate(sig, decision),
         "track_record": track, "score": score,
         "reasons": list(decision.reasons), "reason_codes": list(decision.reason_codes),

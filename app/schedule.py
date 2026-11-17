@@ -15,6 +15,26 @@ def fmt(x) -> str:
     return "-" if x is None else f"{x:,.2f}"
 
 
+def week_coverage_of(settings, store, day, end):
+    """WeekCoverage of the watchlist stocks for the trading week ending `end` (its Friday at the latest)."""
+    from .manual_data import week_coverage
+    monday = day - timedelta(days=day.weekday())
+    through = min(end, monday + timedelta(days=4))
+    stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
+    return week_coverage(store.all_events(), stocks, day, through, settings.data_status.coverage_max_age_days)
+
+
+def events_week_text(settings, store, day, end) -> str:
+    """The events listed from `day` to `end`. "None" is said only when every watchlist stock's results dates are
+    covered for the week; otherwise EVENT COVERAGE MISSING, with any events that are known after it."""
+    ev = [e for e in store.events_between(day, end) if e["type"] != "COVERAGE"]
+    listed = "; ".join(f"{e['date']:%d-%b} {e['type']}" + (f" {e['symbol']}" if e["symbol"] else "") for e in ev[:6])
+    missing = week_coverage_of(settings, store, day, end).text()
+    if missing:
+        return missing + (f"; known: {listed}" if listed else "")
+    return listed or "none (results dates covered for every watchlist stock)"
+
+
 def premarket_plan(settings, store, journal, regime, now: datetime, source: str = "sim") -> str:
     day = ist_day(now)
     r = regime.evaluate(now) if regime is not None else {}
@@ -24,9 +44,7 @@ def premarket_plan(settings, store, journal, regime, now: datetime, source: str 
         lines.append(f"  - {why}")
     monday = day - timedelta(days=day.weekday())
     try:
-        ev = store.events_between(day, monday + timedelta(days=6))
-        lines.append("Events this week: " + ("; ".join(f"{e['date']:%d-%b} {e['type']}" + (f" {e['symbol']}" if e['symbol'] else "")
-                                                       for e in ev[:6]) or "none in events.csv"))
+        lines.append("Events this week: " + events_week_text(settings, store, day, monday + timedelta(days=6)))
     except Exception:
         lines.append("Events this week: not known")
     open_pos = journal.positions("OPEN")

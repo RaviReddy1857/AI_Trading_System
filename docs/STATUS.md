@@ -26,6 +26,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
 | 6 | Live signals and alerts (paper mode) | Built and tested on fixtures in four milestones: journal and positions with two capital pools; live loop, cards, score, paper trader, execution records, exit calls for every trade type; Telegram (send-only, OFF until switched on), trade-type switches, plan and summary, settlement alert sending; failure recovery. Not yet seen: a real Telegram message, a live market day, a real feed drop | 1079 passing (whole suite) | 2026-11-16 |
 | - | Review fixes (Codex re-check of 9dd57af..d35c2e6, 4 findings): paper entry at the fill quote's time with late-poll exit catch-up; first-quote captures kept across a restart, lost ones marked and out of the slippage report; option fills from one snapshot quoting every leg; Telegram 200 with an unexpected body is uncertain | Fixed and tested | 1,118 passing (whole suite) | 2026-11-17 |
+| - | Event lists: "EVENT COVERAGE MISSING: results dates unknown" instead of "none" when the week's results-date coverage is missing or incomplete (pre-market plan, signal cards) | Fixed and tested | 1,126 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2505,6 +2506,28 @@ caught up between the fill and the next 5-minute check: their exits are checked 
 as before.
 
 Tests: whole suite 1,118 passing, 0 failing.
+
+## Event lists say when results-date coverage is missing (2026-11-17)
+
+The pre-market plan said "Events this week: none in events.csv" while no stock had event coverage, so "none" only meant
+nothing had been entered. Now an event list says "none" only when coverage is complete:
+
+- `app/manual_data.week_coverage` / `WeekCoverage`: a stock is covered for the week when events.csv holds a COVERAGE row
+  for it retrieved on or before today, at most `data_status.coverage_max_age_days` (7) ago, running to the week's Friday.
+  It reuses the stock option selling rule (`options.stock_selling.event_coverage`) with the Friday in place of the expiry.
+- Pre-market plan (`app/schedule.events_week_text`): with any watchlist stock not covered, the line reads
+  "Events this week: EVENT COVERAGE MISSING: results dates unknown (no current coverage through <Fri> for N of M
+  stock(s): ...)", followed by "; known: ..." when events are listed. With full coverage and no events: "none (results
+  dates covered for every watchlist stock)". COVERAGE rows are no longer listed as events.
+- Signal cards, "why now" (`app/cards.why_now`, coverage from `SignalEngine._coverage`): a stock or stock option card
+  follows its own stock's coverage; an index option card needs every watchlist stock covered; coverage that could not be
+  read is shown as "EVENT COVERAGE MISSING: results dates unknown (coverage not checked)". The Telegram signal text uses
+  the same lines.
+- Not changed: the regime's `values.events` (today's market events, API only, not shown on a page) and the Data status
+  page, which already reports coverage per stock.
+
+Tests: `tests/test_event_coverage_text.py` (8; the plan on the old code printed "none in events.csv"). Whole suite
+1,126 passing, 0 failing.
 
 ## Open issues
 

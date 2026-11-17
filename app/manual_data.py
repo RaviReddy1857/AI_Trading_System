@@ -136,6 +136,55 @@ def coverage_fields(note: str) -> tuple[str, date] | None:
         return None
 
 
+EVENT_COVERAGE_MISSING = "EVENT COVERAGE MISSING: results dates unknown"
+
+
+@dataclass(frozen=True)
+class WeekCoverage:
+    """Whether the stocks' announced events (results, board meetings) are known for a week: a stock is covered when
+    events.csv holds a COVERAGE row for it retrieved on or before today, at most `max_age_days` ago, that runs to the
+    end of the week (`through`). Without it, "no event" only means none was entered, not that there is none."""
+    today: date
+    through: date
+    stocks: tuple[str, ...]          # the watchlist stocks (an index card depends on all of them)
+    why_not: dict                    # watchlist stock -> why it is not covered (missing, stale or too short)
+    covered_extra: frozenset = frozenset()     # covered symbols outside the watchlist (stock option underlyings)
+
+    def covered(self, symbol: str) -> bool:
+        return symbol not in self.why_not if symbol in self.stocks else symbol in self.covered_extra
+
+    def gaps(self, symbols=None) -> list[str]:
+        """The stocks among `symbols` (default: every watchlist stock) not covered for the week."""
+        return [x for x in (self.stocks if symbols is None else symbols) if not self.covered(x)]
+
+    def text(self, symbols=None) -> str | None:
+        """None when every stock is covered, else the missing-coverage line (with how many and which)."""
+        g = self.gaps(symbols)
+        if not g:
+            return None
+        n = len(self.stocks if symbols is None else symbols)
+        return (f"{EVENT_COVERAGE_MISSING} (no current coverage through {self.through:%d-%b} for {len(g)} of {n} "
+                f"stock(s): {', '.join(g[:8])}{', ...' if len(g) > 8 else ''})")
+
+
+def week_coverage(events, stocks, today: date, through: date, max_age_days: int, extra=()) -> WeekCoverage:
+    """WeekCoverage of `stocks` (and of any `extra` symbols, such as a stock option underlying outside the
+    watchlist) from the stored events (dicts with date, type, symbol, note). Reuses the stock option selling rule
+    (`options.stock_selling.event_coverage`) with the week's end in place of the expiry."""
+    from types import SimpleNamespace
+
+    from .options.stock_selling import event_coverage
+    rows = [SimpleNamespace(**e) for e in events if e.get("type") == "COVERAGE"]
+    why, ok_extra = {}, set()
+    for sym in dict.fromkeys([*stocks, *extra]):
+        ok, text = event_coverage(rows, sym, today, through, max_age_days)
+        if not ok and sym in stocks:
+            why[sym] = text
+        if ok and sym not in stocks:
+            ok_extra.add(sym)
+    return WeekCoverage(today, through, tuple(stocks), why, frozenset(ok_extra))
+
+
 def events_to_csv(events: list[Event]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
