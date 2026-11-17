@@ -14,7 +14,6 @@ actions, covered_through of a COVERAGE row and RBI meetings entered as 'schedule
 """
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta, timezone
 
 from .config import Settings
@@ -135,12 +134,10 @@ def data_status(settings: Settings, store: Store, calendar, feed_name: str, live
     lim = settings.data_status
     rows = []
     stocks = [i.symbol for i in settings.watchlist if i.kind == "stock"]
-    status_file = settings.path(lim.download_status_file)
-    try:
-        dl = json.loads(status_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        dl = {}
-    priority = list(dl.get("stocks") or stocks[:settings.stock_option_selling.backtest.priority_stocks])
+    from .options.after_close import priority_stocks
+    from .options.stock_backtest import read_status
+    dl = read_status(settings)                       # the stock option history download's progress file
+    priority = priority_stocks(settings)
     imports = store.last_imports()
 
     # 1. Breeze session (never read from .env: confirmed only by data that arrived today)

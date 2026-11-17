@@ -490,6 +490,9 @@ def build_shortlist(strategy: StockOptionSelling, contexts: list[OptionContext],
                      "status": a.status, "score": sc.get("total") if a.status == "CANDIDATE" else None,
                      "scores": a.scores, "contributions": sc.get("contributions", {}),
                      "score_missing": sc.get("missing", []), "reasons": a.reasons, "rank": None,
+                     # the strikes of the setup (sold first), when the rules got that far
+                     "strikes": [x.strike for x in sorted(a.signal.legs, key=lambda x: x.action != "SELL")]
+                     if a.signal is not None and a.signal.legs else None,
                      **(annotate(ctx, a) if annotate is not None else {})})
     # fully scored candidates by score; a candidate whose score is incomplete after them, by name
     good = sorted((r for r in rows if r["status"] == "CANDIDATE"),

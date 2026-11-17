@@ -89,6 +89,11 @@ def eod_summary(settings, journal, now: datetime, risk=None) -> str:
                      f"{fmt(p.entry_price)}, stop {fmt(stop)}" + (" UNHEDGED" if not p.hedged else ""))
     open_paper = journal.paper_trades(status="OPEN")
     lines.append(f"Open paper trades: {len(open_paper)}")
+    from .options.after_close import summary_lines
+    try:
+        lines += summary_lines(settings, journal, day, now)
+    except Exception as e:                       # noqa: BLE001 - the summary is sent whatever happens here
+        lines.append(f"Stock option shortlist: NOT KNOWN - its result could not be read ({type(e).__name__})")
     return "\n".join(lines)
 
 

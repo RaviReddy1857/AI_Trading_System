@@ -382,8 +382,10 @@ def reversal_watch(settings: Settings, store: Store, source: str, now: datetime 
 
 
 def run_shortlist(settings: Settings, store: Store, source: str, now: datetime | None = None,
-                  strategy: StockOptionSelling | None = None, save: bool = True) -> dict:
-    """Assess the universe at the close of the newest stored session and store the ranked list."""
+                  strategy: StockOptionSelling | None = None, save: bool = True,
+                  symbols: list[str] | None = None) -> dict:
+    """Assess the universe (only `symbols` of it when given, e.g. the priority stocks) at the close of the newest
+    stored session and store the ranked list."""
     now = now or utcnow()
     settings = phase9_settings(settings)                   # research pages use the Phase 9 capital
     session = session_date(settings, store, source)
@@ -397,6 +399,8 @@ def run_shortlist(settings: Settings, store: Store, source: str, now: datetime |
     desk = OptionDesk(settings, store, source, lambda s: None, lambda: "UNKNOWN", lambda: now)
     contexts, left_out = [], []
     stocks = universe(settings, book, session, now)
+    if symbols is not None:
+        stocks = [x for x in stocks if x in set(symbols)]
     for sym in stocks:
         ctx, why = stock_context(settings, store, source, book, desk, costs, margins, sym, session, now)
         if ctx is None:

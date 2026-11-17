@@ -31,6 +31,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Paper books per strategy: each strategy's own paper book per pool (pool capital, real-book sizing); only the per-strategy cap of 10 open + pending refuses | Fixed and tested | 1,136 passing (whole suite) | 2026-11-17 |
 | - | Tests never depend on the machine's clock: shared fixed_clock fixture, --fake-clock and --clock-report; full suite passes under six faked clocks (weekday, weekend, holiday, 09:00, 15:45, 23:59) | Done | 1,139 passing (whole suite, any clock) | 2026-11-17 |
 | - | /stock-option-selling page: shortlist built in memory when none is stored (every stock with every reason), each section loads on its own | Fixed and tested | 1,143 passing (whole suite) | 2026-11-17 |
+| - | Stock option shortlist built by the app every trading day after the close (chains, history, shortlist; 226 Breeze calls a normal day in the daily budget); result in the 15:45 summary | Built and tested | 1,154 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2658,6 +2659,49 @@ Tests: `tests/test_sos_page.py` (4; 3 fail on the code before). The page tests r
 DOM of the page's own ids; they are skipped where Node is not installed. Whole suite 1,143 passing, 0 failing.
 
 Not tested here: the page in a real browser; the live app serves the fix after its next restart.
+
+## The app builds the stock option shortlist every trading day after the close (2026-11-17)
+
+No manual command any more (`python -m app.options.shortlist` still works). `app/options/after_close.py`, a thread
+of the running app, from `stock_option_selling.after_close.start_time` (15:31 IST) on every trading day, once:
+1. **chains**: the option chains of the priority stocks (the stock option download's list, else the first
+   `stock_option_selling.backtest.priority_stocks` watchlist stocks: 30 on this machine) for their current and next
+   monthly expiry, both sides. One Breeze call returns every strike of one expiry and side, so the strikes the rules
+   consider cost nothing extra;
+2. **history**: the bar-history update of the watchlist (the session's daily and 5-minute bars; an app left running
+   for days had no newer bars, because the history download only ran at start-up);
+3. **shortlist**: built from the stored data for that session (priority stocks) and stored.
+
+Every Breeze call is counted in the day's request count (`request_budget`, the count of
+`options.backtest.daily_request_budget`, 3,500) and each step stops at what is left of it; so the stock option
+history download, run later that day, uses what is left. A step that fails or stops at the budget is recorded with
+why; the later steps still run on what is stored. The day's result is in the journal state (`after_close:<day>`).
+
+**Breeze calls per day:** chains 30 x 2 expiries x 2 sides = **120**; history 53 symbols x 2 intervals = **106**
+(one call each when the stored history is up to date the day before). **226 a normal day**; at most **438** when every
+history reply comes back empty and is asked again twice (`history.empty_retries`). About 3,270 of the 3,500 stay for
+the option-history download.
+
+**15:45 summary** (`schedule.eod_summary` + `after_close.summary_lines`): the candidates with side, strikes (sold
+first; `strikes` is now on every shortlist row) and score; "No candidates. Top reasons: ..." only when every step
+succeeded and no stock lacks data. Otherwise: NOT RUN, NOT FINISHED (step), FAILED (why), "chains/history failed for
+N: ...", "data missing: NO_CHAIN n, EVENT_COVERAGE_UNKNOWN n, ..." and "NO RESULT: ... not complete" in place of
+"no candidates". Today every priority stock lacks event coverage, so the summary will say NO RESULT with
+EVENT_COVERAGE_UNKNOWN until COVERAGE rows are entered.
+
+Also: the in-memory shortlist of the /stock-option-selling page assesses the same priority stocks; the Data status
+page uses the same priority list (`after_close.priority_stocks`); `HistoryLoader` and `ChainLoader.load` take an
+optional request limit and per-request callback (unchanged without them); a used budget is logged as one warning per
+symbol, not a traceback.
+
+Not tested here (no live Breeze run): whether Breeze still quotes bid and ask in the chain after 15:30 (the manual
+command was also meant for after the close; a chain without bid/ask makes the stock not eligible, reported as such),
+and how long the job takes live (about 226 calls with the 0.7 s pause: roughly 3-5 minutes, inside the 14 minutes to
+15:45). If the app is started after 15:31, its start-up history download and the job's history step can run at the
+same time (the second asks again for little or nothing). The running app picks this up at its next restart.
+
+Tests: `tests/test_after_close.py` (11). Whole suite 1,154 passing, 0 failing, 0 clock reads outside the fixed
+clock.
 
 ## Open issues
 

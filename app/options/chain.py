@@ -131,10 +131,13 @@ class ChainLoader:
     def default_symbols(self) -> list[str]:
         return list(self.settings.options.underlyings)
 
-    def load(self, symbols: list[str] | None = None, now: datetime | None = None) -> dict:
+    def load(self, symbols: list[str] | None = None, now: datetime | None = None, max_requests: int | None = None,
+             on_request: Callable[[], None] | None = None) -> dict:
         """Fetch and store the chains of `symbols` (default: the index underlyings). One failing
-        symbol does not stop the others."""
+        symbol does not stop the others. `max_requests`: at most this many calls (the rest are reported as not
+        asked: the day's budget is used); `on_request` is called for every call sent (the day's count)."""
         now = now or utcnow()
+        sent = 0
         today = now.astimezone(IST).date()
         by_symbol = {i.symbol: i for i in self.settings.watchlist}
         summary: dict = {}
@@ -146,12 +149,19 @@ class ChainLoader:
                 continue
             for spec in specs:
                 key = f"{sym}:{spec.expiry.isoformat()}"
+                if max_requests is not None and sent + 2 > max_requests:
+                    summary[key] = {"error": f"BUDGET: not asked, the day's Breeze request budget is used "
+                                             f"({sent} sent in this run)"}
+                    continue
                 try:
                     saved = rejected = 0
                     for right in ("CE", "PE"):
                         if getattr(self.source, "remote", False) and self._requests:
                             self._sleep(self.settings.options.chain.request_pause_seconds)
                         self._requests += 1
+                        sent += 1
+                        if on_request is not None:
+                            on_request()
                         good, bad = parse_chain_rows(self.source.fetch(inst, spec, right), right)
                         for reason, raw in bad:
                             self.store.save_quality_event(

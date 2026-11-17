@@ -242,9 +242,17 @@ class SimHistorySource:
 
 
 # ---------------- loader ----------------
+class RequestBudgetUsed(RuntimeError):
+    """The day's Breeze request budget given to this loader is used: nothing more is asked."""
+
+
 class HistoryLoader:
     def __init__(self, settings: Settings, store: Store, source, calendar: MarketCalendar | None = None,
-                 sleep: Callable[[float], None] = _time.sleep):
+                 sleep: Callable[[float], None] = _time.sleep, max_requests: int | None = None,
+                 on_request: Callable[[], None] | None = None):
+        """`max_requests`: at most this many calls (then RequestBudgetUsed for what is left, reported per symbol);
+        `on_request`: called for every call sent (the day's Breeze request count). Both optional."""
+        self.max_requests, self.on_request = max_requests, on_request
         self.settings = settings
         self.store = store
         self.source = source
@@ -296,7 +304,11 @@ class HistoryLoader:
                     self._sleep(h.retry_pause_seconds)
                 elif self._requests and h.request_pause_seconds:
                     self._sleep(h.request_pause_seconds)
+            if self.max_requests is not None and self._requests >= self.max_requests:
+                raise RequestBudgetUsed(f"the day's Breeze request budget is used ({self._requests} sent in this run)")
             self._requests += 1
+            if self.on_request is not None:
+                self.on_request()
             rows = self.source.fetch(inst, interval, a, b)
             if rows:
                 return rows
@@ -390,6 +402,9 @@ class HistoryLoader:
                 key = f"{inst.symbol}:{interval}"
                 try:
                     summary[key] = self.update_symbol(inst, interval, now)
+                except RequestBudgetUsed as e:
+                    log.warning("history download for %s not asked: %s", key, e)
+                    summary[key] = {"error": f"RequestBudgetUsed: {e}"}
                 except Exception as e:  # network/SDK errors must not kill the app
                     log.exception("history download failed for %s", key)
                     summary[key] = {"error": f"{type(e).__name__}: {e}"}

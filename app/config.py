@@ -839,12 +839,27 @@ class Settlement(StrictModel):
         return self
 
 
+class AfterCloseShortlist(StrictModel):
+    """The stock option shortlist run by the app every trading day after the close (app/options/after_close.py):
+    chains of the priority stocks, then the bar history, then the shortlist; in the end-of-day summary."""
+    enabled: bool = True
+    start_time: CLOCK = "15:31"                            # IST; not before the close (15:30)
+
+    @field_validator("start_time")
+    @classmethod
+    def _after_close(cls, v: str) -> str:
+        if hhmm(v) < _dtime(15, 30):
+            raise ValueError("after_close.start_time must be at or after the close, 15:30")
+        return v
+
+
 class StockOptionSelling(StrictModel):
     """Phase 9: monthly hedged credit spreads on F&O stocks (bull put in an up trend, bear call in a down
     trend). Every sold option is paired with a bought option of the same expiry. Stock options settle
     physically, so no position is open in expiry week. Names follow section 2 of the Phase 9
     specification; docs/implementation.md has the parameter table."""
     enabled: bool = True
+    after_close: AfterCloseShortlist = AfterCloseShortlist()
     min_iv_rank: float = Field(50.0, ge=0, le=100)            # sell only when the stock's IV rank is at least this
     min_open_interest_lots: int = Field(200, ge=0)            # each traded strike: open interest in lots
     max_bid_ask_pct_of_mid: float = Field(5.0, gt=0, le=100)   # each traded strike, live: bid-ask width, % of mid

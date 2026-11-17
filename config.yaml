@@ -365,6 +365,9 @@ options:
 # ---- signal cards, alerts and manual positions come after phase 6. ----
 stock_option_selling:          # names follow section 2 of the Phase 9 specification (docs/implementation.md has the table)
   enabled: true
+  after_close:                  # the app builds the shortlist every trading day after the close (no manual command):
+    enabled: true               # chains of the priority stocks, then the bar history, then the shortlist; Breeze calls
+    start_time: "15:31"         # counted in options.backtest.daily_request_budget; result in the 15:45 summary
   min_iv_rank: 50               # sell only when the stock's IV rank is at least this
   min_open_interest_lots: 200   # each traded strike: open interest, in lots, at least this
   max_bid_ask_pct_of_mid: 5     # each traded strike (live eligibility): bid-ask width within 5% of the mid price

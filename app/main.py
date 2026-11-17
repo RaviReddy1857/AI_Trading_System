@@ -198,6 +198,25 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         except Exception:
             log.exception("history update failed")
 
+    # ---- phase 9: the stock option shortlist, every trading day after the close (no manual command) ----
+    from .options.after_close import AfterCloseJob
+
+    def history_for_job(max_requests, on_request):
+        return HistoryLoader(settings, store, BreezeHistorySource(feed, settings.history.request_timeout_seconds), calendar,
+                             max_requests=max_requests, on_request=on_request)
+    after_close = AfterCloseJob(settings, store, journal, calendar, chains,
+                                history_for_job if feed.name == "breeze" and hasattr(feed, "historical") else None,
+                                feed.name)
+
+    def after_close_loop() -> None:
+        while not stop.is_set():
+            try:
+                if after_close.due(utcnow()):
+                    after_close.run(utcnow())
+            except Exception:
+                log.exception("after-close shortlist job failed")
+            stop.wait(30)
+
     def regime_loop() -> None:
         while not stop.is_set():
             try:
@@ -250,6 +269,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                 threading.Thread(target=history_job, name="history", daemon=True).start()
             threading.Thread(target=regime_loop, name="regime", daemon=True).start()
             threading.Thread(target=options_loop, name="options", daemon=True).start()
+            threading.Thread(target=after_close_loop, name="after_close", daemon=True).start()
             if settings.engine.enabled:
                 for t in loop_threads(engine, notifier, watchdog, stop, settings.engine.poll_seconds):
                     t.start()
@@ -638,17 +658,18 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
         """The stored shortlist of the newest session; when none is stored for it, the same assessment built now
         from the stored data (`computed`: not stored, nothing written), so every stock shows why it is or is not
         on the list. Read-only."""
+        from .options.after_close import priority_stocks
         from .options.shortlist import run_shortlist, session_date
         out = store.shortlist()
         newest = session_date(settings, store, feed.name)
         out["computed"] = False
         if newest is not None and out.get("session_date") != newest.isoformat():
-            built = run_shortlist(settings, store, feed.name, save=False)
+            built = run_shortlist(settings, store, feed.name, save=False, symbols=priority_stocks(settings))
             out = {"session_date": built.get("session_date"), "created_utc": utcnow().isoformat(),
                    "rows": built.get("rows", []), "computed": True,
                    "computed_note": "Not stored: assessed now from the stored data, because no shortlist was stored "
-                                    f"for {newest:%d-%b-%Y}. After the close run: python -m app.options.shortlist "
-                                    "(it loads the option chains first)."}
+                                    f"for {newest:%d-%b-%Y}. The app builds and stores it every trading day after the "
+                                    f"close ({settings.stock_option_selling.after_close.start_time} IST)."}
         sos = settings.stock_option_selling
         status = settings.strategies.status_of("stock_option_selling")
         out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.score.weights.model_dump(),
