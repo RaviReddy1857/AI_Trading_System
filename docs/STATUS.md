@@ -35,6 +35,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Stock option chains at 15:20 (live bid/ask), paced at 60 chain calls a minute; strikes without a valid bid/ask stored as unpriced; history and shortlist after 15:31 | Built and tested | 1,159 passing (whole suite) | 2026-11-17 |
 | - | Shortlist for the chains' session only (today's close from 5-minute bars, or wait and retry until 17:30); kill switch of 17-Nov reported (unchanged) | Fixed and tested | 1,166 passing (whole suite) | 2026-11-17 |
 | - | Kill switch counts live price ticks only (unpriced chain strikes and bad history bars never count); 5-minute bars and crossed quotes of 17-Nov investigated (report only) | Fixed and tested | 1,174 passing (whole suite) | 2026-11-17 |
+| - | Closing auction session from 3 Aug 2026: dated session calendar per segment; auction ticks never a signal, fill, exit trigger or quality event (AUCTION on the dashboard); option exits to 15:40; cash intraday cutoff 15:00 (unconfirmed); chain capture 14:50-15:15 with per-chain times; official close awaited (5-minute close APPROXIMATE); backtests never trade an auction bar - stored results unchanged (A/B proof) | Built and tested; not yet seen on a live day | 1,205 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2889,6 +2890,109 @@ Every place that assumed one 09:15-15:30 session for everything (file:line befor
 | 23 | Regime | `config.yaml` `regime.ignore_5m_bar_starts` 15:15, 15:20; `app/regime.py:274` (live while open) | "unreliable Breeze bars" - from 3 Aug these are the CAS bars |
 | 24 | Holidays | `app/calendar.py`, `data/holidays.csv` | trading days only; unchanged by CAS; special sessions (Muhurat) not modelled |
 | 25 | Watchlist | `config.yaml` watchlist | no field saying which stocks are F&O stocks |
+
+## Closing auction session from 3 Aug 2026: what was changed (2026-11-17)
+
+The audit is the previous section. Nothing in the 2023-2024 pre-registration and no strategy rule was changed.
+
+**1. Dated session calendar per segment** (`app/session.py`; `session` in config.yaml, validated in `app/config.py`
+`SessionCfg`/`SessionPeriod`; `watchlist[].fno`, default true). Two periods: from 2000-01-01 every segment 09:15-15:30;
+from 2026-08-03 F&O stocks continuous 09:15-15:15 then closing auction to 15:35, index indicative 15:15-15:35, options
+to 15:40, other stocks to 15:30. Phases OPEN / AUCTION / CLOSED. `load_settings` configures the calendar, so the app
+and every backtest command read config.yaml's times. Every place in the audit table now asks it: market hours
+(`quality.is_market_hours`: no segment = to the last close; a segment, optionally continuous only), price status
+(`freshness`, `MarketHub._status` per symbol), `MarketCalendar.is_open/phase/hours/last_close_utc/target_session`,
+history completeness (a daily bar is final after the last close), the signal loop, kill switch, watchdog, chain
+refresh, actionability, option expiry (`years_to_expiry`), option session end, settlement forced-exit deadline (the
+options' close of E-5: 15:40), shortlist and option-history as-of times (the stock's official close). Settings are
+refused when `after_close.chain_time` is not in continuous trading, `start_time` / `alerts.end_of_day_time` is not
+after every close, or `backtest.intraday_exit_time` is after 15:15.
+
+**2. Auction ticks are not trades** (`app/hub.py`): a live tick of an F&O stock or the index while its segment is in
+the auction is kept apart (`auction_ticks` in the hub stats): no `check_tick` (no CROSSED_QUOTE or VOLUME_WENT_BACK
+event, so it cannot trip the kill switch), no 1-minute bar, no first-quote capture (no paper fill), not the last good
+tick (no exit trigger, no mark, no spot). The symbol's status is AUCTION (not usable); the dashboard shows AUCTION with
+the latest indication and a tooltip. New signals of every kind stop at the bar closing 15:15 (`SignalEngine.on_bar`);
+the kill switch's market hours are the index's continuous trading, and outside them that is its only reason, so exit
+calls (which ignore it) carry on. The loop runs to 15:40: option exit calls and paper option exits continue on the
+chain refreshed until 15:40. During the auction the live regime is UNKNOWN (no LIVE index price): no signal, and an
+UNKNOWN regime never raises a REGIME_FLIP call.
+
+**3. Cash intraday cutoff 15:00** (`session.cash_intraday_cutoff`, `cash_intraday_cutoff_confirmed: false`): no cash
+intraday signal on a bar closing at or after 15:00; intraday positions and paper trades are due out at 15:00
+(`positions.time_exit_at`; the call says ICICI's time is not confirmed). Swing and option holding-period exits use the
+last continuous bar of their segment (15:10 bar for an F&O stock, 15:35 bar for options; 15:25 before 3 Aug). The
+identifier avoids the word the safety test forbids in source (`tests/test_safety.py` unchanged).
+
+**4. Chain capture 14:50-15:15** (`after_close.chain_time: "14:50"`; stop = F&O continuous end): `ChainLoader.load`
+takes `stop_at` and `clock`; each expiry chain is stamped with its own fetch time (both sides share it, so it stays one
+snapshot); no call is sent at or after 15:15 and every chain not fetched is recorded MISSED (step not ok; the summary
+lists them). The index refresh keeps one stamp per refresh. At 7-9 replies a minute, 120 calls take 13-17 minutes:
+14:50 to about 15:05.
+
+**5. Official close** : the after-close job starts at 15:41 (after options close) and waits for Breeze's daily bar
+(retry every 15 minutes) until 17:30; only on the last attempt is a missing close built from 5-minute bars, from the
+bars of continuous trading only (72 to 15:15 for F&O stocks and the index from 3 Aug; 75 before), labelled APPROXIMATE
+in the state and the summary. The session close (`SignalEngine.close_session`, closing equity) marks held cash
+positions in F&O stocks at the daily bar's close (official) and waits for it until 17:30; then it closes on the last
+continuous trade and the equity row's note says APPROXIMATE (with the symbols).
+
+**6. Backtests** (`app/backtest.py`): per session, the intraday exit is the earlier of `intraday_exit_time` and the
+end of the stock's continuous trading, and an entry bar must start before it; a swing trade's close time is the
+segment's official close. With the configured times (exit at the close of the bar ending 15:15, last entry 14:45) no
+trade can change. Option backtests: session end and expiry at the options' close. Option leg bars 15:15-15:40 are
+option trades (derivatives trade continuously to 15:40) and are not excluded; none is stored after 30-Jun-2026.
+
+**Stored results affected, and the proof that nothing before 3 Aug changed** (offline, on a read-only copy of
+`data/market_live.db`, nothing saved; script kept outside the repo):
+- Stored runs that reach 3 Aug 2026: **25**, all cash intraday (orb, orb_v2, range_reversion, range_reversion_v2,
+  vwap_pullback; development period 06-May to 01-Oct-2026, holdout from 05-Oct not opened). Each holds 130-1,546
+  trades on or after 3 Aug; **none has an entry or exit inside the auction** (every exit is at the close of the bar
+  ending 15:15 or earlier, every entry at or before 14:45). Swing runs end 05-Jun-2026 (holdout from 08-Jun not
+  opened) and every option and stock option run uses option prices that end 30-Jun-2026: not affected.
+- A/B rerun of every active cash strategy on its development period with the current code, once with the old single
+  09:15-15:30 session for every date and once with the dated calendar:
+
+| Strategy | Period | Trades before 3 Aug | from 3 Aug | Identical before | Identical from 3 Aug | Skips identical |
+|---|---|---|---|---|---|---|
+| orb | 06-May..01-Oct-2026 | 111 | 123 | yes | yes | yes |
+| orb_v2 | 06-May..01-Oct-2026 | 220 | 310 | yes | yes | yes |
+| range_reversion | 06-May..01-Oct-2026 | 1,342 | 456 | yes | yes | yes |
+| range_reversion_v2 | 06-May..01-Oct-2026 | 798 | 229 | yes | yes | yes |
+| swing_pullback / _v2 | 22-Jan-2019..05-Jun-2026 | 1,303 / 1,298 | 0 | yes | - | yes |
+| swing_breakout / _v2 | 22-Jan-2019..05-Jun-2026 | 995 / 994 | 0 | yes | - | yes |
+
+  So no stored conclusion changes. (Not part of this change, noticed only: today's rerun of orb_v2 gives 310
+  post-3-Aug trades where the 13-Nov run stored 322; the difference is between code/data then and now, identical
+  under both calendars here; not investigated.) In tests, `test_backtest_before_3_aug_is_identical_...` proves the
+  same on fixtures, and `test_backtest_never_enters_or_exits_on_a_bar_outside_continuous_trading` shows the guard
+  works when continuous trading ends earlier than the exit time.
+
+**Tests:** `tests/test_closing_auction.py` (31). Existing tests updated because their fixture days (16/17-Nov-2026)
+are now under the auction: `test_after_close.py` (chain capture 14:50-15:15, finish 15:41, waiting for the daily bar,
+72-bar approximate close), `test_phase9_settlement.py` (forced-exit deadline 15:40; `session` allowed among the
+module's imports - config and time only), `test_kill_switch_ticks.py` (15:20 is outside continuous trading; the
+crossed live tick moved to 15:10), `test_history.py` (daily bar final at 15:40), `test_phase4.py` (expiry at 15:40;
+chain summary carries `as_of_utc`), `test_phase9_portfolio.py` (wording), `test_step1.py` / `test_review2_fixes.py`
+(`auction_ticks` in the hub stats). `tests/test_safety.py` unchanged and passing.
+
+**Not tested here (needs a live day):** AUCTION on the dashboard from 15:15; that Breeze's ticks during CAS look
+like 17-Nov's (and stop at 15:35); option chains and exit calls 15:15-15:40; the 14:50 capture finishing by 15:15 at
+real speed; when Breeze publishes the daily (official) bar after CAS - on 17-Nov it was not there at 15:35.
+
+**Decisions for you:**
+- ICICI Direct's intraday square-off time after CAS: confirm it; until then cash intraday is out by 15:00
+  (`session.cash_intraday_cutoff`, `cash_intraday_cutoff_confirmed: false`). Live/paper intraday exits (15:00) are
+  15 minutes earlier than the backtest's (15:15, unchanged so stored results stay comparable).
+- The 15:45 summary comes before the shortlist can finish when Breeze's daily bar is late (it says NOT FINISHED);
+  `alerts.end_of_day_time` can be moved later (e.g. 17:35) if you want the shortlist in it.
+- The new pre-open times from 7 Sep 2026 were not given and are not modelled; continuous trading from 09:15 is
+  assumed unchanged.
+- Which stocks are F&O: every watchlist stock (`fno: true`); the F&O list's own changes over time are not tracked.
+- The forced-exit deadline for stock option spreads moved from 15:30 to 15:40 (the options' close); ICICI's own
+  times are unchanged (still unconfirmed).
+- During CAS the live regime is UNKNOWN (no LIVE index price); harmless (no signals then, no REGIME_FLIP on UNKNOWN)
+  but logged once a day in `regime_log`.
 
 ## Open issues
 

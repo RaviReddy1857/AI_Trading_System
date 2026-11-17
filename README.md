@@ -128,7 +128,25 @@ NEUTRAL. It is UNKNOWN if any of the last 3 sessions' figures are missing.
    Run these from the project folder: the Breeze SDK writes its own log files to `logs/` in the current folder
    (this cannot be changed in the SDK). `logs/` is git-ignored.
 
-Outside 09:15-15:30 IST on weekdays, and on holidays in `holidays.csv`, symbols show `CLOSED`.
+Outside market hours on weekdays, and on holidays in `holidays.csv`, symbols show `CLOSED`.
+
+### Market hours: the closing auction from 3 Aug 2026 (`session` in config.yaml)
+Hours are dated, per segment (`app/session.py`; live code and backtests read the same calendar):
+
+| From | F&O stocks (cash) | Other stocks | Index values | Stock and index options |
+|---|---|---|---|---|
+| before 3 Aug 2026 | 09:15-15:30 | 09:15-15:30 | 09:15-15:30 | 09:15-15:30 |
+| 3 Aug 2026 | 09:15-15:15, then closing auction 15:15-15:35 (official close) | 09:15-15:30 | indicative 15:15-15:35 | 09:15-15:40 |
+
+- During the auction an F&O stock's ticks are auction indications (the index: indicative values), shown as **AUCTION**
+  on the dashboard. They are never a signal, a paper fill, an exit trigger, a bar or a quality event (they no longer
+  trip the kill switch). No new signal of any kind is made after 15:15; exit calls and paper exits for options carry
+  on until 15:40.
+- Cash intraday: no new entry from, and out by, **15:00** (`session.cash_intraday_cutoff`). ICICI Direct's own
+  intraday square-off time after the auction is **not confirmed**: confirm it and set
+  `cash_intraday_cutoff_confirmed: true` (the exit call says "not confirmed" until then).
+- Every Nifty 50 stock is an F&O stock; give a watchlist line `fno: false` for a cash-only stock.
+- When NSE changes the hours again, add a dated period under `session.periods`.
 
 ## Watchlist: NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (53 symbols)
 ICICI uses its own short codes (`RELIND` for Reliance, `CNXBAN` for Bank Nifty). The three index codes were
@@ -197,6 +215,9 @@ How the backtest works:
   and trades this removed.
 - ORB `range_minutes` must be a multiple of 5 (whole 5-minute bars); any other value stops config loading with an error.
 - Intraday trades close at 15:15 IST; no new entries after 14:45. Swing trades exit at stop, target, or after 10 sessions.
+  From 3 Aug 2026 no trade enters or exits on an F&O stock's bar inside the closing auction (15:15-15:35); with these
+  times no stored result changes (docs/STATUS.md has the proof). The live paper trades and exit calls use the earlier
+  15:00 intraday cutoff, so live intraday exits are 15 minutes earlier than the backtest's.
 - Size: 1% of capital at risk to the stop, capped at 25% of capital per position. Each trade is sized on its own: there are
   no portfolio limits yet (phase 5), so the report shows **peak exposure**, which can be several times your capital.
 - The market regime at each moment is recomputed from data available at that moment only.
@@ -590,10 +611,14 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
-- **Daily shortlist** (docs/STATUS.md): the app captures the priority stocks' chains at 15:20 IST (live
-  bid/ask, 60 chain calls a minute at most), then from 15:31 updates the history and builds the shortlist
-  for the chains' session only (today's close from 5-minute bars, or wait and retry until 17:30; about 226
-  Breeze calls a day); tested with fake Breeze sources on 17-Nov dates.
+- **Daily shortlist** (docs/STATUS.md): the app captures the priority stocks' chains from 14:50 IST (live
+  bid/ask, each chain stamped with its own fetch time) and stops at 15:15, the end of continuous trading (chains not
+  fetched by then are reported MISSED); from 15:41, after every segment has closed, it updates the history and builds
+  the shortlist for the chains' session only, waiting for Breeze's daily bar (the official closing-auction close)
+  until 17:30 - only then is a missing close built from 5-minute bars, labelled APPROXIMATE (about 226 Breeze calls
+  a day). Tested with fake Breeze sources; not yet run live at 14:50.
+- **Closing auction handling** (docs/STATUS.md): tested on fixtures only; not yet seen on a live day (AUCTION on the
+  dashboard from 15:15, no crossed-quote events, option exits to 15:40, the session close waiting for the daily bar).
 - **/stock-option-selling page** (docs/STATUS.md): the section-by-section loading is tested by running the page
   script in Node (skipped without Node), not in a real browser.
 - **Two books** (docs/STATUS.md): the real book (my positions and approved signals awaiting my decision) and
