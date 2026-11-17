@@ -34,30 +34,36 @@ from datetime import date, datetime, timedelta, timezone
 from ..config import hhmm
 from ..models import utcnow
 from ..models import Bar
-from ..quality import IST, MARKET_CLOSE, MARKET_OPEN
+from ..quality import IST, MARKET_OPEN
+from ..session import CASH_FNO, INDEX, calendar as session_calendar, segment_for
 
 log = logging.getLogger("after_close")
 
 STATE_KEY = "after_close:{day}"
 RUNNING, DONE, WAITING = "RUNNING", "DONE", "WAITING"
-FIVE_MINUTE_BARS = 75                      # 09:15 to 15:25 IST: a full session of 5-minute bars
+APPROXIMATE = "APPROXIMATE"
 
 
-def session_bar_from_5m(store, source: str, symbol: str, day: date) -> tuple[Bar | None, str]:
-    """(the session's daily bar built from the stored 5-minute bars, how) or (None, why not). Only from a full session:
-    all 75 bars, 09:15 to 15:25 IST; open of the first, high and low over all, close of the last, volume summed (unknown
-    when any bar's is)."""
+def session_bar_from_5m(store, source: str, symbol: str, day: date, segment: str = CASH_FNO) -> tuple[Bar | None, str]:
+    """(an APPROXIMATE daily bar built from the stored 5-minute bars of continuous trading, how) or (None, why not).
+    Only from every bar of continuous trading (app/session.py): 09:15 to 15:25 IST (75 bars) before 3 Aug 2026; for an
+    F&O stock or the index from 3 Aug 2026 09:15 to 15:10 (72 bars: the closing-auction bars are not trades). Open of
+    the first, high and low over all, close of the last (the last continuous trade, NOT the official close: before
+    3 Aug a weighted average of the last 30 minutes, from 3 Aug the closing-auction price), volume summed (unknown when
+    any bar's is). Used only when Breeze's daily bar is still missing at the deadline."""
     from datetime import timedelta as _td
-    start = datetime.combine(day, MARKET_OPEN, IST).astimezone(timezone.utc)
-    end = datetime.combine(day, MARKET_CLOSE, IST).astimezone(timezone.utc)
+    h = session_calendar().hours(segment, day)
+    start, end = h.open_utc, h.continuous_end_utc
+    want = int((end - start).total_seconds() // 300)
     bars = store.history_bars("bars_5m", symbol, source, since=start, before=end)
-    if len(bars) != FIVE_MINUTE_BARS or bars[0].start != start or bars[-1].start != end - _td(minutes=5):
+    if len(bars) != want or bars[0].start != start or bars[-1].start != end - _td(minutes=5):
         last = bars[-1].start.astimezone(IST).strftime("%H:%M") if bars else "-"
-        return None, f"5-minute bars incomplete ({len(bars)} of {FIVE_MINUTE_BARS}, last {last})"
+        return None, f"5-minute bars incomplete ({len(bars)} of {want}, last {last})"
     vols = [b.volume for b in bars]
     return (Bar(symbol, start, bars[0].open, max(b.high for b in bars), min(b.low for b in bars), bars[-1].close,
                 None if any(v is None for v in vols) else float(sum(vols))),
-            f"built from {FIVE_MINUTE_BARS} stored 5-minute bars")
+            f"{APPROXIMATE}: built from {want} stored 5-minute bars to {h.continuous_end:%H:%M} (the last continuous "
+            f"trade, not the official close)")
 
 
 class SessionBarsStore:
@@ -125,18 +131,25 @@ class AfterCloseJob:
     def _save(self, day: date, st: dict, now: datetime) -> None:
         self.j.set_state(STATE_KEY.format(day=day.isoformat()), json.dumps(st, default=str), now)
 
+    def chains_stop(self, day: date) -> datetime:
+        """The capture stops when F&O stocks' continuous trading ends (15:15 from 3 Aug 2026; 15:30 before): bids and
+        asks of the options are live, and the underlying still trades, only until then."""
+        return session_calendar().hours(CASH_FNO, day).continuous_end_utc
+
     def due(self, now: datetime) -> str | None:
-        """The phase due now: "chains" (chain_time to the close, once a day), "finish" (from start_time, once a day),
-        or None. A phase left RUNNING by an app that stopped mid-run is due again (the budget still caps it)."""
+        """The phase due now: "chains" (chain_time to the end of F&O stocks' continuous trading, once a day),
+        "finish" (from start_time, after every segment's close, once a day), or None. A phase left RUNNING by an app
+        that stopped mid-run is due again (the budget still caps it)."""
         cfg = self.s.stock_option_selling.after_close
         day = now.astimezone(IST).date()
         if not cfg.enabled or not self.cal.is_trading_day(day) or self._running:
             return None
         t = now.astimezone(IST).time()
         st = self.state(day) or {}
-        if hhmm(cfg.chain_time) <= t < MARKET_CLOSE and st.get("chains_status") != DONE:
+        stop = self.chains_stop(day).astimezone(IST).time()
+        if hhmm(cfg.chain_time) <= t < stop and st.get("chains_status") != DONE:
             return "chains"
-        if t >= hhmm(cfg.start_time) and st.get("status") != DONE:
+        if t >= max(hhmm(cfg.start_time), session_calendar().latest_close(day)) and st.get("status") != DONE:
             if st.get("status") == WAITING and now < datetime.fromisoformat(st["next_retry_utc"]):
                 return None
             return "finish"
@@ -175,10 +188,18 @@ class AfterCloseJob:
                   budget_left_at_chains=budget_left(self.s, self.store, day))
         self._save(day, st, now)
         try:
+            stop = self.chains_stop(day)
             res = self.chains.load(st["priority_stocks"], now=now, max_requests=budget_left(self.s, self.store, day),
-                                   on_request=self._counter(day, st), keep_unquoted=True)
-            failed = {k: v["error"] for k, v in res.items() if "error" in v}
-            st["steps"]["chains"] = {"ok": not failed, "at_utc": now.isoformat(),
+                                   on_request=self._counter(day, st), keep_unquoted=True, stop_at=stop,
+                                   clock=utcnow)
+            missed = sorted(k for k, v in res.items() if v.get("missed"))
+            failed = {k: v["error"] for k, v in res.items() if "error" in v and not v.get("missed")}
+            stamps = sorted(v["as_of_utc"] for v in res.values() if v.get("as_of_utc"))
+            st["steps"]["chains"] = {"ok": not failed and not missed, "at_utc": now.isoformat(),
+                                     "first_fetch_utc": stamps[0] if stamps else None,
+                                     "last_fetch_utc": stamps[-1] if stamps else None,
+                                     "stop_utc": stop.isoformat(), "missed": missed,
+                                     "chains": len(res),
                                      "loaded": sum(1 for v in res.values() if "error" not in v), "failed": failed,
                                      "strikes": sum(v.get("saved", 0) for v in res.values()),
                                      "no_bid_ask": sum(v.get("no_bid_ask", 0) for v in res.values()),
@@ -199,8 +220,9 @@ class AfterCloseJob:
             was = "INTERRUPTED: the capture stopped before it finished" if st.get("chains_status") == RUNNING else \
                 "MISSED: the app was not running"
             st["steps"]["chains"] = {
-                "ok": False, "error": f"{was} between {self.s.stock_option_selling.after_close.chain_time} and the "
-                                      f"close; chains are not captured after the close (no live bid/ask)"}
+                "ok": False, "error": f"{was} between {self.s.stock_option_selling.after_close.chain_time} and "
+                                      f"{self.chains_stop(day).astimezone(IST):%H:%M} (end of continuous trading); "
+                                      f"chains are not captured after it (no live bid/ask)"}
             st["chains_status"] = DONE
         cfg = self.s.stock_option_selling.after_close
         attempt = st.get("bar_attempts", 0) + 1
@@ -223,26 +245,32 @@ class AfterCloseJob:
                 log.exception("after-close history failed")
                 st["steps"]["history"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-        # the session's bars: the chains' day (today), never an earlier session
+        # the session's bars: the chains' day (today), never an earlier session. Breeze's daily bar is the official
+        # close (from 3 Aug 2026 the closing-auction price): waited for until the deadline; only on the last attempt
+        # is a missing one replaced by an APPROXIMATE close built from 5-minute bars of continuous trading
         index = self.s.regime.index_symbol
         built, from_daily, missing = {}, [], {}
+        deadline = datetime.combine(day, hhmm(cfg.bars_deadline), IST).astimezone(timezone.utc)
+        nxt = now + timedelta(minutes=cfg.bars_retry_minutes)
+        last_try = nxt > deadline
         for sym in [index] + [x for x in st["priority_stocks"] if x != index]:
             got = self.store.history_bars("bars_1d", sym, self.source, since=datetime.combine(
                 day, MARKET_OPEN, IST).astimezone(timezone.utc), limit=1)
             if got:
                 from_daily.append(sym)
                 continue
-            bar, why = session_bar_from_5m(self.store, self.source, sym, day)
+            if not last_try:
+                missing[sym] = f"no daily bar (official close) for {day:%d-%b} yet"
+                continue
+            bar, why = session_bar_from_5m(self.store, self.source, sym, day, segment_for(self.s, sym))
             if bar is not None:
                 built[sym] = bar
             else:
-                missing[sym] = f"no daily bar for {day:%d-%b} yet; {why}"
+                missing[sym] = f"no daily bar for {day:%d-%b} by {cfg.bars_deadline}; {why}"
         st["session_bars"] = {"day": day.isoformat(), "daily": len(from_daily), "from_5m": sorted(built),
-                              "missing": missing}
+                              "approximate": sorted(built), "missing": missing}
         st["bars_missing"] = sorted(missing)
-        deadline = datetime.combine(day, hhmm(cfg.bars_deadline), IST).astimezone(timezone.utc)
-        nxt = now + timedelta(minutes=cfg.bars_retry_minutes)
-        if missing and nxt <= deadline:
+        if missing and not last_try:
             st.update(status=WAITING, step=f"waiting for {day:%d-%b}'s bars", next_retry_utc=nxt.isoformat())
             self._save(day, st, utcnow())
             log.info("after-close: %d symbol(s) without %s's bar; retry at %s", len(missing), day, nxt.isoformat())
@@ -340,8 +368,9 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
     lines = [f"{head} (session {sl['session_date']}, {sl['stocks']} priority stocks, {calls}):"]
     sb = st.get("session_bars") or {}
     if sb:
-        how = (f"session close: Breeze daily bars for {sb.get('daily', 0)}"
-               + (f"; built from stored 5-minute bars for {len(sb['from_5m'])} (the daily bar was not published yet): "
+        how = (f"session close: Breeze daily bars (official close) for {sb.get('daily', 0)}"
+               + (f"; APPROXIMATE close for {len(sb['from_5m'])} (no daily bar by {cfg.bars_deadline}: the last "
+                  f"continuous trade from stored 5-minute bars, not the official closing-auction price): "
                   + ", ".join(sb["from_5m"][:8]) + (" ..." if len(sb["from_5m"]) > 8 else "") if sb.get("from_5m") else "")
                + (f" (after {st.get('bar_attempts')} attempts)" if (st.get("bar_attempts") or 1) > 1 else ""))
         lines.append(f"  {how}")
@@ -349,6 +378,11 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
             problems.append(f"no bar for {sb['day']} by {cfg.bars_deadline} for {len(sb['missing'])}: "
                             + ", ".join(list(sb["missing"])[:8]))
     ch = steps.get("chains") or {}
+    if ch.get("missed"):
+        stop = datetime.fromisoformat(ch["stop_utc"]).astimezone(IST) if ch.get("stop_utc") else None
+        problems.append(f"chains: {len(ch['missed'])} of {ch.get('chains', '?')} expiry chains MISSED (not fetched by "
+                        f"{f'{stop:%H:%M}' if stop else 'the end of continuous trading'}): "
+                        + ", ".join(ch["missed"][:6]) + (" ..." if len(ch["missed"]) > 6 else ""))
     if ch.get("no_bid_ask"):
         at = datetime.fromisoformat(ch["at_utc"]).astimezone(IST) if ch.get("at_utc") else None
         problems.append(f"chains{f' at {at:%H:%M}' if at else ''}: {ch['no_bid_ask']} of {ch.get('strikes', '?')} "

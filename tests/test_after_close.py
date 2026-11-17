@@ -1,5 +1,5 @@
 """The stock option shortlist, run by the app every trading day (app/options/after_close.py): the priority stocks'
-chains at 15:20 while bids and asks are live (paced within the per-minute limit; a strike without a valid bid/ask
+chains from 14:50 while bids and asks are live (to 15:15, the end of continuous trading from 3 Aug 2026) (paced within the per-minute limit; a strike without a valid bid/ask
 recorded as such), then after the close the bar history and the shortlist - every Breeze call counted in the day's
 budget and stopped at what is left - and its result in the 15:45 summary, never "no candidates" when a step failed or
 data is missing."""
@@ -26,8 +26,8 @@ from tests.test_step1 import sim_settings
 pytestmark = pytest.mark.usefixtures("fixed_clock")
 
 DAY = date(2026, 11, 16)                                         # Monday, a trading day
-CHAINS_AT = datetime(2026, 11, 16, 15, 20, tzinfo=IST)           # the chain capture, market open
-AT = datetime(2026, 11, 16, 15, 31, tzinfo=IST)                  # after the close: history and shortlist
+CHAINS_AT = datetime(2026, 11, 16, 14, 50, tzinfo=IST)           # the chain capture, continuous trading
+AT = datetime(2026, 11, 16, 15, 41, tzinfo=IST)                  # after every close (options 15:40): history, shortlist
 STOCKS = ["RELIANCE", "TCS"]
 
 
@@ -89,16 +89,16 @@ def _job(tmp_path, store=None, history_calls=3, rows=None):
 
 
 # ---------------- the job ----------------
-def test_chains_at_1520_then_history_and_shortlist_after_the_close_every_call_counted(tmp_path):
+def test_chains_from_1450_then_history_and_shortlist_after_the_close_every_call_counted(tmp_path):
     job, s, store, j, src = _job(tmp_path)
-    assert job.run((CHAINS_AT - timedelta(minutes=1)).astimezone(timezone.utc)) is None      # 15:19: nothing yet
+    assert job.run((CHAINS_AT - timedelta(minutes=1)).astimezone(timezone.utc)) is None      # 14:49: nothing yet
     st = job.run(CHAINS_AT.astimezone(timezone.utc))
-    # 2 priority stocks x 2 monthly expiries x 2 sides, at 15:20, before the close
+    # 2 priority stocks x 2 monthly expiries x 2 sides, from 14:50, before continuous trading ends
     assert len(src.calls) == 8 and {c[0] for c in src.calls} == set(STOCKS) and {c[1] for c in src.calls} == {EXP, EXP_NEXT}
     assert st["chains_status"] == DONE and "status" not in st and store.requests_used(DAY) == 8
-    assert datetime.fromisoformat(st["steps"]["chains"]["at_utc"]).astimezone(IST).strftime("%H:%M") == "15:20"
+    assert datetime.fromisoformat(st["steps"]["chains"]["at_utc"]).astimezone(IST).strftime("%H:%M") == "14:50"
     assert job.run((CHAINS_AT + timedelta(minutes=5)).astimezone(timezone.utc)) is None       # once a day
-    assert "NOT FINISHED by 15:25 (step: history and shortlist" in summary_lines(s, j, DAY, CHAINS_AT + timedelta(minutes=5))[0]
+    assert "NOT FINISHED by 14:55 (step: history and shortlist" in summary_lines(s, j, DAY, CHAINS_AT + timedelta(minutes=5))[0]
     st = job.run(AT.astimezone(timezone.utc))
     assert len(src.calls) == 8                                               # no chain call after the close
     assert st["status"] == DONE and st["requests"] == 8 + 3 and store.requests_used(DAY) == 11
@@ -122,31 +122,31 @@ def test_the_job_stops_at_what_is_left_of_the_days_budget(tmp_path):
     assert "No candidates" not in text and "waiting for today's bars" in text     # no session bar: it waits
 
 
-def test_due_chains_from_1520_until_the_close_and_finish_from_1531_on_trading_days(tmp_path):
+def test_due_chains_from_1450_until_1515_and_finish_from_1541_on_trading_days(tmp_path):
     job, s, store, j, _ = _job(tmp_path)
     utc = lambda h, m, d=16: datetime(2026, 11, d, h, m, tzinfo=IST).astimezone(timezone.utc)   # noqa: E731
-    assert job.due(utc(15, 19)) is None and job.due(utc(15, 20)) == "chains" and job.due(utc(15, 29)) == "chains"
-    assert job.due(utc(15, 30)) is None                                      # the close: never captured after it
-    assert job.due(utc(15, 31)) == "finish"
-    assert job.due(datetime(2026, 11, 21, 15, 20, tzinfo=IST).astimezone(timezone.utc)) is None   # Saturday
-    assert job.due(utc(15, 20, 24)) is None and job.due(utc(15, 31, 24)) is None                  # holiday
+    assert job.due(utc(14, 49)) is None and job.due(utc(14, 50)) == "chains" and job.due(utc(15, 14)) == "chains"
+    assert job.due(utc(15, 15)) is None                                      # continuous trading ended: never after
+    assert job.due(utc(15, 40)) is None and job.due(utc(15, 41)) == "finish"  # after every close (options 15:40)
+    assert job.due(datetime(2026, 11, 21, 14, 50, tzinfo=IST).astimezone(timezone.utc)) is None   # Saturday
+    assert job.due(utc(14, 50, 24)) is None and job.due(utc(15, 41, 24)) is None                  # holiday
     j.set_state(STATE_KEY.format(day=DAY), json.dumps({"chains_status": RUNNING, "steps": {}}), AT)
-    assert job.due(utc(15, 22)) == "chains"                                  # left RUNNING by a stopped app
-    job.run(utc(15, 22))
-    assert job.due(utc(15, 25)) is None
-    job.run(utc(15, 31))
+    assert job.due(utc(14, 52)) == "chains"                                  # left RUNNING by a stopped app
+    job.run(utc(14, 52))
+    assert job.due(utc(14, 55)) is None
+    job.run(utc(15, 41))
     assert job.due(utc(16, 30)) is None                                      # done today
 
 
 def test_chains_missed_before_the_close_are_recorded_and_never_captured_after_it(tmp_path):
     job, s, store, j, src = _job(tmp_path)
-    st = job.run(datetime(2026, 11, 16, 15, 40, tzinfo=IST).astimezone(timezone.utc))   # the app started at 15:40
+    st = job.run(datetime(2026, 11, 16, 15, 41, tzinfo=IST).astimezone(timezone.utc))   # the app started at 15:41
     assert src.calls == [] and st["steps"]["chains"]["error"].startswith("MISSED: the app was not running")
     text = "\n".join(summary_lines(s, j, DAY, datetime(2026, 11, 16, 15, 45, tzinfo=IST)))
     assert "chains FAILED: MISSED" in text and "No candidates" not in text
 
 
-def test_a_strike_without_a_valid_bid_ask_at_1520_is_stored_as_unpriced_and_reported(tmp_path):
+def test_a_strike_without_a_valid_bid_ask_at_capture_is_stored_as_unpriced_and_reported(tmp_path):
     rows = [raw(1000, 9.5, 10.5), raw(1010, 0, 0), raw(1020, None, 7.0), raw(1030, 8.0, 6.0)]   # ok, none, none, crossed
     job, s, store, j, src = _job(tmp_path, rows=rows)
     st = job.run(CHAINS_AT.astimezone(timezone.utc))
@@ -160,7 +160,7 @@ def test_a_strike_without_a_valid_bid_ask_at_1520_is_stored_as_unpriced_and_repo
     assert sum(1 for e in store.recent_quality_events(100) if e["reason"] == "BAD_OPTION_QUOTE") == 8
     job.run(AT.astimezone(timezone.utc))
     text = "\n".join(summary_lines(s, j, DAY, datetime(2026, 11, 16, 15, 45, tzinfo=IST)))
-    assert "chains at 15:20: 24 of 32 strikes had no valid bid/ask (stored as unpriced)" in text
+    assert "chains at 14:50: 24 of 32 strikes had no valid bid/ask (stored as unpriced)" in text
     assert "No candidates" not in text
 
 
@@ -262,7 +262,7 @@ def test_summary_when_the_job_did_not_run_has_not_finished_or_failed(tmp_path):
     j = Journal(Store(":memory:"), s)
     assert "NOT RUN" in summary_lines(s, j, DAY, AT)[0]
     j.set_state(STATE_KEY.format(day=DAY), json.dumps({"status": RUNNING, "step": "history"}), AT)
-    assert "NOT FINISHED by 15:31 (step: history)" in summary_lines(s, j, DAY, AT)[0]
+    assert "NOT FINISHED by 15:41 (step: history)" in summary_lines(s, j, DAY, AT)[0]
     _state(j, steps={"chains": {"ok": True}, "history": {"ok": True},
                      "shortlist": {"ok": False, "error": "no daily bars stored for the index"}})
     assert summary_lines(s, j, DAY, AT)[0].startswith("Stock option shortlist: FAILED - no daily bars")
@@ -318,12 +318,13 @@ def test_priority_stocks_and_the_daily_call_count(tmp_path):
 
 def test_start_time_after_the_close_and_chain_time_in_market_hours():
     from pydantic import ValidationError
-    from app.config import AfterCloseShortlist
-    assert AfterCloseShortlist(start_time="15:30").start_time == "15:30"
-    assert AfterCloseShortlist().chain_time == "15:20"
-    for bad in ({"start_time": "15:00"}, {"chain_time": "15:30"}, {"chain_time": "09:00"}):
-        with pytest.raises(ValidationError):
-            AfterCloseShortlist(**bad)
+    from app.config import AfterCloseShortlist, Settings
+    assert (AfterCloseShortlist().chain_time, AfterCloseShortlist().start_time) == ("14:50", "15:41")
+    for bad in ({"start_time": "15:00"}, {"start_time": "15:40"}, {"chain_time": "15:15"}, {"chain_time": "09:00"}):
+        raw = sim_settings().model_dump()
+        raw["stock_option_selling"]["after_close"].update(bad)
+        with pytest.raises(ValidationError):                  # checked against the session calendar (Settings)
+            Settings.model_validate(raw)
 
 
 # ---------------- 17-Nov-2026: the shortlist runs for the session the chains were captured in ----------------
@@ -331,8 +332,8 @@ from app.options.after_close import WAITING, SessionBarsStore, session_bar_from_
 from tests import clock  # noqa: E402
 
 TODAY = date(2026, 11, 17)                                       # Tuesday
-T_CHAINS = datetime(2026, 11, 17, 15, 20, tzinfo=IST)
-T_FINISH = datetime(2026, 11, 17, 15, 31, tzinfo=IST)
+T_CHAINS = datetime(2026, 11, 17, 14, 50, tzinfo=IST)
+T_FINISH = datetime(2026, 11, 17, 15, 41, tzinfo=IST)
 OPEN_UTC = datetime(2026, 11, 17, 9, 15, tzinfo=IST).astimezone(timezone.utc)
 
 
@@ -384,10 +385,12 @@ def _run(job, at):
         return job.run(at.astimezone(timezone.utc))
 
 
-def test_today_without_the_daily_bar_the_close_is_built_from_5_minute_bars_and_the_session_is_today(tmp_path):
+def test_today_without_the_daily_bar_it_waits_then_builds_an_approximate_close_and_the_session_is_today(tmp_path):
     job, s, store, j = _today_job(tmp_path, five_min=75)
     _run(job, T_CHAINS)
     st = _run(job, T_FINISH)
+    assert st["status"] == WAITING and st["session_bars"]["from_5m"] == []      # waits for the official close
+    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # the last attempt before 17:30
     assert st["status"] == DONE and st["steps"]["shortlist"]["session_date"] == "2026-11-17"     # never 16-Nov
     assert st["session_bars"]["from_5m"] == ["NIFTY", "RELIANCE", "TCS"] and st["session_bars"]["missing"] == {}
     assert "NO_CHAIN" not in st["steps"]["shortlist"]["reasons"]            # today's chains are used
@@ -395,25 +398,26 @@ def test_today_without_the_daily_bar_the_close_is_built_from_5_minute_bars_and_t
     assert store.history_bars("bars_1d", "NIFTY", "sim", since=OPEN_UTC) == []   # nothing written to the daily table
     text = "\n".join(summary_lines(s, j, TODAY, datetime(2026, 11, 17, 15, 45, tzinfo=IST)))
     assert "(session 2026-11-17," in text
-    assert "built from stored 5-minute bars for 3 (the daily bar was not published yet): NIFTY, RELIANCE, TCS" in text
+    assert ("APPROXIMATE close for 3 (no daily bar by 17:30: the last continuous trade from stored 5-minute bars, "
+            "not the official closing-auction price): NIFTY, RELIANCE, TCS") in text
 
 
 def test_today_with_incomplete_bars_it_waits_and_retries_then_uses_the_published_daily_bar(tmp_path):
     job, s, store, j = _today_job(tmp_path, five_min=11, publish_daily_on=2)   # 09:15-10:05 only, as on 17-Nov
     _run(job, T_CHAINS)
     st = _run(job, T_FINISH)
-    assert st["status"] == WAITING and st["next_retry_utc"].startswith("2026-11-17T10:16")   # 15:46 IST
-    assert "5-minute bars incomplete (11 of 75, last 10:05)" in st["session_bars"]["missing"]["NIFTY"]
+    assert st["status"] == WAITING and st["next_retry_utc"].startswith("2026-11-17T10:26")   # 15:56 IST
+    assert "no daily bar (official close) for 17-Nov yet" in st["session_bars"]["missing"]["NIFTY"]
     assert store.shortlist()["rows"] == []                                   # not built on 16-Nov meanwhile
     head = summary_lines(s, j, TODAY, datetime(2026, 11, 17, 15, 45, tzinfo=IST))
     assert head[0].startswith("Stock option shortlist: NOT FINISHED by 15:45: waiting for today's bars (attempt 1, "
-                              "next try 15:46, until 17:30)") and "NIFTY (no daily bar for 17-Nov yet" in head[1]
+                              "next try 15:56, until 17:30)") and "NIFTY (no daily bar (official close) for 17-Nov yet" in head[1]
     assert job.due(datetime(2026, 11, 17, 15, 40, tzinfo=IST).astimezone(timezone.utc)) is None
-    st = _run(job, datetime(2026, 11, 17, 15, 46, tzinfo=IST))
+    st = _run(job, datetime(2026, 11, 17, 15, 56, tzinfo=IST))
     assert TodayHistory.last.symbols == {"NIFTY", "RELIANCE", "TCS"}         # a retry asks only for the missing
     assert st["status"] == DONE and st["steps"]["shortlist"]["session_date"] == "2026-11-17"
     text = "\n".join(summary_lines(s, j, TODAY, datetime(2026, 11, 17, 16, 0, tzinfo=IST)))
-    assert "session close: Breeze daily bars for 3 (after 2 attempts)" in text
+    assert "session close: Breeze daily bars (official close) for 3 (after 2 attempts)" in text
 
 
 def test_today_past_the_deadline_without_the_index_bar_it_fails_and_never_uses_an_older_session(tmp_path):
@@ -438,15 +442,16 @@ def test_run_shortlist_for_a_given_session_refuses_an_older_one(tmp_path):
     assert out["rows"] == [] and "no daily bar for NIFTY on 17-Nov-2026 (newest 16-Nov-2026" in out["error"]
 
 
-def test_session_bar_from_5_minute_bars_needs_the_full_session():
+def test_session_bar_from_5_minute_bars_needs_the_full_continuous_session():
     store = Store(":memory:")
     bars = five_minute_bars("RELIANCE", base=1000.0)
     store.save_history_bars("bars_5m", bars, "sim")
     bar, how = session_bar_from_5m(store, "sim", "RELIANCE", TODAY)
-    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (1000.0, 1076.0, 999.0, 1075.0, 7500.0)
-    assert bar.start == OPEN_UTC and "75 stored 5-minute bars" in how
+    # an F&O stock from 3 Aug 2026: the 72 bars of continuous trading (09:15-15:10), never the auction bars
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (1000.0, 1073.0, 999.0, 1072.0, 7200.0)
+    assert bar.start == OPEN_UTC and how.startswith("APPROXIMATE: built from 72 stored 5-minute bars to 15:15")
     store2 = Store(":memory:")
-    store2.save_history_bars("bars_5m", bars[:-1], "sim")                    # 15:25 missing
+    store2.save_history_bars("bars_5m", bars[:71], "sim")                    # 15:10 missing
     assert session_bar_from_5m(store2, "sim", "RELIANCE", TODAY)[0] is None
 
 

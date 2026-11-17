@@ -175,15 +175,23 @@ class ChainLoader:
         return list(self.settings.options.underlyings)
 
     def load(self, symbols: list[str] | None = None, now: datetime | None = None, max_requests: int | None = None,
-             on_request: Callable[[], None] | None = None, keep_unquoted: bool = True) -> dict:
+             on_request: Callable[[], None] | None = None, keep_unquoted: bool = True,
+             stop_at: datetime | None = None, clock: Callable[[], datetime] | None = None) -> dict:
         """Fetch and store the chains of `symbols` (default: the index underlyings). One failing
         symbol does not stop the others. `max_requests`: at most this many calls (the rest are reported as not
         asked: the day's budget is used); `on_request` is called for every call sent (the day's count). Remote calls
         keep `options.chain.max_calls_per_minute`. A strike without a valid bid/ask is stored with bid and ask empty
         (`unquoted_row`) and counted in the summary (`no_bid_ask`); one with a zero or missing bid/ask is NOT a quality
         event (it never counts toward the kill switch). Crossed or malformed rows are still logged as BAD_OPTION_QUOTE
-        (not a tick reason: not counted either). `keep_unquoted=False`: unpriced strikes are not stored."""
-        now = now or utcnow()
+        (not a tick reason: not counted either). `keep_unquoted=False`: unpriced strikes are not stored.
+
+        Time stamps: with `clock` (or without `now`), each expiry's chain is stamped with its own fetch time (the
+        moment its first call was sent; both sides share it, so the chain is one snapshot); with only `now`, every
+        chain is stamped `now`. `stop_at`: no call is sent at or after this moment (by `clock`); every chain not
+        fetched by then is reported `missed` (never fetched later)."""
+        real_time = clock is not None or now is None
+        clock = clock or utcnow
+        now = now or clock()
         sent = 0
         today = now.astimezone(IST).date()
         by_symbol = {i.symbol: i for i in self.settings.watchlist}
@@ -196,17 +204,30 @@ class ChainLoader:
                 continue
             for spec in specs:
                 key = f"{sym}:{spec.expiry.isoformat()}"
+                if stop_at is not None and clock() >= stop_at:
+                    summary[key] = {"error": f"MISSED: not fetched before {stop_at.astimezone(IST):%H:%M} IST (the "
+                                             f"capture stops there; never fetched later)", "missed": True}
+                    continue
                 if max_requests is not None and sent + 2 > max_requests:
                     summary[key] = {"error": f"BUDGET: not asked, the day's Breeze request budget is used "
                                              f"({sent} sent in this run)"}
                     continue
                 try:
                     saved = rejected = unquoted = 0
+                    stamp = None
                     for right in ("CE", "PE"):
                         if getattr(self.source, "remote", False):
                             self.rate.wait()
                             if self._requests:
                                 self._sleep(self.settings.options.chain.request_pause_seconds)
+                        if stop_at is not None and clock() >= stop_at:      # checked after any wait: never sent late
+                            summary[key] = {"error": f"MISSED: {right} not fetched before "
+                                                     f"{stop_at.astimezone(IST):%H:%M} IST"
+                                                     + (" (the other side is stored)" if stamp is not None else ""),
+                                            "missed": True, "saved": saved}
+                            break
+                        if stamp is None:
+                            stamp = clock() if real_time else now      # this chain's own fetch time
                         self._requests += 1
                         sent += 1
                         if on_request is not None:
@@ -227,12 +248,13 @@ class ChainLoader:
                             keep += extra
                             unquoted += len(extra)
                         saved += self.store.save_option_chain(self.source.name, [
-                            (sym, spec.expiry.isoformat(), g["strike"], right, now.isoformat(), g["bid"], g["ask"],
+                            (sym, spec.expiry.isoformat(), g["strike"], right, stamp.isoformat(), g["bid"], g["ask"],
                              g["last"], g["oi"], g["oi_change"], g["volume"], g["spot"]) for g in keep])
                         rejected += len(bad)
-                    summary[key] = {"saved": saved, "quarantined": rejected}
-                    if keep_unquoted:
-                        summary[key]["no_bid_ask"] = unquoted
+                    else:
+                        summary[key] = {"saved": saved, "quarantined": rejected, "as_of_utc": stamp.isoformat()}
+                        if keep_unquoted:
+                            summary[key]["no_bid_ask"] = unquoted
                 except Exception as e:      # noqa: BLE001 - network or SDK errors must not kill the app
                     log.exception("option chain failed for %s", key)
                     summary[key] = {"error": f"{type(e).__name__}: {e}"}
