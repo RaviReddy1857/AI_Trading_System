@@ -236,6 +236,7 @@ def test_ACCEPTANCE_shortlist_rows_are_labelled_research_with_their_snapshot_and
     assert any(w.startswith(("PORTFOLIO_UNKNOWN", "no complete setup")) for w in row["not_actionable_because"])
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_shortlist_api_shows_the_correlated_groups():
     from fastapi.testclient import TestClient
     from app.main import create_app

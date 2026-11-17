@@ -564,6 +564,7 @@ def test_run_shortlist_uses_only_chains_and_bars_of_the_session(s):
     assert store.shortlist()["session_date"] == "2026-11-13"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_shortlist_route_and_page_are_read_only(s):
     from fastapi.testclient import TestClient
 

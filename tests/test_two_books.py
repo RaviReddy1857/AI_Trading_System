@@ -6,6 +6,8 @@ prices) made the GRASIM card NO_TRADE with RISK_BUDGET_USED (Rs 1,97,768.05 comm
 against my real capital, and the card shows what the commitment is made of."""
 from __future__ import annotations
 
+import pytest
+
 from dataclasses import replace
 from datetime import timedelta
 
@@ -17,6 +19,9 @@ from tests.phase5_fixtures import GOOD_MARKET, SECTORS, ZeroCosts, cash_signal, 
 from tests.phase6_fixtures import NOW, FakeMarks, approved, new_journal, settings
 
 PAPER_OPEN = [("sbin-1", "SBIN", 45, 1105.75), ("sbin-2", "SBIN", 45, 1106.50), ("adani-1", "ADANIENT", 18, 2699.60)]
+
+
+pytestmark = pytest.mark.usefixtures("fixed_clock")      # the app reads the clock: the fixtures' day
 
 
 def _journal(s=None):
@@ -182,7 +187,7 @@ def test_every_approved_signal_reaches_the_strategys_paper_track_record():
 
 
 def test_engine_card_is_approved_with_open_paper_trades_and_api_shows_both_books(tmp_path):
-    from tests.test_phase6_engine import BAR_END, make, seed, signals_at, tick
+    from tests.test_phase6_engine import BAR_END, make, seed, tick
     c, eng = make(str(tmp_path / "books.db"))
     with c:
         for sid, sym, q, px in PAPER_OPEN:
@@ -191,7 +196,7 @@ def test_engine_card_is_approved_with_open_paper_trades_and_api_shows_both_books
         tick(c.app, BAR_END - timedelta(seconds=1), last)
         out = eng.on_bar(BAR_END, BAR_END + timedelta(seconds=3))
         assert out["approved"] == 1, out["stored"][0]["card"]["reasons"]
-        card = signals_at(c)["cards"][0]
+        card = c.get("/api/signals").json()["cards"][0]
         assert card["commitment"]["committed_inr"] == 0.0 and card["commitment"]["items"] == []
         paper = c.get("/api/paper").json()
         book = paper["books"][CASH_INDEX]["orb_v2"]

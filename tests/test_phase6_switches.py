@@ -2,18 +2,21 @@
 alerts follow `strategies.status` (a strategy with alerts: false sends none). Top signals per bar and the daily cap;
 an expired signal is never sent; exit calls always go out (settlement alerts included, repeating by level); the kill
 switch and a pool's daily stop are announced once; the pre-market plan and the end-of-day summary."""
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.alerts import AlertBook, Notifier
 from app.calendar import MarketCalendar
 from app.store import Store
 from tests.phase6_fixtures import new_journal, settings
-from tests.test_phase6_engine import (BAR_END, BreakoutFixture, FixedRegime, pin_equity_start, seed,
-                                     signals_at, tick)
+from tests.test_phase6_engine import BAR_END, BreakoutFixture, FixedRegime, seed, tick
 from tests.phase6_fixtures import app_client
 from tests.test_step1 import sim_settings
 
 T = datetime(2026, 11, 16, 5, 0, tzinfo=timezone.utc)
+
+
+pytestmark = pytest.mark.usefixtures("fixed_clock")      # the app reads the clock: the fixtures' day
 
 
 def engine_app(status_alerts: bool, telegram: bool = True):
@@ -25,7 +28,6 @@ def engine_app(status_alerts: bool, telegram: bool = True):
     eng = c.app.state.engine
     eng.cash, eng.swing, eng.regime = [BreakoutFixture()], [], FixedRegime()
     eng.desk = type("NoOptions", (), {"underlyings": lambda self: []})()
-    pin_equity_start(eng)
     return c, eng
 
 
@@ -54,7 +56,7 @@ def test_switch_on_but_status_without_alerts_sends_none():
         c.post("/journal/alert-switches", json={"type": "INTRADAY_STOCKS", "on": True})
         run_bar(c, eng)
         assert signal_alerts(c) == []
-        card = signals_at(c)["cards"][0]
+        card = c.get("/api/signals").json()["cards"][0]
         assert card["alert"]["allowed"] is False and "does not allow alerts" in card["alert"]["why"]
 
 

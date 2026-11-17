@@ -1,4 +1,5 @@
 """Build fails if any order-related capability appears in the app."""
+import pytest
 import re
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def test_no_order_calls_in_source():
     assert hits == [], f"order-related code found: {hits}"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_no_order_routes():
     app = create_app(sim_settings(), feed=FakeFeed(), db_path=":memory:")
     paths = [r.path.lower() for r in app.routes]

@@ -66,6 +66,7 @@ def test_campaign_summary_by_hand_and_recovery_not_possible():
     assert after_roll(0.0, -500.0, 760.0)["message"] == ""
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_campaigns_are_stored_and_served_read_only():
     from fastapi.testclient import TestClient
 

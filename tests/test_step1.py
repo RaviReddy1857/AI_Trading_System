@@ -112,6 +112,7 @@ def test_hub_drops_bad_ticks_and_marks_stale():
 
 
 # ---------- Breeze message parsing ----------
+@pytest.mark.usefixtures("fixed_clock")
 def test_breeze_tick_parsing():
     raw = {"symbol": "4.1!2885", "last": 1290.5, "bPrice": 1290.4, "sPrice": 1290.6,
            "ttq": 123456, "close": 1280.0, "quotes": "Quotes Data"}
@@ -143,6 +144,7 @@ class FakeFeed:
         pass
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_api_endpoints():
     with TestClient(create_app(sim_settings(), feed=FakeFeed(), db_path=":memory:")) as c:
         assert c.get("/health").json()["ok"] is True

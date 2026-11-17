@@ -1,5 +1,6 @@
 """Phase 5 routes: GET /api/risk (limits in rupees, kill switch, what is not known yet) and
 POST /capital/log (deposits and withdrawals, logged separately, never profit)."""
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ def client(capital=None):
                       base_url="http://127.0.0.1:8000")
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_api_risk_limits_and_unknown_portfolio():
     with client() as c:
         r = c.get("/api/risk").json()
@@ -40,12 +42,14 @@ def test_api_risk_limits_and_unknown_portfolio():
     assert isinstance(r["kill_switch"]["on"], bool)
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_api_risk_rescales_with_capital():
     with client(400000) as c:
         lim = c.get("/api/risk").json()["limits_inr"]
     assert (lim["max_loss_per_trade"], lim["daily_loss_stop"], lim["capital_pool_usable"]) == (4000, 8000, 300000)
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_capital_log_deposit_is_stored_and_shown():
     with client() as c:
         r = c.post("/capital/log", json={"date": "2026-11-02", "type": "DEPOSIT", "amount": 50000, "note": "top-up"})
@@ -55,6 +59,7 @@ def test_capital_log_deposit_is_stored_and_shown():
     assert (log["entries"], log["deposits_inr"], log["withdrawals_inr"]) == (2, 50000, 10000)
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_capital_log_rejects_bad_entries():
     with client() as c:
         for body in ({"date": "2026-11-02", "type": "PROFIT", "amount": 1},
@@ -117,6 +122,7 @@ def test_live_decision_is_no_trade_until_positions_are_recorded():
     assert d.status == "NO_TRADE" and "PORTFOLIO_UNKNOWN" in d.reason_codes and "KILL_SWITCH" not in d.reason_codes
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_dashboard_has_risk_strip():
     with client() as c:
         html = c.get("/").text

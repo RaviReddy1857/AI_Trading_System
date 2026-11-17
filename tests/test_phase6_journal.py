@@ -253,6 +253,7 @@ def test_switches_default_off_change_logged_and_kept_across_restart(tmp_path):
 
 
 # ---------------- routes ----------------
+@pytest.mark.usefixtures("fixed_clock")
 def test_journal_routes_end_to_end():
     with app_client() as c:
         r = c.post("/journal/alert-switches", json={"type": "SWING_STOCKS", "on": True})

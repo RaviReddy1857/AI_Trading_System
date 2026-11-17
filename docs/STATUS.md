@@ -29,6 +29,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Event lists: "EVENT COVERAGE MISSING: results dates unknown" instead of "none" when the week's results-date coverage is missing or incomplete (pre-market plan, signal cards) | Fixed and tested | 1,126 passing (whole suite) | 2026-11-17 |
 | - | Two books: signal cards' risk checks use my real positions and the approved signals awaiting my decision only; paper trades run in a simulated paper book with its own limits; the card shows the commitment breakdown | Fixed and tested | 1,134 passing (whole suite) | 2026-11-17 |
 | - | Paper books per strategy: each strategy's own paper book per pool (pool capital, real-book sizing); only the per-strategy cap of 10 open + pending refuses | Fixed and tested | 1,136 passing (whole suite) | 2026-11-17 |
+| - | Tests never depend on the machine's clock: shared fixed_clock fixture, --fake-clock and --clock-report; full suite passes under six faked clocks (weekday, weekend, holiday, 09:00, 15:45, 23:59) | Done | 1,139 passing (whole suite, any clock) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2587,6 +2588,45 @@ by the real clock; the fixture day (2026-11-16 10:30 IST) fell out of that windo
 tests began failing. `tests/test_phase6_engine.signals_at` calls it with the app's clock at the fixture time.
 
 Tests: `tests/test_two_books.py` (10; 5 fail on the code before). Whole suite 1,136 passing, 0 failing.
+
+## Tests never depend on the machine's clock (2026-11-17)
+
+Tests had started failing with the date: the app's starting equity is dated at the clock's yesterday, and
+`/api/signals` lists the last 24 hours by the clock, so fixtures dated 2026-11-16 broke on 2026-11-17. No app
+behaviour changed for this; only the tests.
+
+- `tests/clock.py`: a test clock. In every `app.*` and `tests.*` module (an import hook covers modules loaded later)
+  the names bound to `datetime.datetime` / `datetime.date` become subclasses whose `now()`, `utcnow()`, `today()` read
+  this clock; `isinstance` against the real types holds both ways. The `datetime` module itself and third-party
+  libraries are not touched. Without a moment set it is the real clock.
+- `fixed_clock` (tests/conftest.py), the shared fixture: FIXED_NOW = Mon 16-Nov-2026 10:30 IST, the fixtures' day,
+  ticking from there. Used by every test that reads the date or time: the six engine-based modules for the whole
+  module (`test_phase6_engine`, `test_phase6_switches`, `test_phase6_recovery`, `test_review7_fixes`,
+  `test_two_books`, `test_event_coverage_text`) and 55 further tests one by one (the app reads the clock at start-up,
+  a Tick takes its receive time from it, ...). It replaces the earlier test workarounds `pin_equity_start` and
+  `signals_at`.
+- `--fake-clock=<ISO time>` runs the whole suite as if the machine's clock read that time; `--clock-report=<file>`
+  writes every test that read the clock without the fixed clock (0 now, found by running with it).
+- One test changed meaning: review 7 test 6 (restore re-creates a lost paper trade) passed only because the real clock
+  was past the signal's valid-until when the app started; on the fixed clock the app's own start-up restore
+  re-creates it, and the test now checks that (`/api/engine` "restored") and that a second restore adds none.
+- Not reached by the test clock: `app/feeds/breeze_feed.py` imports datetime inside two functions to stamp the time
+  of an expired login; no test depends on that time.
+- `time-machine` / `freezegun` were not used: installing a package was not allowed here, so the clock is in the
+  tests (no new dependency).
+
+Proof (full suite, system clock faked with --fake-clock, all passing, 0 clock reads outside the fixed clock):
+| Faked clock (IST) | Kind | Result | Clock reads outside the fixed clock |
+|---|---|---|---|
+| Thu 19-Nov-2026 11:00 | weekday, market open | 1,139 passed | 0 |
+| Sat 21-Nov-2026 11:00 | weekend | 1,139 passed | 0 |
+| Tue 24-Nov-2026 11:00 | market holiday (Prakash Gurpurb) | 1,139 passed | 0 |
+| Wed 18-Nov-2026 09:00 | before the open | 1,139 passed | 0 |
+| Wed 18-Nov-2026 15:45 | after the close | 1,139 passed | 0 |
+| Wed 18-Nov-2026 23:59 | late night | 1,139 passed | 0 |
+| real clock (Tue 17-Nov-2026) | - | 1,139 passed | 0 |
+
+Also kept as is: the per-strategy paper books report `over_capital` and have no capital limit (only the cap of 10).
 
 ## Open issues
 

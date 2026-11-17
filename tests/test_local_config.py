@@ -24,6 +24,7 @@ def test_the_suite_reads_only_the_committed_settings(tmp_path, monkeypatch):
     assert load_settings().alerts.telegram_enabled is False             # the committed config.yaml
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_the_local_override_applies_to_the_app(tmp_path, monkeypatch):
     from app.main import create_app
     from tests.test_step1 import FakeFeed

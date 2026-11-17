@@ -159,6 +159,7 @@ def test_orb_range_minutes_multiples_of_5_load(tmp_path, sid, minutes):
     assert getattr(load_real_settings(p).strategies, sid).range_minutes == minutes
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_backtests_page_shows_data_exclusions():
     from fastapi.testclient import TestClient
 

@@ -1217,6 +1217,7 @@ def test_desk_no_trade_when_chain_stale_spot_missing_margin_or_list_unknown():
     assert any(p.startswith("LOT_SIZE_UNKNOWN") for p in v["problems"]) and v["iv"]["rank"] is None
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_option_routes_page_and_margin_import(tmp_path):
     from fastapi.testclient import TestClient
 

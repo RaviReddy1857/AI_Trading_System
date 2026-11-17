@@ -1,4 +1,5 @@
 """HTTP routes added in phase 2: /api/regime and POST /data/import/{kind}."""
+import pytest
 from datetime import timedelta
 
 from fastapi.testclient import TestClient
@@ -35,6 +36,7 @@ def client(tmp_path, seed=True):
                       base_url="http://127.0.0.1:8000")
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_regime_route_in_sim_mode(tmp_path):
     with client(tmp_path) as c:
         r = c.get("/api/regime").json()
@@ -50,11 +52,13 @@ def test_regime_route_in_sim_mode(tmp_path):
         assert len(again["history"]) == 1          # unchanged regime is not logged twice
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_regime_unknown_without_history(tmp_path):
     with client(tmp_path, seed=False) as c:
         assert c.get("/api/regime").json()["regime"] == "UNKNOWN"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_fii_import_sets_bias(tmp_path):
     cal = MarketCalendar()
     d = utcnow().astimezone(IST).date()            # sim mode classifies today's session
@@ -70,6 +74,7 @@ def test_fii_import_sets_bias(tmp_path):
         assert r["bias"] == "BEARISH" and "net sellers for 3" in r["bias_reasons"][0]
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_event_import_forces_event_regime(tmp_path):
     today = utcnow().astimezone(IST).date().isoformat()
     with client(tmp_path) as c:
@@ -78,6 +83,7 @@ def test_event_import_forces_event_regime(tmp_path):
         assert c.get("/api/regime").json()["regime"] == "EVENT"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_bad_import_is_rejected(tmp_path):
     with client(tmp_path, seed=False) as c:
         res = c.post("/data/import/fii_dii", json={"text": "date,fii_net_cr\nyesterday,abc\n"})
@@ -86,6 +92,7 @@ def test_bad_import_is_rejected(tmp_path):
         assert c.post("/data/import/events", json={"text": "x" * 300_000}).status_code == 413
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_dashboard_has_regime_badge(tmp_path):
     with client(tmp_path, seed=False) as c:
         html = c.get("/").text

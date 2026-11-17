@@ -32,6 +32,7 @@ P = RegimeParams()
                                 {"last": 100.0, "bid": INF}, {"last": 100.0, "ask": INF},
                                 {"last": 100.0, "bid": NAN, "ask": 100.1},
                                 {"last": 100.0, "bid": INF, "ask": INF}])
+@pytest.mark.usefixtures("fixed_clock")
 def test_non_finite_tick_is_quarantined(kw):
     last = kw.pop("last")
     assert check_tick(Tick("X", last, **kw), None, 5) == [BAD_PRICE]
@@ -199,6 +200,7 @@ def local_client(tmp_path):
 CSV = {"text": "date,fii_net_cr,dii_net_cr\n2026-11-10,-5,1\n"}
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_allowed_local_json_request(tmp_path):
     with local_client(tmp_path) as c:
         r = c.post("/data/import/fii_dii", json=CSV, headers={"Origin": "http://127.0.0.1:8000"})
@@ -209,6 +211,7 @@ def test_allowed_local_json_request(tmp_path):
 
 @pytest.mark.parametrize("origin", ["https://evil.example", "http://127.0.0.1:9999", "null",
                                     "http://localhost.evil.example:8000"])
+@pytest.mark.usefixtures("fixed_clock")
 def test_foreign_origin_is_refused(tmp_path, origin):
     with local_client(tmp_path) as c:
         r = c.post("/data/import/fii_dii", json=CSV, headers={"Origin": origin})
@@ -216,6 +219,7 @@ def test_foreign_origin_is_refused(tmp_path, origin):
     assert (tmp_path / "fii_dii.csv").read_text() == "date,fii_net_cr,dii_net_cr\n"   # nothing written
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_form_encoded_post_is_refused(tmp_path):
     with local_client(tmp_path) as c:
         r = c.post("/data/import/fii_dii", data={"text": CSV["text"]})
@@ -225,6 +229,7 @@ def test_form_encoded_post_is_refused(tmp_path):
     assert (tmp_path / "fii_dii.csv").read_text() == "date,fii_net_cr,dii_net_cr\n"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_foreign_host_is_refused(tmp_path):
     with local_client(tmp_path) as c:
         r = c.post("/data/import/fii_dii", json=CSV, headers={"Host": "attacker.example:8000"})

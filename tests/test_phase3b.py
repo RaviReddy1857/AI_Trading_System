@@ -265,6 +265,7 @@ def test_config_freezes_the_holdout_starts():
     assert s.backtest.holdout_start == {"5minute": date(2026, 10, 5), "1day": date(2026, 6, 8)}
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_run_backtest_uses_the_fixed_holdout(tmp_path):
     s = settings(backtest={"holdout_start": {"5minute": "2026-11-06"}, "reports_dir": str(tmp_path)})
     store = Store(":memory:")
@@ -419,6 +420,7 @@ def test_strategy_status_defaults_and_validation():
         Settings.model_validate(raw)
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_report_carries_the_strategy_status():
     s = settings(strategies={"status": {"orb": {"label": "negative in backtests"}}})
     store = Store(":memory:")

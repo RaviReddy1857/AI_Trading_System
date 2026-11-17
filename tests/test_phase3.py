@@ -562,6 +562,7 @@ def test_report_by_regime_windows_and_cost_label():
     assert rep["period"] == {"from": "2026-09-01", "to": "2026-09-30", "sessions": 30}
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_run_backtest_keeps_holdout_untouched_and_saves(sim_store, tmp_path):
     s0, store = sim_store
     raw = s0.model_dump()
@@ -585,6 +586,7 @@ def test_run_backtest_keeps_holdout_untouched_and_saves(sim_store, tmp_path):
     assert any(t.get("holdout") for t in with_hold["trades"]) or with_hold["report"]["holdout"]["result"]["trades"] == 0
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_backtest_routes_and_page(sim_store):
     from fastapi.testclient import TestClient
 

@@ -1,6 +1,7 @@
 """BreezeFeed.start() against a fake SDK that reproduces breeze-connect 1.0.69's
 get_stock_token_value(): it reads self.interval (only set by subscribe_feeds) and,
 on any error, returns the exception object instead of raising."""
+import pytest
 import logging
 
 from tests.fixture_settings import load_settings
@@ -74,6 +75,7 @@ def test_real_lookup_failure_logs_the_sdk_message(caplog):
     assert "AttributeError" not in msg              # the quirk no longer shows up
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_ticks_from_subscribed_tokens_reach_the_handler():
     sdk = FakeBreezeSDK()
     got = []

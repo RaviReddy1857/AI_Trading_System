@@ -312,6 +312,7 @@ def reversal_world():
     return cfg, store, base, eng, ist_date(bars[m["confirmed"]].start.isoformat())
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline():
     cfg, store, base, eng, confirmed = reversal_world()
     assert confirmed == date(2025, 7, 1)
@@ -371,6 +372,7 @@ def watch_store(with_chain: bool):
     return store
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_ACCEPTANCE_washed_out_stocks_are_shown_as_watch_never_as_a_signal(s):
     store = watch_store(with_chain=False)
     w = reversal_watch(s, store, "sim", now=NOW + timedelta(minutes=30))
@@ -401,6 +403,7 @@ def test_ACCEPTANCE_washed_out_stocks_are_shown_as_watch_never_as_a_signal(s):
     assert reversal_watch(off, store, "sim")["rows"] == []
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_reversal_route_and_page_are_read_only():
     from fastapi.testclient import TestClient
 

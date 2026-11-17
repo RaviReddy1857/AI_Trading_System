@@ -308,6 +308,7 @@ def test_scenarios_use_the_stored_fii_rbi_and_results_dates_when_they_exist(s):
     assert all(r["label"] == "history, not a forecast" for r in v["scenarios"])
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_profile_route_is_read_only_and_unknown_stock_is_404():
     from fastapi.testclient import TestClient
 

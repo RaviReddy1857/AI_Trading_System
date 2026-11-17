@@ -284,6 +284,7 @@ def test_ACCEPTANCE_no_code_path_closes_or_changes_a_position():
     assert not calls & {"execute", "commit", "save", "write", "write_text", "open", "post", "send"}
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_settlement_route_and_page_are_read_only():
     from fastapi.testclient import TestClient
     from app.main import create_app

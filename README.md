@@ -23,9 +23,13 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 916 passed
+python -m pytest -q          # should say 1,139 passed, whatever the date or time
 python -m app.main           # then open http://127.0.0.1:8000
 ```
+The tests never depend on the machine's clock: a test that reads the date or time uses the shared `fixed_clock`
+fixture (Mon 16-Nov-2026 10:30 IST, `tests/clock.py`). To check, run the suite as if the clock read another time:
+`python -m pytest -q --fake-clock=2026-11-21T23:59+05:30`; `--clock-report=<file>` lists any test that read the clock
+without the fixed clock (it should be empty).
 It starts in `sim` mode with moving fake prices and **fake history** (generated, stored separately
 from real data), so the regime badge works straight away. Sim results mean nothing about the real market.
 

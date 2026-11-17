@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +23,9 @@ from app.journal import CASH_INDEX, STOCK_OPTIONS, pool_account, record_marks
 from app.risk.engine import decide
 from tests.phase5_fixtures import GOOD_MARKET, SECTORS, ZeroCosts, cash_signal, no_corr
 from tests.phase6_fixtures import NOW, FakeMarks, new_journal, settings
+
+
+pytestmark = pytest.mark.usefixtures("fixed_clock")      # the app reads the clock: the fixtures' day
 
 
 def journal_with_start(s):
@@ -363,10 +368,12 @@ def test_6_restart_creates_the_missing_paper_trade_of_an_unexpired_approved_sign
         with eng.j._lock:                               # a database from before the fix: the paper row was lost
             eng.j._db.execute("DELETE FROM paper_trades WHERE signal_id=?", (sid,))
             eng.j._db.commit()
-    c2, eng2 = make(db)                                 # restart
+    c2, eng2 = make(db)                                 # restart, within the signal's valid-until (fixed clock)
     with c2:
-        out = eng2.restore(now)
-        assert out["paper_trades_recreated"] == 1 and out["pending_paper"] == 1
+        started = c2.get("/api/engine").json()["restored"]          # the app's own restore at start
+        assert started["paper_trades_recreated"] == 1 and started["pending_paper"] == 1
+        out = eng2.restore(now)                                     # a second restore never duplicates it
+        assert out["paper_trades_recreated"] == 0 and out["pending_paper"] == 1
         row = eng2.j.paper_trade(sid)
         for k in ("status", "quantity", "risk_inr", "margin_inr", "planned_fill_utc", "stop", "target", "note"):
             assert row[k] == approved_row[k], k

@@ -357,6 +357,7 @@ def test_times_are_shown_in_ist_and_the_days_actual_budget_is_used(tmp_path):
     assert st["as_of_ist"] == "15 Nov 2026, 1:30 PM" and st["last_session_ist"] == "13 Nov 2026"
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_data_status_routes_and_import_routes_follow_the_write_checks():
     from fastapi.testclient import TestClient
     from app.main import create_app

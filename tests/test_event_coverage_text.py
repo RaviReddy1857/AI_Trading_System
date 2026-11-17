@@ -3,6 +3,8 @@
 retrieved within data_status.coverage_max_age_days, running to the week's Friday) is missing or incomplete."""
 from __future__ import annotations
 
+import pytest
+
 from datetime import date, datetime, timezone
 
 from app.cards import why_now
@@ -14,6 +16,9 @@ from tests.test_step1 import sim_settings
 
 MON, TUE, FRI = date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 20)
 PRE = datetime(2026, 11, 17, 3, 31, tzinfo=timezone.utc)                    # Tue 09:01 IST
+
+
+pytestmark = pytest.mark.usefixtures("fixed_clock")      # the app reads the clock: the fixtures' day
 
 
 def cov(symbol, retrieved=MON, through=date(2026, 11, 30)):

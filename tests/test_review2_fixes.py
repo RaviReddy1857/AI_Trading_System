@@ -130,15 +130,18 @@ def test_fii_import_with_missing_file_keeps_stored_days(tmp_path):
     ({"prev_close": -1.0}, BAD_PREV_CLOSE),
     ({"prev_close": NAN}, BAD_PREV_CLOSE),
 ])
+@pytest.mark.usefixtures("fixed_clock")
 def test_negative_fields_are_quarantined(kw, reason):
     assert reason in check_tick(Tick("X", 100.0, **kw), None, 5)
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_zero_and_missing_fields_still_pass():
     assert check_tick(Tick("X", 100.0, bid=0.0, ask=0.0, cum_volume=0.0, prev_close=0.0), None, 5) == []
     assert check_tick(Tick("X", 100.0), None, 5) == []
 
 
+@pytest.mark.usefixtures("fixed_clock")
 def test_negative_breeze_quote_reaches_the_gate(tmp_path):
     t = tick_from_breeze({"last": 100, "bPrice": -1, "sPrice": 0, "ttq": 10, "close": 99}, "RELIANCE", "stock")
     assert t.bid == -1.0                                   # not hidden as "no quote"

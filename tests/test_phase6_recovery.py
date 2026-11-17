@@ -20,6 +20,9 @@ from tests.test_step1 import sim_settings
 NOW = BAR_END + timedelta(seconds=3)                                      # Monday 10:30:03 IST
 
 
+pytestmark = pytest.mark.usefixtures("fixed_clock")      # the app reads the clock: the fixtures' day
+
+
 def on(s=None):
     s = s or sim_settings()
     raw = s.model_dump()
