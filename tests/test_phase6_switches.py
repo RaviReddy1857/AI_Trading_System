@@ -8,7 +8,7 @@ from app.alerts import AlertBook, Notifier
 from app.calendar import MarketCalendar
 from app.store import Store
 from tests.phase6_fixtures import new_journal, settings
-from tests.test_phase6_engine import BAR_END, BreakoutFixture, FixedRegime, seed, tick
+from tests.test_phase6_engine import BAR_END, BreakoutFixture, FixedRegime, pin_equity_start, seed, tick
 from tests.phase6_fixtures import app_client
 from tests.test_step1 import sim_settings
 
@@ -24,6 +24,7 @@ def engine_app(status_alerts: bool, telegram: bool = True):
     eng = c.app.state.engine
     eng.cash, eng.swing, eng.regime = [BreakoutFixture()], [], FixedRegime()
     eng.desk = type("NoOptions", (), {"underlyings": lambda self: []})()
+    pin_equity_start(eng)
     return c, eng
 
 

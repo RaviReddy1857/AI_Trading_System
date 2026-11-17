@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 LIVE, STALE, MISSING, CROSSED = "LIVE", "STALE", "MISSING", "CROSSED"
+# the note of a planned-fill quote that is not the first quote (its capture was lost): excluded from slippage
+FIRST_QUOTE_UNAVAILABLE = "first quote unavailable"
 
 
 def _pos(x) -> bool:
@@ -30,6 +32,7 @@ class LegQuote:
     source: str                      # "feed tick" | "option chain"
     depth: dict | None = None        # best five bids and asks with quantities, when the feed sends them
     note: str = ""
+    substitute: bool = False         # not the first quote at or after the planned fill (its capture was lost)
 
     @property
     def usable(self) -> bool:
@@ -59,7 +62,7 @@ class LegQuote:
     def to_dict(self) -> dict:
         return {"status": self.status, "bid": self.bid, "ask": self.ask, "last": self.last,
                 "quote_time_utc": self.quote_time.isoformat() if self.quote_time else None, "source": self.source,
-                "depth": self.depth, "note": self.note}
+                "depth": self.depth, "note": self.note, "substitute": self.substitute}
 
 
 class Marker:
@@ -89,23 +92,43 @@ class Marker:
         status = q["status"]
         if status == "LIVE" and q["bid"] is not None and q["ask"] is not None and q["bid"] > q["ask"] > 0:
             status = CROSSED
+        sub = bool(q.get("substitute"))
+        note = (f"{FIRST_QUOTE_UNAVAILABLE} (not captured: no quotes were being received at the planned fill); "
+                f"substitute: the first quote received after, at {q['at'].isoformat()}") if sub             else "first quote at or after the planned fill"
         return LegQuote(status if status != "NO_DATA" else MISSING, q["bid"], q["ask"], q["last"], q["at"],
-                        "feed tick", note="first quote at or after the planned fill")
+                        "feed tick", note=note, substitute=sub)
 
-    def first_option(self, underlying: str, expiry: date, strike: float, right: str, after: datetime,
-                     now: datetime) -> LegQuote:
-        """The contract in the first chain snapshot taken at or after `after`, as it was then."""
-        rows = self.store.first_option_chain_after(self.source, underlying, expiry, after, now)
-        r = next((x for x in rows if abs(x["strike"] - strike) < 1e-6 and x["right"] == right), None)
-        if r is None:
-            return LegQuote(MISSING, None, None, None, rows[0]["as_of"] if rows else None, "option chain",
-                            note="no chain snapshot at or after the planned fill with this contract")
-        if not (_pos(r["bid"]) and _pos(r["ask"])):
-            return LegQuote(MISSING, r["bid"], r["ask"], r["last"], r["as_of"], "option chain", note="no bid and ask")
-        if r["bid"] > r["ask"]:
-            return LegQuote(CROSSED, r["bid"], r["ask"], r["last"], r["as_of"], "option chain", note="bid above ask")
-        return LegQuote(LIVE, r["bid"], r["ask"], r["last"], r["as_of"], "option chain",
-                        note="first chain snapshot at or after the planned fill")
+    def first_options(self, underlying: str, legs, after: datetime, until: datetime) -> list[LegQuote]:
+        """Every leg's quote from the earliest chain snapshot taken in [after, until] that has a valid bid and ask
+        (both positive, not crossed) for EVERY leg: one snapshot for the whole fill. `until`: now or the signal's
+        valid-until, whichever is earlier. Until such a snapshot exists every leg is MISSING (with why)."""
+        expiries = {x.expiry for x in legs}
+        if len(expiries) != 1:
+            return [LegQuote(MISSING, None, None, None, None, "option chain",
+                             note="legs on different expiries are never filled from one chain snapshot") for _ in legs]
+        snaps = self.store.option_chain_contracts_between(self.source, underlying, next(iter(expiries)),
+                                                          [(x.strike, x.right) for x in legs], after, until)
+        seen = []
+        for as_of, rows in snaps:
+            quotes = []
+            for x in legs:
+                r = next((y for y in rows if abs(y["strike"] - x.strike) < 1e-6 and y["right"] == x.right), None)
+                if r is None or not (_pos(r["bid"]) and _pos(r["ask"])) or r["bid"] > r["ask"]:
+                    quotes = None
+                    break
+                quotes.append(LegQuote(LIVE, r["bid"], r["ask"], r["last"], as_of, "option chain",
+                                       note="earliest chain snapshot at or after the planned fill with every leg quoted"))
+            if quotes is not None:
+                if seen:
+                    quotes = [LegQuote(q.status, q.bid, q.ask, q.last, q.quote_time, q.source,
+                                       note=q.note + f" (skipped {len(seen)} earlier snapshot(s) without every leg)")
+                              for q in quotes]
+                return quotes
+            seen.append(as_of)
+        why = (f"{len(seen)} chain snapshot(s) at or after the planned fill, none with a bid and ask for every leg"
+               if seen else "no chain snapshot at or after the planned fill yet")
+        return [LegQuote(MISSING, None, None, None, seen[-1] if seen else None, "option chain", note=why)
+                for _ in legs]
 
     def spot(self, symbol: str, now: datetime) -> float | None:
         q = self.cash(symbol, now)

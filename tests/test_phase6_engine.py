@@ -67,7 +67,17 @@ def make(db=":memory:"):
     eng.cash, eng.swing = [BreakoutFixture()], []
     eng.regime = FixedRegime()
     eng.desk = type("NoOptions", (), {"underlyings": lambda self: []})()
+    pin_equity_start(eng)
     return c, eng
+
+
+def pin_equity_start(eng):
+    """The app writes each pool's starting equity at the REAL clock's yesterday; from the fixture day on that is not
+    before the fixture day, and the drawdown check would find no equity history. Date one before it as well."""
+    from app.journal import POOLS, pool_capital
+    for pool in POOLS:
+        eng.j.write_equity(pool, DAY_OPEN.date() - timedelta(days=3), pool_capital(eng.s, pool), 0.0, 0.0, DAY_OPEN,
+                           "test start: the pool's capital before the fixture day")
 
 
 def test_fixture_bars_to_a_stored_card_and_a_paper_trade(tmp_path):

@@ -586,6 +586,9 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **Review 8 fixes** (docs/STATUS.md): first-quote captures across a restart are tested on a fixture hub, not on a
+  restart of the live app; a late cash fill is caught up on stored 1-minute bars only (the minute still forming is
+  checked later); the Telegram reply check is tested with fake replies.
 - **Review 7 fixes** (docs/STATUS.md): the uncertain-delivery path is tested with a fake Telegram transport, not a real
   timeout; the separate alert and watchdog threads are tested with a blocked step, not over a market day.
 - **Phase 6 live.** No real Telegram message has been sent (alerts are off until you switch them on); no full market

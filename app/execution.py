@@ -14,7 +14,9 @@ the bid for a sale) at the planned fill, in rupees (x quantity) and as % of the 
 option); grouped by stock and by strike distance from spot (`execution.strike_distance_bands_pct`), with the
 spread width and the depth at the touch beside each group, the count, and "low sample" under `backtest.min_trades`.
 Positive slippage = worse for me. Every figure comes from the stored records; a leg without a usable quote at the
-planned fill is counted as "no quote", never estimated.
+planned fill is counted as "no quote", never estimated. A paper fill whose first quote was unavailable (its capture
+was lost, a substitute quote was used: `app.pricing.FIRST_QUOTE_UNAVAILABLE`) is left out of every slippage figure
+and counted under "first_quote_unavailable".
 """
 from __future__ import annotations
 
@@ -110,7 +112,10 @@ class ExecutionBook:
             if pf is None:
                 continue
             side = pf["side"]
-            usable = pf["status"] == "LIVE" and _ok(pf["bid"]) and _ok(pf["ask"]) and pf["ask"] >= pf["bid"]
+            from .pricing import FIRST_QUOTE_UNAVAILABLE
+            substitute = (pf.get("note") or "").startswith(FIRST_QUOTE_UNAVAILABLE)
+            usable = (not substitute and pf["status"] == "LIVE" and _ok(pf["bid"]) and _ok(pf["ask"])
+                      and pf["ask"] >= pf["bid"])
             mid = (pf["bid"] + pf["ask"]) / 2 if usable else None
             touch = (pf["ask"] if side == "BUY" else pf["bid"]) if usable else None
             row = {"signal_id": sid, "leg": leg, "symbol": pf["symbol"], "side": side, "strike": pf["strike"],
@@ -120,7 +125,7 @@ class ExecutionBook:
                    "spread_pct_of_mid": round((pf["ask"] - pf["bid"]) / mid * 100, 4) if usable and mid else None,
                    "depth_at_touch": _depth_at_touch(pf.get("depth"), side), "spot": pf["spot"],
                    "band": band_of(pf["strike"], pf["spot"], self.s.execution.strike_distance_bands_pct),
-                   "no_quote": not usable}
+                   "no_quote": not usable and not substitute, "first_quote_unavailable": substitute}
             for name, moment in (("paper", PAPER_FILL), ("actual", ACTUAL_FILL)):
                 f = m.get(moment)
                 price = f["price"] if f else None
@@ -158,6 +163,7 @@ class ExecutionBook:
                     vals = [r[field] for r in g if r[field] is not None]
                     return round(sum(vals), 2) if vals else None
                 res.append({"group": k, "legs": len(g), "trades": n_sig, "no_quote": sum(1 for r in g if r["no_quote"]),
+                            "first_quote_unavailable": sum(1 for r in g if r["first_quote_unavailable"]),
                             "low_sample": n_sig < m,
                             "paper_vs_mid_pct": mean("paper_vs_mid_pct"), "paper_vs_touch_pct": mean("paper_vs_touch_pct"),
                             "paper_vs_mid_inr": total("paper_vs_mid_inr"), "paper_vs_touch_inr": total("paper_vs_touch_inr"),
@@ -173,7 +179,9 @@ class ExecutionBook:
                 "legs": len(rows), "bands_pct": list(self.s.execution.strike_distance_bands_pct),
                 "note": "Slippage = worse for you when positive (purchase: fill - reference; sale: reference - fill). "
                         "Reference = mid or touch (ask for a purchase, bid for a sale) at the planned fill. Computed from "
-                        "the stored execution records; a leg without a usable quote is counted under no_quote."}
+                        "the stored execution records; a leg without a usable quote is counted under no_quote; a fill whose first "
+                        "quote was unavailable (a substitute quote was used) is left out and counted under "
+                        "first_quote_unavailable."}
 
     def csv(self) -> str:
         rows = self.leg_rows()

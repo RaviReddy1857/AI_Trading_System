@@ -79,11 +79,15 @@ class TelegramSender:
         except Exception as e:                                       # network, timeout, DNS: never echo the URL
             raise SendError(redact(f"{type(e).__name__}: {e}", token, chat), uncertain=_after_send(e)) from None
         try:
-            reply = json.loads(raw.decode("utf-8") or "{}")
-        except ValueError:
-            if status == 200:
-                raise SendError("Telegram's reply could not be read (HTTP 200): delivery not confirmed",
-                                uncertain=True) from None
-            reply = {}
-        if status != 200 or not reply.get("ok"):
-            raise SendError(redact(f"Telegram refused the message (HTTP {status}): {reply.get('description', '')}", token, chat))
+            reply = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            reply = None
+        if status == 200 and not (isinstance(reply, dict) and isinstance(reply.get("ok"), bool)):
+            # the request reached Telegram and was answered, but the answer is not a Bot API reply: never a plain
+            # failure (a resend could duplicate a delivered message)
+            raise SendError("Telegram's reply could not be read or had an unexpected structure (HTTP 200): "
+                            "delivery not confirmed", uncertain=True)
+        if status == 200 and reply["ok"] is True:
+            return
+        desc = reply.get("description", "") if isinstance(reply, dict) else ""
+        raise SendError(redact(f"Telegram refused the message (HTTP {status}): {desc}", token, chat))

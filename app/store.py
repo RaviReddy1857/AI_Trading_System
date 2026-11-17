@@ -133,6 +133,10 @@ CREATE TABLE IF NOT EXISTS capital_log (
     note TEXT, logged_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS quality_events_at ON quality_events (at_utc);
+CREATE TABLE IF NOT EXISTS first_quotes (
+    symbol TEXT NOT NULL, minute_utc TEXT NOT NULL, received_utc TEXT NOT NULL, bid REAL, ask REAL, last REAL,
+    source TEXT NOT NULL, PRIMARY KEY (symbol, minute_utc)
+);
 CREATE TABLE IF NOT EXISTS import_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, at_utc TEXT NOT NULL, reason TEXT NOT NULL
 );
@@ -640,22 +644,46 @@ class Store:
         keys = ["strike", "right", "as_of", "bid", "ask", "last", "oi", "oi_change", "volume", "spot"]
         return [{**dict(zip(keys, x)), "as_of": _ts(x[2])} for x in rows]
 
-    def first_option_chain_after(self, source: str, underlying: str, expiry: date, after: datetime,
-                                 until: datetime) -> list[dict]:
-        """Rows of the first stored snapshot taken at or after `after` (and not after `until`), one underlying and
-        expiry: the option chain a paper fill planned at `after` meets."""
+    def option_chain_contracts_between(self, source: str, underlying: str, expiry: date, contracts,
+                                       after: datetime, until: datetime) -> list[tuple[datetime, list[dict]]]:
+        """Every stored snapshot taken in [after, until] of one underlying and expiry, oldest first, each with its
+        rows for the given (strike, right) contracts only: (as_of, rows)."""
+        wanted = {(float(k), r) for k, r in contracts}
         with self._lock:
-            r = self._db.execute("SELECT MIN(as_of_utc) FROM option_chain WHERE underlying=? AND source=? AND expiry=?"
-                                 " AND as_of_utc>=? AND as_of_utc<=?",
-                                 (underlying, source, expiry.isoformat(), after.isoformat(), until.isoformat())).fetchone()
-            if not r or not r[0]:
-                return []
             rows = self._db.execute(
-                "SELECT strike,right,as_of_utc,bid,ask,last,oi,oi_change,volume,spot FROM option_chain"
-                " WHERE underlying=? AND source=? AND expiry=? AND as_of_utc=? ORDER BY strike, right",
-                (underlying, source, expiry.isoformat(), r[0])).fetchall()
-        keys = ["strike", "right", "as_of", "bid", "ask", "last", "oi", "oi_change", "volume", "spot"]
-        return [{**dict(zip(keys, x)), "as_of": _ts(x[2])} for x in rows]
+                "SELECT strike,right,as_of_utc,bid,ask,last FROM option_chain WHERE underlying=? AND source=? AND"
+                " expiry=? AND as_of_utc>=? AND as_of_utc<=? ORDER BY as_of_utc, strike, right",
+                (underlying, source, expiry.isoformat(), after.isoformat(), until.isoformat())).fetchall()
+        out: dict[str, list[dict]] = {}
+        for k, r, at, bid, ask, last in rows:
+            out.setdefault(at, [])
+            if (float(k), r) in wanted:
+                out[at].append({"strike": k, "right": r, "as_of": _ts(at), "bid": bid, "ask": ask, "last": last})
+        return [(_ts(at), xs) for at, xs in out.items()]
+
+    # ---- first quotes (the first good tick of each minute, kept across a restart) ----
+    def save_first_quote(self, symbol: str, minute: datetime, received: datetime, bid, ask, last, source: str,
+                         keep_after: datetime | None = None) -> None:
+        """Keep the first good tick of a minute (never replaced: the first one wins) and drop older ones."""
+        self._guard(source)
+        with self._lock:
+            self._db.execute("INSERT OR IGNORE INTO first_quotes VALUES (?,?,?,?,?,?,?)",
+                             (symbol, minute.isoformat(), received.isoformat(), bid, ask, last, source))
+            if keep_after is not None:
+                self._db.execute("DELETE FROM first_quotes WHERE symbol=? AND minute_utc<?",
+                                 (symbol, keep_after.isoformat()))
+            self._db.commit()
+
+    def first_quote_after(self, symbol: str, after: datetime) -> dict | None:
+        """The earliest kept first-of-minute tick received at or after `after` (None when none is kept)."""
+        floor = after.replace(second=0, microsecond=0)
+        with self._lock:
+            r = self._db.execute("SELECT received_utc,bid,ask,last FROM first_quotes WHERE symbol=? AND minute_utc>=?"
+                                 " AND received_utc>=? ORDER BY received_utc LIMIT 1",
+                                 (symbol, floor.isoformat(), after.isoformat())).fetchone()
+        if r is None:
+            return None
+        return {"at": _ts(r[0]), "bid": r[1], "ask": r[2], "last": r[3]}
 
     def prune_option_chain(self, source: str, keep_after: datetime) -> int:
         self._guard(source)

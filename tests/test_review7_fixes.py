@@ -440,7 +440,7 @@ def test_8_two_ticks_before_the_poll_fill_at_the_first(tmp_path):
         eng.paper.fill_pending(BAR_END + timedelta(seconds=25), eng.signals)
         row = eng.j.paper_trade(sid)
         assert row["status"] == "OPEN" and row["entry_price"] == pytest.approx(last + 1.1)
-        assert row["entry_utc"] == (BAR_END + timedelta(seconds=25)).isoformat()
+        assert row["entry_utc"] == (BAR_END + timedelta(seconds=10)).isoformat()      # the fill quote's time, not the poll's
 
 
 def test_8_hub_keeps_the_first_good_tick_of_each_minute():

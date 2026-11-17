@@ -25,6 +25,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Phase 9 M3: exits, rolls, campaigns (built earlier) and settlement readiness P9.29-P9.32 | Built and tested as rules and estimates; sending, repeats and marking a position closed wait for phase 6 | 638 passing (whole suite) | 2026-11-15 |
 | 5 | Risk engine | Built and tested on fixtures: sizing (cash and options), capital pool, selling-spread count, sector and correlation limits, daily stop and monthly pause, drawdown halve/pause (deposits excluded), kill switch, reason codes, capital log, `/api/risk`. Live decisions are all NO_TRADE (PORTFOLIO_UNKNOWN) until the phase 6 journal records positions. Follow-ups (user decisions): index spreads narrow to the widest width down to 100 points that fits the effective (drawdown-halved) option limit; stock option spreads use the stock-option capital; per-pool loss stops recorded for phase 6 | 871 passing (whole suite) | 2026-11-16 |
 | 6 | Live signals and alerts (paper mode) | Built and tested on fixtures in four milestones: journal and positions with two capital pools; live loop, cards, score, paper trader, execution records, exit calls for every trade type; Telegram (send-only, OFF until switched on), trade-type switches, plan and summary, settlement alert sending; failure recovery. Not yet seen: a real Telegram message, a live market day, a real feed drop | 1079 passing (whole suite) | 2026-11-16 |
+| - | Review fixes (Codex re-check of 9dd57af..d35c2e6, 4 findings): paper entry at the fill quote's time with late-poll exit catch-up; first-quote captures kept across a restart, lost ones marked and out of the slippage report; option fills from one snapshot quoting every leg; Telegram 200 with an unexpected body is uncertain | Fixed and tested | 1,118 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2477,6 +2478,33 @@ points it at the temporary folder. The future-date check is unchanged and still 
 (`tests/test_local_config.py`).
 
 Tests: whole suite 1,108 passing, 0 failing.
+
+## Review fixes: Codex re-check of 9dd57af..d35c2e6 (four findings), 2026-11-17
+
+Each fix has tests in `tests/test_review8_fixes.py`; 8 of its 10 tests fail on the code before the fix (the other two
+guard the unchanged behaviour: no breach keeps the trade open; a snapshot after valid-until is never used).
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | HIGH: a paper trade's entry time was the poll's time, and exits were checked only from then, so a stop breached between the first quote and a late poll was missed | `PaperTrader.fill_pending`: `entry_utc` is the fill quote's own time (cash: the first tick; options: the chain snapshot). A cash trade is checked at once (`_catch_up`) on every stored, completed 1-minute bar from the fill quote's minute up to the poll (stop first when one bar touches both, as in the backtests); the 5-minute bar checks of `manage` carry on after. Test: first quote 10:30:01, stop breached 10:31, recovered 10:34, poll at 10:34 -> STOP at the stop price |
+| 2 | MEDIUM: first-quote captures were kept in memory only, so a restart lost them | `MarketHub` also writes the first good tick of each minute to the new `first_quotes` table (kept one day) and `first_quote` looks there too, so a capture made before a restart is still used. A capture that was lost (this run's first tick came after the planned fill and nothing was kept from before) is returned as a `substitute`: the fill's source reads "first quote unavailable ...; substitute <price> from the quote at <time>", its PLANNED_FILL record carries the same note, and the slippage report leaves it out of every figure and counts it under `first_quote_unavailable`. Tests: capture, restart, later quote -> filled at the captured quote; lost capture -> marked substitute, out of the slippage report |
+| 3 | MEDIUM: option fills took each leg from the first snapshot after the planned fill, so a first snapshot without one leg left the trade unfilled until it expired | `Marker.first_options`: the earliest chain snapshot in [planned fill, min(now, valid-until)] that has a positive, uncrossed bid and ask for EVERY leg; all legs come from that one snapshot (legs are never mixed across snapshots; legs on different expiries are never filled). Store: `option_chain_contracts_between` replaces `first_option_chain_after`. Tests: first snapshot missing a leg, second complete -> filled from the second; a complete snapshot after valid-until -> NOT_FILLED |
+| 4 | MEDIUM: an HTTP 200 whose body was not a Bot API reply (for example `[]`) raised a plain error, so an information alert was resent | `TelegramSender.send` checks the reply's structure: HTTP 200 with a body that is not a JSON object with a boolean `ok` (unparseable, `[]`, `null`, no `ok`) is an uncertain delivery; HTTP 200 with `ok: false` and any non-200 status stay plain failures. Test: `[]` then success -> the signal alert is UNCERTAIN and sent once |
+
+Also: the engine and switches tests failed from 2026-11-17 on, before any of these changes. The app writes each pool's
+starting equity at the REAL clock's yesterday, which is no longer before the fixtures' trading day (2026-11-16), so the
+drawdown check found no equity history (PORTFOLIO_UNKNOWN). `tests/test_phase6_engine.pin_equity_start` writes a start
+point dated before the fixture day as well. No app code changed for this.
+
+The running app picks these changes up at its next restart (the `first_quotes` table is created then). Nothing in
+`data/` or the database was touched.
+
+Not tested here: a restart of the live app with real Breeze ticks; the catch-up of fix 1 uses the 1-minute bars the hub
+stores, so a breach inside the minute still forming is seen at the next check, not at the fill. Option trades are not
+caught up between the fill and the next 5-minute check: their exits are checked on live chain quotes at each bar close,
+as before.
+
+Tests: whole suite 1,118 passing, 0 failing.
 
 ## Open issues
 

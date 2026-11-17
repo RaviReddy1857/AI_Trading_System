@@ -43,6 +43,9 @@ class FakeMarker:
         return q if q.quote_time is not None and q.quote_time >= after else LegQuote("MISSING", None, None, None, None,
                                                                                       "option chain")
 
+    def first_options(self, u, legs, after, until):
+        return [self.first_option(u, x.expiry, x.strike, x.right, after, until) for x in legs]
+
     def spot(self, symbol, now):
         q = self.cash_q.get(symbol)
         return q.last if q and q.usable else None

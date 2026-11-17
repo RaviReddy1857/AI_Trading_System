@@ -2,10 +2,14 @@
 alert switch says, and tracked to its stop, target or time exit, with costs. Nothing is sent to the broker.
 
 Fill: at the next bar's open, never on the signal bar: the first LIVE quote received at or after the planned fill
-time (the close of the signal bar), captured when it arrived (`MarketHub.first_quote`; options: the first chain
-snapshot at or after it), never a later tick however late the poll runs. Cash: a purchase at the ask and a sale at the bid when the feed sends them,
-else the last trade moved against us by the configured slippage. Options: every leg at its touch (buy at the ask,
-sell at the bid) from a chain snapshot taken at or after the planned fill. No LIVE quote before the signal's
+time (the close of the signal bar), captured when it arrived and kept across a restart (`MarketHub.first_quote`),
+never a later tick however late the poll runs. When that capture was lost (no quotes were being received at the
+planned fill), the fill is marked "first quote unavailable", shows the substitute quote's price and time, and is left
+out of the slippage report. Cash: a purchase at the ask and a sale at the bid when the feed sends them, else the last
+trade moved against us by the configured slippage. Options: every leg at its touch (buy at the ask, sell at the bid)
+from the earliest chain snapshot at or after the planned fill, and within the signal's valid-until, that has a valid
+bid and ask for every leg. The entry time is the fill quote's own time, not the poll's: the exits of a cash trade
+filled late are checked at once on every stored 1-minute bar from that time on. No LIVE quote before the signal's
 valid-until: NOT_FILLED. Past its valid-until a pending trade expires whatever the quote (after a restart, a
 laptop sleep or the close too: `expire_pending` runs on every loop step, market open or not). A fill at or beyond the stop or target: NOT_FILLED (FILL_BEYOND_STOP_OR_TARGET), as in
 the backtests.
@@ -36,6 +40,13 @@ def bar_of(bars_1m: list[Bar], symbol: str, start: datetime) -> Bar | None:
         return None
     return Bar(symbol, start, xs[0].open, max(b.high for b in xs), min(b.low for b in xs), xs[-1].close,
                sum((b.volume or 0) for b in xs), sum(b.ticks for b in xs))
+
+
+def _valid_until(row) -> datetime | None:
+    try:
+        return datetime.fromisoformat(json.loads(row["note"] or "{}")["valid_until_utc"])
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 class PaperTrader:
@@ -104,13 +115,18 @@ class PaperTrader:
             planned = datetime.fromisoformat(row["planned_fill_utc"])
             if sig is None:
                 continue
-            qs = self._first_quotes(sig, planned, now)
-            fresh = all(q.usable and q.quote_time is not None and q.quote_time >= planned for q in qs)
+            until = min(now, _valid_until(row) or now)
+            qs = self._first_quotes(sig, planned, until)
+            fresh = all(q.usable and q.quote_time is not None and planned <= q.quote_time <= until for q in qs)
             if not fresh:
                 continue
             spot = self._spot(sig, now)
             self.x.record_quotes(sig, PLANNED_FILL, qs, now, row["quantity"], spot)
             prices, source = self._fill_prices(sig, qs)
+            if prices is not None and any(q.substitute for q in qs):
+                source = (f"first quote unavailable (not captured: no quotes were being received at the planned fill);"
+                          f" substitute {', '.join(f'{p:g}' for p in prices)} from the quote at "
+                          f"{max(q.quote_time for q in qs).isoformat()}: {source}")
             if prices is None:
                 self._finish(row, "NOT_FILLED", now, source)
                 done.append(row["signal_id"])
@@ -123,24 +139,43 @@ class PaperTrader:
                 done.append(row["signal_id"])
                 continue
             from .positions import time_exit_at
-            row.update(status="OPEN", entry_utc=now.isoformat(), entry_price=round(entry, 4),
+            entry_t = max(q.quote_time for q in qs)            # the fill quote's own time, never the poll's
+            row.update(status="OPEN", entry_utc=entry_t.isoformat(), entry_price=round(entry, 4),
                        entry_prices_json=json.dumps(prices) if sig.legs else None, entry_source=source)
             due, _ = time_exit_at(self.j.paper_position(row), self.s, self.cal)
             row["time_exit_utc"] = due.isoformat() if due else None
             self.j.upsert_paper(row)
+            if not sig.legs:
+                self._catch_up(row, now)
             done.append(row["signal_id"])
         return done
+
+    def _catch_up(self, row, now: datetime) -> dict | None:
+        """A cash trade filled at a poll later than its fill quote: its stop and target are checked at once on every
+        stored 1-minute bar from the fill quote's minute up to now (stop first when one bar touches both), so a
+        price between the fill and the poll is never skipped. The 5-minute bar checks in `manage` carry on after."""
+        from .backtest import Engine
+        pos = self.j.paper_position(row)
+        entry_t = datetime.fromisoformat(row["entry_utc"])
+        for k, b in enumerate(self.store.bars_1m_between(pos.symbol, entry_t.replace(second=0, microsecond=0), now)):
+            if b.start + timedelta(minutes=1) > now:
+                break                                  # a minute still forming
+            hit = Engine._hit(pos.direction, b, pos.stop, pos.target, k == 0)
+            if hit:
+                return self._close(row, pos, hit[0], [self._slip(pos, hit[1])], now)
+        return None
 
     def _quotes(self, sig, now):
         if not sig.legs:
             return [self.m.cash(sig.symbol, now)]
         return [self.m.option(sig.symbol, x.expiry, x.strike, x.right, now) for x in sig.legs]
 
-    def _first_quotes(self, sig, planned, now):
-        """Each instrument's first quote at or after the planned fill (as it was then)."""
+    def _first_quotes(self, sig, planned, until):
+        """Cash: the first quote at or after the planned fill (as it was then). Options: every leg from the earliest
+        chain snapshot in [planned, until] quoting every leg."""
         if not sig.legs:
-            return [self.m.first_cash(sig.symbol, planned, now)]
-        return [self.m.first_option(sig.symbol, x.expiry, x.strike, x.right, planned, now) for x in sig.legs]
+            return [self.m.first_cash(sig.symbol, planned, until)]
+        return self.m.first_options(sig.symbol, sig.legs, planned, until)
 
     def _spot(self, sig, now):
         return self.m.spot(sig.symbol, now)

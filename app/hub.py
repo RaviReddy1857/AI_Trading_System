@@ -1,13 +1,16 @@
 """MarketHub: every tick passes the quality gate, then feeds bars and the
 latest-price table. Bad ticks are logged and dropped.
 
-It also keeps the first good tick of every 1-minute bucket of each symbol (the last hour), so the paper trader fills
-a pending trade at the first quote after the bar close (`first_quote`) however late its poll runs, never at a
-later tick."""
+It also keeps the first good tick of every 1-minute bucket of each symbol (the last hour in memory, the last day in
+the database, so a restart does not lose it), so the paper trader fills a pending trade at the first quote after the
+bar close (`first_quote`) however late its poll runs, never at a later tick. When that capture was lost (the app was
+not receiving quotes at the planned fill: stopped, or started after it), the first quote received after is returned
+as a substitute, marked `substitute`, never as the first quote."""
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+import logging
 from datetime import datetime, timedelta
 
 from .bars import BarBuilder
@@ -16,6 +19,8 @@ from .config import Settings
 from .models import Tick, utcnow
 from .quality import IST, is_finite, check_tick, freshness
 from .store import Store
+
+log = logging.getLogger("hub")
 
 
 class MarketHub:
@@ -58,6 +63,11 @@ class MarketHub:
                 firsts[minute] = tick
                 while len(firsts) > self._FIRST_KEEP:
                     firsts.popitem(last=False)
+                try:                                   # kept across a restart; a write failure never drops the tick
+                    self.store.save_first_quote(tick.symbol, minute, tick.received_at, tick.bid, tick.ask, tick.last,
+                                                self.feed_name, keep_after=minute - timedelta(days=1))
+                except Exception:
+                    log.exception("first quote of %s at %s not saved", tick.symbol, minute)
             day = tick.received_at.astimezone(IST).date()
             seen = self._seen_range.get(tick.symbol)
             if seen is None or seen[0] != day:
@@ -134,17 +144,33 @@ class MarketHub:
 
     def first_quote(self, symbol: str, after: datetime) -> dict | None:
         """The first good tick received at or after `after` (a bar close: a minute boundary), with its status as it
-        was at its own time (LIVE inside market hours); None when none was received yet (or it is older than the
-        kept hour). For an `after` inside a minute, a tick in that minute before `after` is skipped and the first
-        tick of a later minute is used."""
+        was at its own time (LIVE inside market hours); None when none was received yet. Looked up in memory (the
+        last hour), then in the database (the last day: captures made before a restart). For an `after` inside a
+        minute, a tick in that minute before `after` is skipped and the first tick of a later minute is used.
+
+        `substitute` is True when the capture was lost: this run's first tick came after `after` and nothing was
+        kept from before, so the quote returned is the first one received after the gap, not the first quote."""
         floor = after.replace(second=0, microsecond=0)
         with self._lock:
             firsts = self._first.get(symbol) or {}
             t = next((x for m, x in firsts.items() if m >= floor and x.received_at >= after), None)
-            if t is None:
-                return None
-            return {"status": self._status(t, t.received_at), "bid": t.bid, "ask": t.ask, "last": t.last,
-                    "at": t.received_at}
+            started = self._first_tick_at
+        found = {"at": t.received_at, "bid": t.bid, "ask": t.ask, "last": t.last} if t is not None else None
+        try:
+            kept = self.store.first_quote_after(symbol, after)
+        except Exception:
+            log.exception("kept first quotes of %s not read", symbol)
+            kept = None
+        if kept is not None and (found is None or kept["at"] < found["at"]):
+            found = kept
+        if found is None:
+            return None
+        substitute = started is not None and started > after and found["at"] >= started
+        return {"status": self._status_at(found["at"]), "bid": found["bid"], "ask": found["ask"],
+                "last": found["last"], "at": found["at"], "substitute": substitute}
+
+    def _status_at(self, at: datetime) -> str:
+        return freshness(at, at, self.settings.feed.stale_after_seconds, self.enforce_hours, self.calendar.holidays)
 
     def first_tick_at(self) -> datetime | None:
         """Time of the first good tick since the app started (the "data from" of a restart)."""
