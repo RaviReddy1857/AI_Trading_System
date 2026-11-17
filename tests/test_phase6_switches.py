@@ -8,7 +8,8 @@ from app.alerts import AlertBook, Notifier
 from app.calendar import MarketCalendar
 from app.store import Store
 from tests.phase6_fixtures import new_journal, settings
-from tests.test_phase6_engine import BAR_END, BreakoutFixture, FixedRegime, pin_equity_start, seed, tick
+from tests.test_phase6_engine import (BAR_END, BreakoutFixture, FixedRegime, pin_equity_start, seed,
+                                     signals_at, tick)
 from tests.phase6_fixtures import app_client
 from tests.test_step1 import sim_settings
 
@@ -53,7 +54,7 @@ def test_switch_on_but_status_without_alerts_sends_none():
         c.post("/journal/alert-switches", json={"type": "INTRADAY_STOCKS", "on": True})
         run_bar(c, eng)
         assert signal_alerts(c) == []
-        card = c.get("/api/signals").json()["cards"][0]
+        card = signals_at(c)["cards"][0]
         assert card["alert"]["allowed"] is False and "does not allow alerts" in card["alert"]["why"]
 
 

@@ -71,6 +71,14 @@ def make(db=":memory:"):
     return c, eng
 
 
+def signals_at(c, at=BAR_END + timedelta(seconds=5)):
+    """GET /api/signals with the app's clock at the fixture time: it lists the last 24 hours by the clock, and the
+    fixture day is in the past, so the real clock would leave the fixture cards out from a day later."""
+    from unittest import mock
+    with mock.patch("app.main.utcnow", return_value=at):
+        return c.get("/api/signals").json()
+
+
 def pin_equity_start(eng):
     """The app writes each pool's starting equity at the REAL clock's yesterday; from the fixture day on that is not
     before the fixture day, and the drawdown check would find no equity history. Date one before it as well."""
@@ -89,7 +97,7 @@ def test_fixture_bars_to_a_stored_card_and_a_paper_trade(tmp_path):
         out = eng.on_bar(BAR_END, now)
         assert out["signals"] == 1 and out["approved"] == 1, out
         sid = out["stored"][0]["signal_id"]
-        r = c.get("/api/signals").json()
+        r = signals_at(c)
         card = r["cards"][0]
         assert card["signal_id"] == sid and card["status"] == "APPROVED" and not card["collapsed"]
         for k in ("instrument", "direction", "entry_zone", "stop", "target", "quantity", "valid_until", "strategy_id",
@@ -128,7 +136,7 @@ def test_restart_does_not_duplicate_or_revive(tmp_path):
         eng2.last_bar = None
         assert eng2.on_bar(BAR_END, now + timedelta(seconds=5))["signals"] == 0      # same bar again: not issued twice
         later = BAR_END + timedelta(minutes=30)                                       # past valid-until
-        r = c2.get("/api/signals").json()
+        r = signals_at(c2)
         assert len(r["cards"]) == 1
         from app.cards import card_view
         assert card_view(r["cards"][0], later)["expired"] is True and not card_view(r["cards"][0], later)["actionable"]
@@ -144,6 +152,6 @@ def test_kill_switch_makes_every_signal_no_trade():
         c.app.state.hub.on_tick(Tick("NIFTY", 23500.0, source="sim", received_at=now - timedelta(minutes=10)))  # STALE
         out = eng.on_bar(BAR_END, now)
         assert out["signals"] == 1 and out["approved"] == 0
-        card = c.get("/api/signals").json()["cards"][0]
+        card = signals_at(c)["cards"][0]
         assert card["collapsed"] and "KILL_SWITCH" in card["reason_codes"]
         assert c.get("/api/paper").json()["open"] == []                   # NO_TRADE is never paper-traded

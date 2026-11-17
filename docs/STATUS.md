@@ -28,6 +28,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex re-check of 9dd57af..d35c2e6, 4 findings): paper entry at the fill quote's time with late-poll exit catch-up; first-quote captures kept across a restart, lost ones marked and out of the slippage report; option fills from one snapshot quoting every leg; Telegram 200 with an unexpected body is uncertain | Fixed and tested | 1,118 passing (whole suite) | 2026-11-17 |
 | - | Event lists: "EVENT COVERAGE MISSING: results dates unknown" instead of "none" when the week's results-date coverage is missing or incomplete (pre-market plan, signal cards) | Fixed and tested | 1,126 passing (whole suite) | 2026-11-17 |
 | - | Two books: signal cards' risk checks use my real positions and the approved signals awaiting my decision only; paper trades run in a simulated paper book with its own limits; the card shows the commitment breakdown | Fixed and tested | 1,134 passing (whole suite) | 2026-11-17 |
+| - | Paper books per strategy: each strategy's own paper book per pool (pool capital, real-book sizing); only the per-strategy cap of 10 open + pending refuses | Fixed and tested | 1,136 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2563,6 +2564,29 @@ capital and count limits asked for).
 
 Tests: `tests/test_two_books.py` (8; 7 fail on the code before, the eighth guards that an expired pending paper trade
 frees its place). Whole suite 1,134 passing, 0 failing.
+
+## Paper books per strategy (2026-11-17)
+
+One shared paper book per pool let one strategy's paper trades refuse another's, so a strategy's paper track record
+could miss approved signals. Now:
+
+- Each strategy has its own paper book per pool (`journal.paper_book(..., strategy_id=)`, `paper_books`): the pool's
+  capital (as the real book) and the real book's per-trade sizing (a paper trade's quantity or lots are the approved
+  decision's). Other strategies' paper trades are never counted in it.
+- The only refusal is the per-strategy safety cap `paper.max_open_trades` (10, open + pending of that strategy in that
+  pool): beyond it the paper trade is NOT_OPENED with "PAPER_BOOK_LIMIT: N paper trades of <strategy> ...".
+- The capital commitment is reported, not a refusal (`over_capital` when open + pending commit more than the pool's
+  capital), so every approved signal of a strategy (up to the cap) is in its paper track record. This is a choice made
+  to meet "includes all of its approved signals"; a capital refusal per strategy would drop some of them.
+- Removed from config: `paper.capital_pct` and `paper.uncommitted_cash_pct` (the books use the pool's capital; nothing
+  else read them; config.local.yaml does not set them).
+- `GET /api/paper` returns `books`: {pool: {strategy_id: book}}.
+
+Also fixed in the tests: the engine, switches and two-book tests read `GET /api/signals`, which lists the last 24 hours
+by the real clock; the fixture day (2026-11-16 10:30 IST) fell out of that window at 2026-11-17 10:30 IST, so those
+tests began failing. `tests/test_phase6_engine.signals_at` calls it with the app's clock at the fixture time.
+
+Tests: `tests/test_two_books.py` (10; 5 fail on the code before). Whole suite 1,136 passing, 0 failing.
 
 ## Open issues
 

@@ -65,9 +65,9 @@ class PaperTrader:
         return row
 
     def admit(self, row: dict | None, now: datetime) -> dict | None:
-        """The paper book's own limits (`journal.paper_book`: its simulated capital, uncommitted share and maximum
-        open trades). A paper trade that does not fit is stored NOT_OPENED with why; the signal and its card are
-        unchanged (they are decided on my real book)."""
+        """The strategy's own paper book (`journal.paper_book`): only its per-strategy safety cap
+        `paper.max_open_trades` refuses; other strategies' paper trades never do. A refused paper trade is stored
+        NOT_OPENED with why; the signal and its card are unchanged (they are decided on my real book)."""
         if row is None:
             return None
         from .journal import paper_book
@@ -76,7 +76,7 @@ class PaperTrader:
             return row
         note = json.loads(row["note"] or "{}")
         note["why"] = "; ".join(book["why"])
-        note["paper_book"] = {k: book.get(k) for k in ("committed_inr", "new_inr", "after_inr", "usable_inr",
+        note["paper_book"] = {k: book.get(k) for k in ("strategy_id", "committed_inr", "new_inr", "after_inr",
                                                        "capital_inr", "open_or_pending", "max_open_trades")}
         return {**row, "status": "NOT_OPENED", "exit_utc": now.isoformat(), "exit_reason": note["why"],
                 "note": json.dumps(note)}

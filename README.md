@@ -587,7 +587,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 
 ## Not yet tested
 - **Two books** (docs/STATUS.md): the real book (my positions and approved signals awaiting my decision) and
-  the paper book (`paper:` in config.yaml) are tested on fixtures, not over a live day.
+  the paper books, one per strategy and pool (`paper.max_open_trades` in config.yaml), are tested on fixtures,
+  not over a live day.
 - **Event coverage wording** (docs/STATUS.md): the plan and the cards say "EVENT COVERAGE MISSING: results dates
   unknown" until every stock has a current COVERAGE row; tested on fixtures, not yet seen in a live pre-market plan.
 - **Review 8 fixes** (docs/STATUS.md): first-quote captures across a restart are tested on a fixture hub, not on a

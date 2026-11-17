@@ -1008,11 +1008,10 @@ class Execution(StrictModel):
 
 
 class PaperBook(StrictModel):
-    """The paper book: every approved signal's paper trade runs here, a simulated book with its own capital and
-    limits, never counted against my real capital. Its capital per pool is `capital_pct` of that pool's capital."""
-    capital_pct: float = Field(100.0, gt=0, le=1000)
-    uncommitted_cash_pct: float = Field(25.0, ge=0, lt=100)   # share of the paper capital that stays uncommitted
-    max_open_trades: int = Field(10, ge=1, le=500)            # open + pending paper trades per pool
+    """The paper books: each strategy has its own paper book per pool, with that pool's capital and the real book's
+    per-trade sizing, never counted against my real capital. A strategy's paper trades never stop another's; the
+    only refusal is this per-strategy safety cap."""
+    max_open_trades: int = Field(10, ge=1, le=500)            # open + pending paper trades per strategy and pool
 
 
 class EngineCfg(StrictModel):

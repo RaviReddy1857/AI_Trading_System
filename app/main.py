@@ -545,13 +545,14 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
 
     @app.get("/api/paper")
     def api_paper():
-        from .journal import POOLS, paper_book
+        from .journal import paper_books
         rows = journal.paper_trades()
         now = utcnow()
         return {"open": [r for r in rows if r["status"] in ("PENDING", "OPEN")],
                 "closed": [r for r in rows if r["status"] in ("CLOSED", "NOT_FILLED", "NOT_OPENED")][-200:],
-                "book": {p: paper_book(journal, settings, p, now) for p in POOLS},
-                "note": "Paper trades run in their own simulated book (config paper:), never against your real capital."}
+                "books": paper_books(journal, settings, now),
+                "note": "Each strategy's paper trades run in its own simulated book per pool (the pool's capital, the "
+                        "real book's sizing; config paper:), never against your real capital or another strategy's."}
 
     @app.get("/api/exit-calls")
     def api_exit_calls():

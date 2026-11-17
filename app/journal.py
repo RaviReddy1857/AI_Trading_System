@@ -156,8 +156,8 @@ def pool_capital(settings, pool: str) -> float:
 
 
 def paper_capital(settings, pool: str) -> float:
-    """The simulated capital of a pool's paper book (`paper.capital_pct` of the pool's capital)."""
-    return pool_capital(settings, pool) * settings.paper.capital_pct / 100
+    """The capital of each strategy's paper book in a pool: the pool's capital (as the real book)."""
+    return pool_capital(settings, pool)
 
 
 def _leg(leg, name):
@@ -1005,10 +1005,13 @@ class Journal:
         return out
 
     # ---- the paper book (simulated; its own capital and limits) ----
-    def paper_open(self, pool: str, now: datetime) -> list[dict]:
-        """Paper trades that occupy the paper book: OPEN ones, and PENDING ones within their valid-until."""
+    def paper_open(self, pool: str, now: datetime, strategy_id: str | None = None) -> list[dict]:
+        """Paper trades that occupy a paper book (one strategy's when `strategy_id` is given): OPEN ones, and PENDING
+        ones within their valid-until."""
         out = []
         for t in self.paper_trades(pool=pool):
+            if strategy_id is not None and t["strategy_id"] != strategy_id:
+                continue
             if t["status"] == "OPEN":
                 out.append(t)
             elif t["status"] == "PENDING":
@@ -1136,44 +1139,46 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     return state, facts
 
 
-def paper_book(journal: Journal, settings, pool: str, now: datetime, new_row: dict | None = None) -> dict:
-    """The paper book of a pool: its simulated capital (`paper_capital`), what its open and pending paper trades
-    commit (cash value at entry; options: premium paid or the approved margin; pending: the approved margin or cash
-    value), and whether `new_row` (a pending paper trade) fits its limits: `paper.uncommitted_cash_pct` of the paper
-    capital stays uncommitted, at most `paper.max_open_trades` open + pending. Never touches my real book."""
-    from .risk.portfolio import pool_check
-    from .risk.portfolio import OpenPosition
+def paper_book(journal: Journal, settings, pool: str, now: datetime, new_row: dict | None = None,
+               strategy_id: str | None = None) -> dict:
+    """One strategy's paper book in a pool (the strategy of `new_row`, else `strategy_id`): the pool's capital
+    (`paper_capital`), what its open and pending paper trades commit (cash value at entry; options: premium paid or the
+    approved margin; pending: the approved margin or cash value), and whether `new_row` (a pending paper trade of that
+    strategy) is admitted. Sizes are the real book's (the approved decision's quantity or lots). Only the safety cap
+    `paper.max_open_trades` (open + pending, this strategy only) refuses a trade, so other strategies never stop it and
+    its track record holds every approved signal; the commitment is reported (`over_capital` when above the capital),
+    never a refusal. Never touches my real book."""
+    sid = (new_row or {}).get("strategy_id") or strategy_id
     cap = paper_capital(settings, pool)
-    held = journal.paper_open(pool, now)
-    rows, unknown = [], []
+    held = journal.paper_open(pool, now, sid)
+    committed, unknown = Decimal(0), []
     for t in held:
-        if t["status"] == "OPEN":
-            c = committed_inr(journal.paper_position(t))
-        else:
-            c = _num(t["margin_inr"])
+        c = committed_inr(journal.paper_position(t)) if t["status"] == "OPEN" else _num(t["margin_inr"])
         if c is None:
             unknown.append(f"paper {t['symbol']} ({t['signal_id']}): commitment not known")
             continue
-        rows.append(OpenPosition(f"paper:{t['signal_id']}", t["symbol"], "OTHER", _num(t["risk_inr"]), float(c), 0.0,
-                                 0.0, origin=f"PAPER_{t['status']}"))
-    new_inr = 0.0
-    if new_row is not None:
-        new_inr = _num(new_row.get("margin_inr")) or 0.0
-    code, text, facts = pool_check(cap, rows, new_inr, settings.paper.uncommitted_cash_pct)
+        committed += _paise(_d(c))
+    new_inr = _num((new_row or {}).get("margin_inr")) or 0.0
+    after = committed + _paise(_d(new_inr))
+    cap_n = settings.paper.max_open_trades
     n = len(held) + (1 if new_row is not None else 0)
-    facts.update(book="PAPER", pool=pool, open_or_pending=len(held), max_open_trades=settings.paper.max_open_trades,
-                 unknown=unknown)
     why = []
-    if unknown:
-        why.append("PAPER_BOOK_UNKNOWN: " + "; ".join(unknown))
-    if code:
-        why.append(f"PAPER_BOOK_LIMIT: paper {text}")
-    if new_row is not None and n > settings.paper.max_open_trades:
-        why.append(f"PAPER_BOOK_LIMIT: {n} paper trades open or pending with this one, above paper.max_open_trades "
-                   f"{settings.paper.max_open_trades}")
-    facts["fits"] = not why
-    facts["why"] = why
-    return facts
+    if new_row is not None and n > cap_n:
+        why.append(f"PAPER_BOOK_LIMIT: {n} paper trades of {sid} open or pending with this one, above "
+                   f"paper.max_open_trades {cap_n} (a per-strategy safety cap)")
+    return {"book": "PAPER", "pool": pool, "strategy_id": sid, "capital_inr": float(cap),
+            "committed_inr": float(committed), "new_inr": float(new_inr), "after_inr": float(after),
+            "over_capital": float(after) > cap, "open_or_pending": len(held), "max_open_trades": cap_n,
+            "unknown": unknown, "fits": not why, "why": why}
+
+
+def paper_books(journal: Journal, settings, now: datetime) -> dict:
+    """Every strategy's paper book, per pool: {pool: {strategy_id: paper_book}} (strategies with paper trades)."""
+    out = {}
+    for pool in POOLS:
+        ids = sorted({t["strategy_id"] for t in journal.paper_trades(pool=pool) if t["strategy_id"]})
+        out[pool] = {sid: paper_book(journal, settings, pool, now, strategy_id=sid) for sid in ids}
+    return out
 
 
 def record_marks(journal: Journal, pool: str, now: datetime, marks, costs) -> int:
