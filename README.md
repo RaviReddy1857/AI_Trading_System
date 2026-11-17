@@ -23,7 +23,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 1,154 passed, whatever the date or time
+python -m pytest -q          # should say 1,159 passed, whatever the date or time
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 The tests never depend on the machine's clock: a test that reads the date or time uses the shared `fixed_clock`
@@ -590,9 +590,9 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
-- **After-close shortlist** (docs/STATUS.md): the app captures the priority stocks' chains, updates the
-  history and builds the shortlist every trading day from 15:31 IST (about 226 Breeze calls); tested with
-  fake Breeze sources, not yet run live.
+- **Daily shortlist** (docs/STATUS.md): the app captures the priority stocks' chains at 15:20 IST (live
+  bid/ask, 60 chain calls a minute at most), then from 15:31 updates the history and builds the shortlist
+  (about 226 Breeze calls a day); tested with fake Breeze sources, not yet run live.
 - **/stock-option-selling page** (docs/STATUS.md): the section-by-section loading is tested by running the page
   script in Node (skipped without Node), not in a real browser.
 - **Two books** (docs/STATUS.md): the real book (my positions and approved signals awaiting my decision) and

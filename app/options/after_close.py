@@ -1,11 +1,13 @@
-"""The stock option shortlist, every trading day after the close, run by the app (no manual command).
+"""The stock option shortlist, every trading day, run by the app (no manual command). Two phases:
 
-Steps, in order, from `stock_option_selling.after_close.start_time` (15:31 IST) on a trading day:
-1. chains: the option chains of the priority stocks (`priority_stocks`) for their current and next monthly expiry,
-   both sides (one Breeze call returns every strike of one expiry and side: 30 stocks x 2 expiries x 2 = 120 calls);
-2. history: the bar-history update of the watchlist for the session (normally one call per symbol and interval:
-   53 x 2 = 106, more only when Breeze sends an empty reply and it is asked again);
-3. shortlist: built from the stored data for that session and stored (`run_shortlist`).
+1. chains, from `stock_option_selling.after_close.chain_time` (15:20 IST) until the close, while bids and asks are
+   live: the option chains of the priority stocks (`priority_stocks`) for their current and next monthly expiry, both
+   sides (one Breeze call returns every strike of one expiry and side: 30 stocks x 2 expiries x 2 = 120 calls), paced
+   by `options.chain.max_calls_per_minute`. A strike quoted without a valid bid/ask is stored with bid and ask empty
+   and counted (`no_bid_ask`): recorded as unpriced at 15:20, never priced from the last trade. Not captured by the
+   close (the app was not running): recorded as MISSED, never captured after the close;
+2. after the close, from `start_time` (15:31 IST): the bar-history update of the watchlist for the session (normally
+   one call per symbol and interval: 53 x 2 = 106), then the shortlist built from the stored data and stored.
 
 Every Breeze call is counted in the day's Breeze request count (`store.add_requests`, the count the option-history
 download also uses: `options.backtest.daily_request_budget`), and a step stops at what is left of the day's budget, so
@@ -25,7 +27,7 @@ from datetime import date, datetime
 
 from ..config import hhmm
 from ..models import utcnow
-from ..quality import IST
+from ..quality import IST, MARKET_CLOSE
 
 log = logging.getLogger("after_close")
 
@@ -77,47 +79,86 @@ class AfterCloseJob:
     def _save(self, day: date, st: dict, now: datetime) -> None:
         self.j.set_state(STATE_KEY.format(day=day.isoformat()), json.dumps(st, default=str), now)
 
-    def due(self, now: datetime) -> bool:
+    def due(self, now: datetime) -> str | None:
+        """The phase due now: "chains" (chain_time to the close, once a day), "finish" (from start_time, once a day),
+        or None. A phase left RUNNING by an app that stopped mid-run is due again (the budget still caps it)."""
         cfg = self.s.stock_option_selling.after_close
         day = now.astimezone(IST).date()
-        if not cfg.enabled or not self.cal.is_trading_day(day) or now.astimezone(IST).time() < hhmm(cfg.start_time):
-            return False
-        st = self.state(day)
-        # not run today, or left RUNNING by an app that stopped mid-run (it runs again; the budget still caps it)
-        return st is None or (st.get("status") == RUNNING and not self._running)
+        if not cfg.enabled or not self.cal.is_trading_day(day) or self._running:
+            return None
+        t = now.astimezone(IST).time()
+        st = self.state(day) or {}
+        if hhmm(cfg.chain_time) <= t < MARKET_CLOSE and st.get("chains_status") != DONE:
+            return "chains"
+        if t >= hhmm(cfg.start_time) and st.get("status") != DONE:
+            return "finish"
+        return None
 
-    def run(self, now: datetime | None = None) -> dict:
+    def run(self, now: datetime | None = None) -> dict | None:
+        """Run the phase due now (nothing when none is)."""
+        now = now or utcnow()
+        phase = self.due(now)
+        if phase is None:
+            return None
         self._running = True
         try:
-            return self._run(now)
+            return self.run_chains(now) if phase == "chains" else self.run_finish(now)
         finally:
             self._running = False
 
-    def _run(self, now: datetime | None = None) -> dict:
-        now = now or utcnow()
-        day = now.astimezone(IST).date()
-        stocks = priority_stocks(self.s)
-        st = {"day": day.isoformat(), "status": RUNNING, "started_utc": now.isoformat(), "step": "chains",
-              "priority_stocks": stocks, "budget_left_at_start": budget_left(self.s, self.store, day), "steps": {}}
-        self._save(day, st, now)
+    def _start(self, day: date, now: datetime) -> dict:
+        st = self.state(day) or {"day": day.isoformat(), "steps": {}, "requests": 0}
+        st.setdefault("steps", {})
+        st.setdefault("requests", 0)
+        st["priority_stocks"] = priority_stocks(self.s)
+        return st
 
+    def _counter(self, day: date, st: dict):
         def count():
             self.store.add_requests(day)
             st["requests"] = st.get("requests", 0) + 1
+        return count
 
-        # 1. chains
+    def run_chains(self, now: datetime) -> dict:
+        """Phase 1: the priority stocks' chains, while bids and asks are live."""
+        day = now.astimezone(IST).date()
+        st = self._start(day, now)
+        st.update(chains_status=RUNNING, chains_started_utc=now.isoformat(),
+                  budget_left_at_chains=budget_left(self.s, self.store, day))
+        self._save(day, st, now)
         try:
-            res = self.chains.load(stocks, now=now, max_requests=budget_left(self.s, self.store, day), on_request=count)
+            res = self.chains.load(st["priority_stocks"], now=now, max_requests=budget_left(self.s, self.store, day),
+                                   on_request=self._counter(day, st), keep_unquoted=True)
             failed = {k: v["error"] for k, v in res.items() if "error" in v}
-            st["steps"]["chains"] = {"ok": not failed, "loaded": sum(1 for v in res.values() if "error" not in v),
-                                     "failed": failed}
+            st["steps"]["chains"] = {"ok": not failed, "at_utc": now.isoformat(),
+                                     "loaded": sum(1 for v in res.values() if "error" not in v), "failed": failed,
+                                     "strikes": sum(v.get("saved", 0) for v in res.values()),
+                                     "no_bid_ask": sum(v.get("no_bid_ask", 0) for v in res.values()),
+                                     "rate_wait_seconds": round(getattr(getattr(self.chains, "rate", None), "waited", 0.0), 1)}
         except Exception as e:                       # noqa: BLE001 - a failing step is reported, never fatal
-            log.exception("after-close chains failed")
+            log.exception("chain capture failed")
             st["steps"]["chains"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        st["step"] = "history"
+        st["chains_status"] = DONE
         self._save(day, st, utcnow())
+        log.info("stock option chains captured: %s", json.dumps(st["steps"]["chains"], default=str)[:1000])
+        return st
 
-        # 2. history (what is left of the day's budget)
+    def run_finish(self, now: datetime) -> dict:
+        """Phase 2, after the close: the bar history, then the shortlist."""
+        day = now.astimezone(IST).date()
+        st = self._start(day, now)
+        if st.get("chains_status") != DONE:
+            was = "INTERRUPTED: the capture stopped before it finished" if st.get("chains_status") == RUNNING else \
+                "MISSED: the app was not running"
+            st["steps"]["chains"] = {
+                "ok": False, "error": f"{was} between {self.s.stock_option_selling.after_close.chain_time} and the "
+                                      f"close; chains are not captured after the close (no live bid/ask)"}
+            st["chains_status"] = DONE
+        st.update(status=RUNNING, started_utc=now.isoformat(), step="history")
+        self._save(day, st, now)
+        count = self._counter(day, st)
+
+        # history (what is left of the day's budget)
         if self.history is None:
             st["steps"]["history"] = {"ok": True, "skipped": f"no history source for the {self.source} feed"}
         else:
@@ -132,10 +173,10 @@ class AfterCloseJob:
         st["step"] = "shortlist"
         self._save(day, st, utcnow())
 
-        # 3. shortlist, stored for the session
+        # shortlist, stored for the session
         try:
             from .shortlist import run_shortlist
-            out = run_shortlist(self.s, self.store, self.source, now=utcnow(), symbols=stocks)
+            out = run_shortlist(self.s, self.store, self.source, now=utcnow(), symbols=st["priority_stocks"])
             if out.get("error"):
                 st["steps"]["shortlist"] = {"ok": False, "error": out["error"]}
             else:
@@ -184,7 +225,9 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
                 f"(starts {cfg.start_time} on a trading day while the app is running): no result today"]
     st = json.loads(raw)
     if st.get("status") != DONE:
-        return [f"{head}: NOT FINISHED by {now.astimezone(IST):%H:%M} (step: {st.get('step')}): no result yet"]
+        step = st.get("step") or ("history and shortlist (after the close)" if st.get("chains_status") == DONE
+                                  else "chains")
+        return [f"{head}: NOT FINISHED by {now.astimezone(IST):%H:%M} (step: {step}): no result yet"]
     steps = st.get("steps", {})
     problems = []
     for name in ("chains", "history"):
@@ -200,6 +243,11 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
     if not sl.get("ok"):
         return [f"{head}: FAILED - {sl.get('error', 'not built')}"] + [f"  {p}" for p in problems] + [f"  ({calls})"]
     lines = [f"{head} (session {sl['session_date']}, {sl['stocks']} priority stocks, {calls}):"]
+    ch = steps.get("chains") or {}
+    if ch.get("no_bid_ask"):
+        at = datetime.fromisoformat(ch["at_utc"]).astimezone(IST) if ch.get("at_utc") else None
+        problems.append(f"chains{f' at {at:%H:%M}' if at else ''}: {ch['no_bid_ask']} of {ch.get('strikes', '?')} "
+                        f"strikes had no valid bid/ask (stored as unpriced)")
     for c in sl.get("candidates", []):
         strikes = "/".join(f"{k:g}" for k in (c.get("strikes") or [])) or "strikes -"
         score = "incomplete" if c.get("score") is None else f"{c['score']:.1f}"

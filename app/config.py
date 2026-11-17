@@ -527,6 +527,8 @@ class OptionChainCfg(StrictModel):
     max_spread_pct: float = Field(10.0, gt=0, le=100)      # a traded strike's bid-ask width, % of mid, at most this
     min_open_interest_lots: int = Field(100, ge=0)         # a traded strike's open interest, in lots, at least this
     request_pause_seconds: float = Field(0.7, ge=0, le=10)
+    # every chain call to Breeze in any 60 seconds (the live index refresh and the 15:20 stock capture together)
+    max_calls_per_minute: int = Field(60, ge=1, le=600)
 
 
 class OptionMargin(StrictModel):
@@ -840,9 +842,11 @@ class Settlement(StrictModel):
 
 
 class AfterCloseShortlist(StrictModel):
-    """The stock option shortlist run by the app every trading day after the close (app/options/after_close.py):
-    chains of the priority stocks, then the bar history, then the shortlist; in the end-of-day summary."""
+    """The stock option shortlist run by the app every trading day (app/options/after_close.py): the priority stocks'
+    chains at `chain_time`, while bids and asks are live; then, after the close, the bar history and the shortlist; in
+    the end-of-day summary."""
     enabled: bool = True
+    chain_time: CLOCK = "15:20"                            # IST; in market hours, before the close (15:30)
     start_time: CLOCK = "15:31"                            # IST; not before the close (15:30)
 
     @field_validator("start_time")
@@ -850,6 +854,14 @@ class AfterCloseShortlist(StrictModel):
     def _after_close(cls, v: str) -> str:
         if hhmm(v) < _dtime(15, 30):
             raise ValueError("after_close.start_time must be at or after the close, 15:30")
+        return v
+
+    @field_validator("chain_time")
+    @classmethod
+    def _in_market_hours(cls, v: str) -> str:
+        if not _dtime(9, 15) <= hhmm(v) < _dtime(15, 30):
+            raise ValueError("after_close.chain_time must be in market hours (09:15 to before 15:30): bids and asks "
+                             "are live only then")
         return v
 
 

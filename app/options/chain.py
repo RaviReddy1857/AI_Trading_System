@@ -65,6 +65,47 @@ def parse_chain_rows(rows: list[dict], right: str) -> tuple[list[dict], list[tup
     return [good[k] for k in sorted(good)], bad
 
 
+NO_VALID_BID_ASK = ("missing bid/ask", "crossed bid/ask")
+
+
+def unquoted_row(raw: dict, right: str) -> dict | None:
+    """A chain row whose strike had no valid bid/ask (missing or crossed), kept with bid and ask EMPTY so the strike
+    is recorded as unpriced at that moment (never priced from the last trade). None without a valid strike."""
+    strike = _num(raw.get("strike_price"))
+    if strike is None or strike <= 0:
+        return None
+    last, oi = _num(raw.get("ltp")), _num(raw.get("open_interest"))
+    return {"strike": strike, "right": right, "bid": None, "ask": None,
+            "last": last if last is not None and last > 0 else None, "oi": oi if oi is None or oi >= 0 else None,
+            "oi_change": _num(raw.get("chnge_oi")), "volume": _num(raw.get("total_quantity_traded")),
+            "spot": _num(raw.get("spot_price"))}
+
+
+class RateLimit:
+    """At most `per_minute` calls in any 60 seconds (a sliding window, shared by every chain call of the app): a call
+    beyond it waits until the oldest call in the window is a minute old. Thread-safe."""
+
+    def __init__(self, per_minute: int, sleep: Callable[[float], None] = _time.sleep,
+                 clock: Callable[[], float] = _time.monotonic):
+        import threading
+        self.per_minute, self._sleep, self._clock = per_minute, sleep, clock
+        self._calls: list[float] = []
+        self._lock = threading.Lock()
+        self.waited = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            while True:
+                now = self._clock()
+                self._calls = [t for t in self._calls if now - t < 60.0]
+                if len(self._calls) < self.per_minute:
+                    self._calls.append(now)
+                    return
+                pause = 60.0 - (now - self._calls[0]) + 0.01
+                self.waited += pause
+                self._sleep(pause)
+
+
 class BreezeChainSource:
     name = "breeze"
     remote = True
@@ -123,19 +164,23 @@ def wanted_specs(book: InstrumentBook, settings: Settings, symbol: str, today: d
 
 class ChainLoader:
     def __init__(self, settings: Settings, store: Store, source, book: InstrumentBook,
-                 sleep: Callable[[float], None] = _time.sleep):
+                 sleep: Callable[[float], None] = _time.sleep, clock: Callable[[], float] = _time.monotonic):
         self.settings, self.store, self.source, self.book = settings, store, source, book
         self._sleep = sleep
         self._requests = 0
+        # every remote chain call of this loader (the live index refresh and the 15:20 capture share it)
+        self.rate = RateLimit(settings.options.chain.max_calls_per_minute, sleep, clock)
 
     def default_symbols(self) -> list[str]:
         return list(self.settings.options.underlyings)
 
     def load(self, symbols: list[str] | None = None, now: datetime | None = None, max_requests: int | None = None,
-             on_request: Callable[[], None] | None = None) -> dict:
+             on_request: Callable[[], None] | None = None, keep_unquoted: bool = False) -> dict:
         """Fetch and store the chains of `symbols` (default: the index underlyings). One failing
         symbol does not stop the others. `max_requests`: at most this many calls (the rest are reported as not
-        asked: the day's budget is used); `on_request` is called for every call sent (the day's count)."""
+        asked: the day's budget is used); `on_request` is called for every call sent (the day's count). Remote calls
+        keep `options.chain.max_calls_per_minute`. `keep_unquoted`: a strike without a valid bid/ask is also stored,
+        with bid and ask empty (`unquoted_row`), and counted (`no_bid_ask`); otherwise it is only quarantined."""
         now = now or utcnow()
         sent = 0
         today = now.astimezone(IST).date()
@@ -154,10 +199,12 @@ class ChainLoader:
                                              f"({sent} sent in this run)"}
                     continue
                 try:
-                    saved = rejected = 0
+                    saved = rejected = unquoted = 0
                     for right in ("CE", "PE"):
-                        if getattr(self.source, "remote", False) and self._requests:
-                            self._sleep(self.settings.options.chain.request_pause_seconds)
+                        if getattr(self.source, "remote", False):
+                            self.rate.wait()
+                            if self._requests:
+                                self._sleep(self.settings.options.chain.request_pause_seconds)
                         self._requests += 1
                         sent += 1
                         if on_request is not None:
@@ -168,11 +215,20 @@ class ChainLoader:
                                 now, sym, BAD_OPTION_QUOTE, _num(raw.get("ltp")), _num(raw.get("best_bid_price")),
                                 _num(raw.get("best_offer_price")),
                                 f"{self.source.name}:chain:{spec.expiry}:{raw.get('strike_price')}{right}:{reason}")
+                        keep = list(good)
+                        if keep_unquoted:
+                            have = {g["strike"] for g in good}
+                            extra = [u for u in (unquoted_row(raw, right) for reason, raw in bad
+                                                 if reason in NO_VALID_BID_ASK) if u and u["strike"] not in have]
+                            keep += extra
+                            unquoted += len(extra)
                         saved += self.store.save_option_chain(self.source.name, [
                             (sym, spec.expiry.isoformat(), g["strike"], right, now.isoformat(), g["bid"], g["ask"],
-                             g["last"], g["oi"], g["oi_change"], g["volume"], g["spot"]) for g in good])
+                             g["last"], g["oi"], g["oi_change"], g["volume"], g["spot"]) for g in keep])
                         rejected += len(bad)
                     summary[key] = {"saved": saved, "quarantined": rejected}
+                    if keep_unquoted:
+                        summary[key]["no_bid_ask"] = unquoted
                 except Exception as e:      # noqa: BLE001 - network or SDK errors must not kill the app
                     log.exception("option chain failed for %s", key)
                     summary[key] = {"error": f"{type(e).__name__}: {e}"}

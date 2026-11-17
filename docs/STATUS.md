@@ -32,6 +32,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Tests never depend on the machine's clock: shared fixed_clock fixture, --fake-clock and --clock-report; full suite passes under six faked clocks (weekday, weekend, holiday, 09:00, 15:45, 23:59) | Done | 1,139 passing (whole suite, any clock) | 2026-11-17 |
 | - | /stock-option-selling page: shortlist built in memory when none is stored (every stock with every reason), each section loads on its own | Fixed and tested | 1,143 passing (whole suite) | 2026-11-17 |
 | - | Stock option shortlist built by the app every trading day after the close (chains, history, shortlist; 226 Breeze calls a normal day in the daily budget); result in the 15:45 summary | Built and tested | 1,154 passing (whole suite) | 2026-11-17 |
+| - | Stock option chains at 15:20 (live bid/ask), paced at 60 chain calls a minute; strikes without a valid bid/ask stored as unpriced; history and shortlist after 15:31 | Built and tested | 1,159 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2702,6 +2703,33 @@ same time (the second asks again for little or nothing). The running app picks t
 
 Tests: `tests/test_after_close.py` (11). Whole suite 1,154 passing, 0 failing, 0 clock reads outside the fixed
 clock.
+
+## Stock option chains captured at 15:20, while bids and asks are live (2026-11-17)
+
+The after-close job (previous section) now runs in two phases:
+- **15:20 IST** (`stock_option_selling.after_close.chain_time`, validated to be in market hours, before 15:30): the
+  priority stocks' chains (120 calls), once a day. If the app is not running between 15:20 and the close, the
+  chains are recorded as MISSED (or INTERRUPTED) and are never captured after the close; the summary says so.
+- **15:31 IST** (`start_time`, unchanged): the bar history, then the shortlist (unchanged).
+
+**Pacing:** every chain call of the app (the 5-minute index refresh and the 15:20 capture share one loader) keeps
+`options.chain.max_calls_per_minute` (60) in any 60 seconds (`chain.RateLimit`, a sliding window); a call beyond it
+waits. The 0.7 s pause between calls stays. 120 calls at 60 a minute take about 2-3 minutes (15:20 to about 15:23).
+60 is a conservative default of mine, not ICICI's published Breeze limit; raise it in config.yaml if their limit allows.
+
+**A strike without a valid bid/ask at 15:20** (missing, zero or crossed) is stored in the chain with bid and ask EMPTY
+(its last price, open interest and volume kept; never used as a price), counted per run (`no_bid_ask`), and still
+logged as a BAD_OPTION_QUOTE quality event. The rules then see it as unpriced: a sold strike without a price gives
+DATA_MISSING ("no usable price for <strike> <side>"), a hedge strike without a price is skipped, as before. The
+summary says "chains at 15:20: N of M strikes had no valid bid/ask (stored as unpriced)". The live index refresh is
+unchanged: it still stores priced strikes only.
+
+Breeze calls per day: unchanged (120 chain + 106 history = 226 a normal day, at most 438).
+
+Not tested here: the capture against live Breeze at 15:20; ICICI's actual per-minute limit.
+
+Tests: `tests/test_after_close.py` (16; 8 fail on the code before). Whole suite 1,159 passing, 0 failing,
+0 clock reads outside the fixed clock.
 
 ## Open issues
 

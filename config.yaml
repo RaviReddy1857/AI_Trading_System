@@ -346,6 +346,7 @@ options:
     max_spread_pct: 10          # traded strikes need a bid-ask width within 10% of the mid price
     min_open_interest_lots: 100
     request_pause_seconds: 0.7
+    max_calls_per_minute: 60    # chain calls to Breeze in any 60 s (all of them); keep under Breeze's own per-minute limit
   margin:
     csv: data/margins.csv       # margins you copy from ICICI's margin calculator (see README)
     max_age_days: 7
@@ -365,9 +366,10 @@ options:
 # ---- signal cards, alerts and manual positions come after phase 6. ----
 stock_option_selling:          # names follow section 2 of the Phase 9 specification (docs/implementation.md has the table)
   enabled: true
-  after_close:                  # the app builds the shortlist every trading day after the close (no manual command):
-    enabled: true               # chains of the priority stocks, then the bar history, then the shortlist; Breeze calls
-    start_time: "15:31"         # counted in options.backtest.daily_request_budget; result in the 15:45 summary
+  after_close:                  # the app builds the shortlist every trading day (no manual command): Breeze calls
+    enabled: true               # counted in options.backtest.daily_request_budget; result in the 15:45 summary
+    chain_time: "15:20"         # the priority stocks' chains, while bids and asks are live (before the close)
+    start_time: "15:31"         # after the close: the bar history, then the shortlist
   min_iv_rank: 50               # sell only when the stock's IV rank is at least this
   min_open_interest_lots: 200   # each traded strike: open interest, in lots, at least this
   max_bid_ask_pct_of_mid: 5     # each traded strike (live eligibility): bid-ask width within 5% of the mid price
