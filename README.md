@@ -146,6 +146,11 @@ Hours are dated, per segment (`app/session.py`; live code and backtests read the
   intraday square-off time after the auction is **not confirmed**: confirm it and set
   `cash_intraday_cutoff_confirmed: true` (the exit call says "not confirmed" until then).
 - Every Nifty 50 stock is an F&O stock; give a watchlist line `fno: false` for a cash-only stock.
+- Stock option spreads: on the forced-exit day (E-5) the exit is due by **15:00**, while the stock still trades
+  continuously (`stock_option_selling.settlement.forced_exit_by`); the red, URGENT overdue alert starts at the
+  options' close, 15:40.
+- Telegram: the 15:45 end-of-day summary covers signals, paper P&L and positions; the stock option shortlist
+  comes as its own message when the after-close job completes (or at 17:30 if it has not).
 - When NSE changes the hours again, add a dated period under `session.periods`.
 
 ## Watchlist: NIFTY, BANKNIFTY, INDIAVIX and the Nifty 50 stocks (53 symbols)

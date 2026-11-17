@@ -36,6 +36,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Shortlist for the chains' session only (today's close from 5-minute bars, or wait and retry until 17:30); kill switch of 17-Nov reported (unchanged) | Fixed and tested | 1,166 passing (whole suite) | 2026-11-17 |
 | - | Kill switch counts live price ticks only (unpriced chain strikes and bad history bars never count); 5-minute bars and crossed quotes of 17-Nov investigated (report only) | Fixed and tested | 1,174 passing (whole suite) | 2026-11-17 |
 | - | Closing auction session from 3 Aug 2026: dated session calendar per segment; auction ticks never a signal, fill, exit trigger or quality event (AUCTION on the dashboard); option exits to 15:40; cash intraday cutoff 15:00 (unconfirmed); chain capture 14:50-15:15 with per-chain times; official close awaited (5-minute close APPROXIMATE); backtests never trade an auction bar - stored results unchanged (A/B proof) | Built and tested; not yet seen on a live day | 1,205 passing (whole suite) | 2026-11-17 |
+| - | Closing auction follow-up (your decisions): shortlist as its own Telegram message (on completion or at 17:30); stock option forced exit due by 15:00 on E-5, 15:40 the hard limit for the red/URGENT alert; 15:00 intraday cutoff kept unconfirmed; orb_v2 310 vs 322 explained (the 15-Nov import's RBI_POLICY row on 05-Aug makes that day EVENT) | Built and tested | 1,211 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2993,6 +2994,52 @@ real speed; when Breeze publishes the daily (official) bar after CAS - on 17-Nov
   times are unchanged (still unconfirmed).
 - During CAS the live regime is UNKNOWN (no LIVE index price); harmless (no signals then, no REGIME_FLIP on UNKNOWN)
   but logged once a day in `regime_log`.
+
+## Closing auction follow-up: your decisions of 2026-11-17, and the orb_v2 310 vs 322 report
+
+**1. ICICI intraday square-off:** kept at 15:00, unconfirmed (`session.cash_intraday_cutoff`,
+`cash_intraday_cutoff_confirmed: false`) until you confirm it. No change.
+
+**2. The stock option shortlist is its own Telegram message** (`app/options/after_close.py` `shortlist_message`,
+sent from `app/schedule.py` `scheduled`, key `shortlist:<day>`, kind SHORTLIST, once a day). The 15:45 end-of-day
+summary keeps signals, paper P&L, realised P&L and positions, and now says "Stock option shortlist: its own message
+when it completes (or at 17:30 if it has not)". The shortlist message ("STOCK OPTION SHORTLIST <day>" + the same
+`summary_lines`, so the same wording rules: candidates, NO RESULT, FAILED, MISSED, APPROXIMATE, never "No
+candidates" when a step failed or data is missing) is sent when the after-close job is DONE (a result, or the
+failure it reached at the deadline), or at `after_close.bars_deadline` (17:30) when it is not (NOT RUN / NOT
+FINISHED). A step still RUNNING at 17:30 is waited for 30 more minutes. If its result cannot be read, a NOT KNOWN
+message is sent at 17:30.
+
+**3. Stock option forced exit by 15:00 on the deadline day; 15:40 the hard limit**
+(`stock_option_selling.settlement.forced_exit_by: "15:00"`, validated to be inside F&O stocks' continuous trading):
+- the planned-exit deadline of the forced exit is E-5 15:00 (the alert's action: "Exit the spread by <E-5> 15:00");
+- from 15:00 the settlement alert is sent as "Exit the spread NOW: due by <E-5> 15:00 while the stock trades
+  continuously; hard limit 15:40", even for a far out-of-the-money spread (exit call level WARNING);
+- at the hard limit, the options' close (15:40 from 3 Aug 2026; 15:30 before), the red EXIT_OVERDUE alert starts and
+  the call is URGENT on every evaluation until you mark the position closed. An ICICI time stays its own hard limit;
+- the FORCED_EXPIRY_EXIT exit call already fires from the first bar of E-5; its reason now says "exit by 15:00 while
+  the stock trades continuously". Unchanged: E-5 itself, ICICI's times (unconfirmed), the backtest's forced exit.
+
+**4. Report only: orb_v2 now gives 310 trades from 3 Aug, the 13-Nov run 322.** Same strategy version (2/5d1213de),
+same parameters, same development period (06-May to 01-Oct-2026, 104 sessions, 50 incomplete symbol-sessions in
+both). Diff of the two trade lists: today's 530 trades are all in the stored 542, identical (entry, exit, reason,
+quantity); the 12 missing are all on **Wed 05-Aug-2026** (APOLLOHOSP, GRASIM, HDFCBANK, LT, M&M, NESTLEIND, NTPC,
+SBILIFE, SBIN, SHRIRAMFIN, TATACONSUM, TECHM), each with "regime TRENDING_UP" in the stored run.
+- Cause: a **data change, not a commit to the code**. The one-time external-repo import of 15-Nov 08:22 UTC (code in
+  commit 9b4ffdf; the rows themselves in the gitignored `data/external/events_external.csv`, external commit
+  1f4aff7c3e53) added `2026-08-05, RBI_POLICY, "RBI policy: repo 5.25% - MPC pause maintained (the source's policy
+  effective date)"`. RBI_POLICY is in `regime.event_types`, so the point-in-time regime of 05-Aug is now EVENT
+  (04-Aug and 06-Aug stay TRENDING_UP), and orb_v2 trades only in TRENDING_UP / TRENDING_DOWN. The 13-Nov run came
+  before the import.
+- The other cash runs stored before the import probably differ for the same reason (orb: 131 trades from 3 Aug
+  then, 123 now); only orb_v2 was diffed trade by trade.
+- To check (yours): the source calls 05-Aug "the policy effective date". If the RBI announced the August decision
+  on another day, the EVENT day is misplaced; correct it in data/events.csv (your own row wins on the same date).
+
+Tests: `tests/test_after_close.py` (the shortlist message on completion, at 17:30, NOT RUN, the RUNNING grace),
+`tests/test_phase9_settlement.py` (15:00 due, 15:40 overdue and URGENT, the forced-exit call wording; deadline
+expectations moved from 15:40 to 15:00), `tests/test_closing_auction.py` (forced_exit_by outside continuous trading
+refused). Not tested live: a real Telegram shortlist message; a real E-5 day.
 
 ## Open issues
 
