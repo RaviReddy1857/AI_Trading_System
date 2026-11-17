@@ -7,7 +7,13 @@
    and counted (`no_bid_ask`): recorded as unpriced at 15:20, never priced from the last trade. Not captured by the
    close (the app was not running): recorded as MISSED, never captured after the close;
 2. after the close, from `start_time` (15:31 IST): the bar-history update of the watchlist for the session (normally
-   one call per symbol and interval: 53 x 2 = 106), then the shortlist built from the stored data and stored.
+   one call per symbol and interval: 53 x 2 = 106), then the shortlist built FOR THE SESSION THE CHAINS WERE CAPTURED
+   IN (today), never an earlier one. A symbol whose daily bar for today is not stored yet gets the session's bar built
+   from its stored 5-minute bars, when all 75 (09:15 to 15:25) are stored (`session_bar_from_5m`; used in memory only,
+   never written to the daily table). When the index (or a priority stock) still has neither, the step waits and
+   retries every `bars_retry_minutes` (asking Breeze again only for those symbols) until `bars_deadline`; then the
+   shortlist runs for today with what there is (a stock without today's bar: DATA_STALE), or FAILS without the index's
+   bar. The summary says where the session's close came from.
 
 Every Breeze call is counted in the day's Breeze request count (`store.add_requests`, the count the option-history
 download also uses: `options.backtest.daily_request_budget`), and a step stops at what is left of the day's budget, so
@@ -23,16 +29,56 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 from ..config import hhmm
 from ..models import utcnow
-from ..quality import IST, MARKET_CLOSE
+from ..models import Bar
+from ..quality import IST, MARKET_CLOSE, MARKET_OPEN
 
 log = logging.getLogger("after_close")
 
 STATE_KEY = "after_close:{day}"
-RUNNING, DONE = "RUNNING", "DONE"
+RUNNING, DONE, WAITING = "RUNNING", "DONE", "WAITING"
+FIVE_MINUTE_BARS = 75                      # 09:15 to 15:25 IST: a full session of 5-minute bars
+
+
+def session_bar_from_5m(store, source: str, symbol: str, day: date) -> tuple[Bar | None, str]:
+    """(the session's daily bar built from the stored 5-minute bars, how) or (None, why not). Only from a full session:
+    all 75 bars, 09:15 to 15:25 IST; open of the first, high and low over all, close of the last, volume summed (unknown
+    when any bar's is)."""
+    from datetime import timedelta as _td
+    start = datetime.combine(day, MARKET_OPEN, IST).astimezone(timezone.utc)
+    end = datetime.combine(day, MARKET_CLOSE, IST).astimezone(timezone.utc)
+    bars = store.history_bars("bars_5m", symbol, source, since=start, before=end)
+    if len(bars) != FIVE_MINUTE_BARS or bars[0].start != start or bars[-1].start != end - _td(minutes=5):
+        last = bars[-1].start.astimezone(IST).strftime("%H:%M") if bars else "-"
+        return None, f"5-minute bars incomplete ({len(bars)} of {FIVE_MINUTE_BARS}, last {last})"
+    vols = [b.volume for b in bars]
+    return (Bar(symbol, start, bars[0].open, max(b.high for b in bars), min(b.low for b in bars), bars[-1].close,
+                None if any(v is None for v in vols) else float(sum(vols))),
+            f"built from {FIVE_MINUTE_BARS} stored 5-minute bars")
+
+
+class SessionBarsStore:
+    """The store, with the session's daily bars built from 5-minute bars added to daily-bar reads where the stored
+    daily history lacks them (in memory only; nothing is written to the daily table). Everything else is the store."""
+
+    def __init__(self, store, extra: dict):
+        self._store, self._extra = store, dict(extra)
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    def history_bars(self, table, symbol, source, *, since=None, before=None, limit=None):
+        bars = self._store.history_bars(table, symbol, source, since=since, before=before, limit=limit)
+        b = self._extra.get(symbol) if table == "bars_1d" else None
+        if b is None or (since is not None and b.start < since) or (before is not None and b.start >= before):
+            return bars
+        if bars and bars[-1].start >= b.start:
+            return bars                                    # the daily bar is stored: it wins
+        out = bars + [b]
+        return out[-limit:] if limit is not None else out
 # reason codes that mean "data missing", not "the rules said no": with any of them "no candidates" is never said
 DATA_GAP_CODES = frozenset({"NO_CHAIN", "DATA_STALE", "DATA_MISSING", "LOT_SIZE_UNKNOWN", "INSUFFICIENT_HISTORY"})
 
@@ -91,6 +137,8 @@ class AfterCloseJob:
         if hhmm(cfg.chain_time) <= t < MARKET_CLOSE and st.get("chains_status") != DONE:
             return "chains"
         if t >= hhmm(cfg.start_time) and st.get("status") != DONE:
+            if st.get("status") == WAITING and now < datetime.fromisoformat(st["next_retry_utc"]):
+                return None
             return "finish"
         return None
 
@@ -154,29 +202,62 @@ class AfterCloseJob:
                 "ok": False, "error": f"{was} between {self.s.stock_option_selling.after_close.chain_time} and the "
                                       f"close; chains are not captured after the close (no live bid/ask)"}
             st["chains_status"] = DONE
-        st.update(status=RUNNING, started_utc=now.isoformat(), step="history")
+        cfg = self.s.stock_option_selling.after_close
+        attempt = st.get("bar_attempts", 0) + 1
+        retry_only = set(st.get("bars_missing") or []) if attempt > 1 else None
+        st.update(status=RUNNING, started_utc=st.get("started_utc") or now.isoformat(), step="history",
+                  bar_attempts=attempt)
         self._save(day, st, now)
         count = self._counter(day, st)
 
-        # history (what is left of the day's budget)
+        # history (what is left of the day's budget); a retry asks only for the symbols still without today's bar
         if self.history is None:
             st["steps"]["history"] = {"ok": True, "skipped": f"no history source for the {self.source} feed"}
         else:
             try:
-                res = self.history(budget_left(self.s, self.store, day), count).update(now)
+                res = self.history(budget_left(self.s, self.store, day), count).update(now, symbols=retry_only)
                 failed = {k: v["error"] for k, v in res.items() if "error" in v}
-                st["steps"]["history"] = {"ok": not failed, "failed": failed,
+                st["steps"]["history"] = {"ok": not failed, "failed": failed, "attempt": attempt,
                                           "saved": sum(v.get("saved", 0) for v in res.values())}
             except Exception as e:                   # noqa: BLE001
                 log.exception("after-close history failed")
                 st["steps"]["history"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        st["step"] = "shortlist"
+
+        # the session's bars: the chains' day (today), never an earlier session
+        index = self.s.regime.index_symbol
+        built, from_daily, missing = {}, [], {}
+        for sym in [index] + [x for x in st["priority_stocks"] if x != index]:
+            got = self.store.history_bars("bars_1d", sym, self.source, since=datetime.combine(
+                day, MARKET_OPEN, IST).astimezone(timezone.utc), limit=1)
+            if got:
+                from_daily.append(sym)
+                continue
+            bar, why = session_bar_from_5m(self.store, self.source, sym, day)
+            if bar is not None:
+                built[sym] = bar
+            else:
+                missing[sym] = f"no daily bar for {day:%d-%b} yet; {why}"
+        st["session_bars"] = {"day": day.isoformat(), "daily": len(from_daily), "from_5m": sorted(built),
+                              "missing": missing}
+        st["bars_missing"] = sorted(missing)
+        deadline = datetime.combine(day, hhmm(cfg.bars_deadline), IST).astimezone(timezone.utc)
+        nxt = now + timedelta(minutes=cfg.bars_retry_minutes)
+        if missing and nxt <= deadline:
+            st.update(status=WAITING, step=f"waiting for {day:%d-%b}'s bars", next_retry_utc=nxt.isoformat())
+            self._save(day, st, utcnow())
+            log.info("after-close: %d symbol(s) without %s's bar; retry at %s", len(missing), day, nxt.isoformat())
+            return st
+        st.update(step="shortlist")
         self._save(day, st, utcnow())
 
-        # shortlist, stored for the session
+        # shortlist, for the chains' session, stored
         try:
             from .shortlist import run_shortlist
-            out = run_shortlist(self.s, self.store, self.source, now=utcnow(), symbols=st["priority_stocks"])
+            if index in missing:
+                raise _NoSessionBar(f"no bar for {index} on {day:%d-%b-%Y} after {attempt} attempt(s) until "
+                                    f"{cfg.bars_deadline}: {missing[index]}; the shortlist is not run on an older session")
+            out = run_shortlist(self.s, SessionBarsStore(self.store, built), self.source, now=now,
+                                symbols=st["priority_stocks"], session=day)
             if out.get("error"):
                 st["steps"]["shortlist"] = {"ok": False, "error": out["error"]}
             else:
@@ -190,13 +271,20 @@ class AfterCloseJob:
                                                if r["status"] != "SHORTLISTED" and r["reasons"])),
                     "data_gaps": _ranked(Counter(c for r in rows if r["status"] != "SHORTLISTED"
                                                  for c in {_code(x) for x in r["reasons"]} if is_data_gap(c)))}
+        except _NoSessionBar as e:
+            st["steps"]["shortlist"] = {"ok": False, "error": str(e)}
         except Exception as e:                       # noqa: BLE001
             log.exception("after-close shortlist failed")
             st["steps"]["shortlist"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         st.update(status=DONE, step=None, finished_utc=utcnow().isoformat())
+        st.pop("next_retry_utc", None)
         self._save(day, st, utcnow())
         log.info("after-close shortlist job: %s", json.dumps(st["steps"], default=str)[:2000])
         return st
+
+
+class _NoSessionBar(RuntimeError):
+    pass
 
 
 def _ranked(counts: Counter) -> dict:
@@ -224,10 +312,6 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
         return [f"{head}: NOT RUN - the after-close job had not started by {now.astimezone(IST):%H:%M} "
                 f"(starts {cfg.start_time} on a trading day while the app is running): no result today"]
     st = json.loads(raw)
-    if st.get("status") != DONE:
-        step = st.get("step") or ("history and shortlist (after the close)" if st.get("chains_status") == DONE
-                                  else "chains")
-        return [f"{head}: NOT FINISHED by {now.astimezone(IST):%H:%M} (step: {step}): no result yet"]
     steps = st.get("steps", {})
     problems = []
     for name in ("chains", "history"):
@@ -238,11 +322,32 @@ def summary_lines(settings, journal, day: date, now: datetime) -> list[str]:
             items = s["failed"]
             problems.append(f"{name} failed for {len(items)}: " + "; ".join(f"{k} ({v})" for k, v in list(items.items())[:4])
                             + (" ..." if len(items) > 4 else ""))
+    if st.get("status") == WAITING:
+        nxt = datetime.fromisoformat(st["next_retry_utc"]).astimezone(IST)
+        miss = st.get("session_bars", {}).get("missing", {})
+        return [f"{head}: NOT FINISHED by {now.astimezone(IST):%H:%M}: waiting for today's bars (attempt "
+                f"{st.get('bar_attempts')}, next try {nxt:%H:%M}, until {cfg.bars_deadline}); no result yet",
+                "  without today's bar: " + "; ".join(f"{k} ({v})" for k, v in list(miss.items())[:4])
+                + (" ..." if len(miss) > 4 else "")] + [f"  {x}" for x in problems]
+    if st.get("status") != DONE:
+        step = st.get("step") or ("history and shortlist (after the close)" if st.get("chains_status") == DONE
+                                  else "chains")
+        return [f"{head}: NOT FINISHED by {now.astimezone(IST):%H:%M} (step: {step}): no result yet"]
     sl = steps.get("shortlist") or {}
     calls = f"{st.get('requests', 0)} Breeze calls"
     if not sl.get("ok"):
         return [f"{head}: FAILED - {sl.get('error', 'not built')}"] + [f"  {p}" for p in problems] + [f"  ({calls})"]
     lines = [f"{head} (session {sl['session_date']}, {sl['stocks']} priority stocks, {calls}):"]
+    sb = st.get("session_bars") or {}
+    if sb:
+        how = (f"session close: Breeze daily bars for {sb.get('daily', 0)}"
+               + (f"; built from stored 5-minute bars for {len(sb['from_5m'])} (the daily bar was not published yet): "
+                  + ", ".join(sb["from_5m"][:8]) + (" ..." if len(sb["from_5m"]) > 8 else "") if sb.get("from_5m") else "")
+               + (f" (after {st.get('bar_attempts')} attempts)" if (st.get("bar_attempts") or 1) > 1 else ""))
+        lines.append(f"  {how}")
+        if sb.get("missing"):
+            problems.append(f"no bar for {sb['day']} by {cfg.bars_deadline} for {len(sb['missing'])}: "
+                            + ", ".join(list(sb["missing"])[:8]))
     ch = steps.get("chains") or {}
     if ch.get("no_bid_ask"):
         at = datetime.fromisoformat(ch["at_utc"]).astimezone(IST) if ch.get("at_utc") else None

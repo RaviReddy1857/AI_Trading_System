@@ -61,7 +61,8 @@ class FakeHistory:
         self.store, self.max_requests, self.on_request, self.calls = store, max_requests, on_request, calls
         FakeHistory.made = self
 
-    def update(self, now):
+    def update(self, now, symbols=None):
+        self.symbols = symbols
         sent = 0
         for _ in range(self.calls):
             if sent >= self.max_requests:
@@ -118,7 +119,7 @@ def test_the_job_stops_at_what_is_left_of_the_days_budget(tmp_path):
     assert FakeHistory.made.max_requests == 1 and not st["steps"]["history"]["ok"]
     text = "\n".join(summary_lines(s, j, DAY, AT))
     assert "chains failed for 2" in text and "BUDGET" in text and "history failed" in text
-    assert "No candidates" not in text
+    assert "No candidates" not in text and "waiting for today's bars" in text     # no session bar: it waits
 
 
 def test_due_chains_from_1520_until_the_close_and_finish_from_1531_on_trading_days(tmp_path):
@@ -322,3 +323,149 @@ def test_start_time_after_the_close_and_chain_time_in_market_hours():
     for bad in ({"start_time": "15:00"}, {"chain_time": "15:30"}, {"chain_time": "09:00"}):
         with pytest.raises(ValidationError):
             AfterCloseShortlist(**bad)
+
+
+# ---------------- 17-Nov-2026: the shortlist runs for the session the chains were captured in ----------------
+from app.options.after_close import WAITING, SessionBarsStore, session_bar_from_5m  # noqa: E402
+from tests import clock  # noqa: E402
+
+TODAY = date(2026, 11, 17)                                       # Tuesday
+T_CHAINS = datetime(2026, 11, 17, 15, 20, tzinfo=IST)
+T_FINISH = datetime(2026, 11, 17, 15, 31, tzinfo=IST)
+OPEN_UTC = datetime(2026, 11, 17, 9, 15, tzinfo=IST).astimezone(timezone.utc)
+
+
+def five_minute_bars(sym, day=TODAY, n=75, base=1000.0):
+    start = datetime.combine(day, datetime.min.time().replace(hour=9, minute=15), IST).astimezone(timezone.utc)
+    return [Bar(sym, start + timedelta(minutes=5 * k), base + k, base + k + 2, base + k - 1, base + k + 1, 100.0)
+            for k in range(n)]
+
+
+class TodayHistory:
+    """Breeze has not published today's daily bar: daily history up to 16-Nov only; today's 5-minute bars as given
+    (complete, partial or none). `publish_daily_on`: the attempt on which today's daily bar arrives."""
+
+    def __init__(self, store, max_requests, on_request, five_min: int = 75, publish_daily_on: int | None = None):
+        self.store, self.on_request, self.five_min, self.publish = store, on_request, five_min, publish_daily_on
+        TodayHistory.attempts = getattr(TodayHistory, "attempts", 0) + 1
+        TodayHistory.last = self
+
+    def update(self, now, symbols=None):
+        self.symbols = symbols
+        self.on_request()
+        idx = [Bar("NIFTY", daily_start(d), 24000, 24050, 23950, 24000, None) for d in weekdays_back(DAY, 5)]
+        self.store.save_history_bars("bars_1d", idx + stock_bars("RELIANCE", end=DAY) + stock_bars("TCS", end=DAY), "sim")
+        if self.five_min:
+            for sym, base in (("NIFTY", 24000.0), ("RELIANCE", 1100.0), ("TCS", 1300.0)):
+                self.store.save_history_bars("bars_5m", five_minute_bars(sym, n=self.five_min, base=base), "sim")
+        if self.publish is not None and TodayHistory.attempts >= self.publish:
+            self.store.save_history_bars("bars_1d", [Bar(x, daily_start(TODAY), 1, 2, 0.5, 1.5, 10.0)
+                                                     for x in ("NIFTY", "RELIANCE", "TCS")], "sim")
+        return {"NIFTY:1day": {"saved": 5}}
+
+
+def _today_job(tmp_path, **hist):
+    TodayHistory.attempts = 0
+    s = _settings(tmp_path)
+    store = Store(":memory:")
+    j = Journal(store, s)
+    strikes = tuple(float(k) for k in range(800, 1501, 10))
+    InstrumentBook(store, "sim").save([ContractSpec(sym, e, LOT, "monthly", strikes, T_CHAINS.astimezone(timezone.utc))
+                                       for sym in STOCKS for e in (EXP, EXP_NEXT)])
+    src = FakeChainSource([raw(1000, 9.5, 10.5), raw(1100, 19.5, 20.5), raw(1200, 39.0, 41.0)])
+    chains = ChainLoader(s, store, src, InstrumentBook(store, "sim"))
+    job = AfterCloseJob(s, store, j, MarketCalendar(), chains, lambda m, cb: TodayHistory(store, m, cb, **hist), "sim")
+    return job, s, store, j
+
+
+def _run(job, at):
+    with clock.travel(at.astimezone(timezone.utc)):
+        return job.run(at.astimezone(timezone.utc))
+
+
+def test_today_without_the_daily_bar_the_close_is_built_from_5_minute_bars_and_the_session_is_today(tmp_path):
+    job, s, store, j = _today_job(tmp_path, five_min=75)
+    _run(job, T_CHAINS)
+    st = _run(job, T_FINISH)
+    assert st["status"] == DONE and st["steps"]["shortlist"]["session_date"] == "2026-11-17"     # never 16-Nov
+    assert st["session_bars"]["from_5m"] == ["NIFTY", "RELIANCE", "TCS"] and st["session_bars"]["missing"] == {}
+    assert "NO_CHAIN" not in st["steps"]["shortlist"]["reasons"]            # today's chains are used
+    assert store.shortlist()["session_date"] == "2026-11-17"
+    assert store.history_bars("bars_1d", "NIFTY", "sim", since=OPEN_UTC) == []   # nothing written to the daily table
+    text = "\n".join(summary_lines(s, j, TODAY, datetime(2026, 11, 17, 15, 45, tzinfo=IST)))
+    assert "(session 2026-11-17," in text
+    assert "built from stored 5-minute bars for 3 (the daily bar was not published yet): NIFTY, RELIANCE, TCS" in text
+
+
+def test_today_with_incomplete_bars_it_waits_and_retries_then_uses_the_published_daily_bar(tmp_path):
+    job, s, store, j = _today_job(tmp_path, five_min=11, publish_daily_on=2)   # 09:15-10:05 only, as on 17-Nov
+    _run(job, T_CHAINS)
+    st = _run(job, T_FINISH)
+    assert st["status"] == WAITING and st["next_retry_utc"].startswith("2026-11-17T10:16")   # 15:46 IST
+    assert "5-minute bars incomplete (11 of 75, last 10:05)" in st["session_bars"]["missing"]["NIFTY"]
+    assert store.shortlist()["rows"] == []                                   # not built on 16-Nov meanwhile
+    head = summary_lines(s, j, TODAY, datetime(2026, 11, 17, 15, 45, tzinfo=IST))
+    assert head[0].startswith("Stock option shortlist: NOT FINISHED by 15:45: waiting for today's bars (attempt 1, "
+                              "next try 15:46, until 17:30)") and "NIFTY (no daily bar for 17-Nov yet" in head[1]
+    assert job.due(datetime(2026, 11, 17, 15, 40, tzinfo=IST).astimezone(timezone.utc)) is None
+    st = _run(job, datetime(2026, 11, 17, 15, 46, tzinfo=IST))
+    assert TodayHistory.last.symbols == {"NIFTY", "RELIANCE", "TCS"}         # a retry asks only for the missing
+    assert st["status"] == DONE and st["steps"]["shortlist"]["session_date"] == "2026-11-17"
+    text = "\n".join(summary_lines(s, j, TODAY, datetime(2026, 11, 17, 16, 0, tzinfo=IST)))
+    assert "session close: Breeze daily bars for 3 (after 2 attempts)" in text
+
+
+def test_today_past_the_deadline_without_the_index_bar_it_fails_and_never_uses_an_older_session(tmp_path):
+    job, s, store, j = _today_job(tmp_path, five_min=11)
+    _run(job, T_CHAINS)
+    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # next try 17:35 > 17:30: last attempt
+    assert st["status"] == DONE and not st["steps"]["shortlist"]["ok"]
+    assert "no bar for NIFTY on 17-Nov-2026" in st["steps"]["shortlist"]["error"]
+    assert "not run on an older session" in st["steps"]["shortlist"]["error"]
+    assert store.shortlist()["rows"] == []
+    text = "\n".join(summary_lines(s, j, TODAY, datetime(2026, 11, 17, 17, 30, tzinfo=IST)))
+    assert text.startswith("Stock option shortlist: FAILED - no bar for NIFTY") and "No candidates" not in text
+
+
+def test_run_shortlist_for_a_given_session_refuses_an_older_one(tmp_path):
+    from app.options.shortlist import run_shortlist
+    s = _settings(tmp_path)
+    store = Store(":memory:")
+    store.save_history_bars("bars_1d", [Bar("NIFTY", daily_start(d), 1, 2, 0.5, 1.5, None)
+                                        for d in weekdays_back(DAY, 5)], "sim")
+    out = run_shortlist(s, store, "sim", now=T_FINISH.astimezone(timezone.utc), session=TODAY, save=False)
+    assert out["rows"] == [] and "no daily bar for NIFTY on 17-Nov-2026 (newest 16-Nov-2026" in out["error"]
+
+
+def test_session_bar_from_5_minute_bars_needs_the_full_session():
+    store = Store(":memory:")
+    bars = five_minute_bars("RELIANCE", base=1000.0)
+    store.save_history_bars("bars_5m", bars, "sim")
+    bar, how = session_bar_from_5m(store, "sim", "RELIANCE", TODAY)
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (1000.0, 1076.0, 999.0, 1075.0, 7500.0)
+    assert bar.start == OPEN_UTC and "75 stored 5-minute bars" in how
+    store2 = Store(":memory:")
+    store2.save_history_bars("bars_5m", bars[:-1], "sim")                    # 15:25 missing
+    assert session_bar_from_5m(store2, "sim", "RELIANCE", TODAY)[0] is None
+
+
+def test_session_bars_store_adds_the_built_bar_only_where_the_daily_history_lacks_it():
+    store = Store(":memory:")
+    hist = [Bar("NIFTY", daily_start(d), 1, 2, 0.5, 1.5, None) for d in weekdays_back(DAY, 5)]
+    store.save_history_bars("bars_1d", hist, "sim")
+    built = Bar("NIFTY", daily_start(TODAY), 3, 4, 2, 3.5, None)
+    view = SessionBarsStore(store, {"NIFTY": built})
+    got = view.history_bars("bars_1d", "NIFTY", "sim", limit=3)
+    assert len(got) == 3 and got[-1] == built
+    assert view.history_bars("bars_1d", "NIFTY", "sim", before=OPEN_UTC)[-1].start < OPEN_UTC
+    assert view.history_bars("bars_5m", "NIFTY", "sim") == []                # other tables: the store's
+    store.save_history_bars("bars_1d", [Bar("NIFTY", daily_start(TODAY), 9, 9, 9, 9, None)], "sim")
+    assert view.history_bars("bars_1d", "NIFTY", "sim", limit=1)[0].close == 9    # the stored daily bar wins
+    assert view.requests_used(TODAY) == 0                                    # everything else passes through
+
+
+def test_bars_deadline_must_be_after_the_start():
+    from pydantic import ValidationError
+    from app.config import AfterCloseShortlist
+    with pytest.raises(ValidationError):
+        AfterCloseShortlist(start_time="15:31", bars_deadline="15:31")

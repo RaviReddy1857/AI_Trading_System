@@ -33,6 +33,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | /stock-option-selling page: shortlist built in memory when none is stored (every stock with every reason), each section loads on its own | Fixed and tested | 1,143 passing (whole suite) | 2026-11-17 |
 | - | Stock option shortlist built by the app every trading day after the close (chains, history, shortlist; 226 Breeze calls a normal day in the daily budget); result in the 15:45 summary | Built and tested | 1,154 passing (whole suite) | 2026-11-17 |
 | - | Stock option chains at 15:20 (live bid/ask), paced at 60 chain calls a minute; strikes without a valid bid/ask stored as unpriced; history and shortlist after 15:31 | Built and tested | 1,159 passing (whole suite) | 2026-11-17 |
+| - | Shortlist for the chains' session only (today's close from 5-minute bars, or wait and retry until 17:30); kill switch of 17-Nov reported (unchanged) | Fixed and tested | 1,166 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2730,6 +2731,57 @@ Not tested here: the capture against live Breeze at 15:20; ICICI's actual per-mi
 
 Tests: `tests/test_after_close.py` (16; 8 fail on the code before). Whole suite 1,159 passing, 0 failing,
 0 clock reads outside the fixed clock.
+
+## The shortlist runs for the session the chains were captured in (2026-11-17)
+
+**What happened on 17-Nov** (live database, read only): chains captured 15:20 (60 expiry chains = 30 stocks x 2
+expiries, each 2 calls: 120 calls; 7,066 strikes, 2,631 of them without a valid bid/ask), history 15:35 (106 calls;
+226 counted in all), shortlist 15:38 for session **2026-11-16**: NO_CHAIN for all 30. The shortlist took the newest
+session the index had a daily bar for; Breeze's daily bar for 17-Nov was not stored by 15:35, and the stored 5-minute
+bars of 17-Nov ended at 10:05 (11 of 75). So it ran on 16-Nov, for which no chain was captured.
+
+**Now** (`app/options/after_close.py`, `run_shortlist(session=...)`):
+- the shortlist runs for the chains' day only; `run_shortlist` refuses an older session ("not run on an older
+  session");
+- a symbol without today's daily bar gets the session's bar built from its stored 5-minute bars when all 75 (09:15 to
+  15:25) are stored (`session_bar_from_5m`: open of the first, high/low over all, close of the last, volume summed),
+  used in memory only (`SessionBarsStore`), never written to the daily table (so the real Breeze bar is still fetched
+  and wins once stored);
+- when the index or a priority stock has neither, the step waits and retries every
+  `stock_option_selling.after_close.bars_retry_minutes` (15), asking Breeze again only for those symbols, until
+  `bars_deadline` (17:30); then it runs for today with what there is (a stock without the bar: DATA_STALE), or FAILS
+  when the index has none - never on 16-Nov;
+- the summary says which: "session close: Breeze daily bars for N; built from stored 5-minute bars for M (the daily
+  bar was not published yet): ...", "(after k attempts)", or "NOT FINISHED: waiting for today's bars (attempt k, next
+  try HH:MM, until 17:30)" with the symbols and why, or "FAILED - no bar for NIFTY on ...".
+
+Calls: a retry asks for the missing symbols only (both intervals): at most 2 calls per missing symbol per retry, 8
+retries at most (15:31 to 17:30), all inside the daily budget.
+
+Not known from here: why Breeze returned no daily bar and 5-minute bars only to 10:05 at 15:35 on 17-Nov (the request
+went out; the reply is not logged per symbol). Whether a retry gets them is what the retries are for.
+
+## Kill switch of 17-Nov 15:20 (report only; nothing changed)
+
+The alert `kill:2026-11-17:15:20` was created at 15:20:01 IST: "24 ticks quarantined in the last 5 minutes (spike at
+20)". The switch counts EVERY row of `quality_events` in the window (`store.quality_event_count_since`), not only price
+ticks. In 15:15:01-15:20:01: NIFTY BAD_OPTION_QUOTE 21 (the 5-minute index option chain refresh: far strikes quoted
+bid 0 / ask 0.05), VOLUME_WENT_BACK 3 (BAJAJFINSV, GRASIM, MAXHEALTH at 15:15:47, price ticks), BAD_BAR 1 (JIOFIN, a
+5-minute history bar with negative volume, 15:19:54) = 25 by 15:20:01 (24 when it was evaluated).
+
+15:10-15:25 IST, by reason: BAD_OPTION_QUOTE 2,653 (22 NIFTY from the index chain refresh 15:11-15:19; 2,631 across 30
+stocks at 15:20:25 from the stock chain capture - strikes without a valid bid/ask, now also stored as unpriced);
+CROSSED_QUOTE 1,852 on 50 stocks, 15:21:21-15:24:59 (live price ticks with bid above ask, e.g. NTPC bid 330.40 ask
+321.05; TCS 113, LT 111, BSE/ICICIBANK/RELIANCE/BHARTIARTL about 60, most others 31-32 each); VOLUME_WENT_BACK 3;
+BAD_BAR 1. Per symbol and reason the list is in the conversation report of that day.
+
+Consequences, for the user's decision (threshold unchanged as asked): option-chain rejections and history bar rejections
+count as "ticks" for the kill switch; the 15:20 stock chain capture alone adds about 2,600 rows in one second, so the
+switch stays on for the following 5 minutes whatever the ticks are; and the crossed quotes from 15:21 (all stocks
+together) would trip it on their own.
+
+Tests: `tests/test_after_close.py` (23; the 7 new ones, on 17-Nov dates, fail on the code before). Whole suite
+1,166 passing, 0 failing, 0 clock reads outside the fixed clock.
 
 ## Open issues
 

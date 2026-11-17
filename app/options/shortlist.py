@@ -383,12 +383,19 @@ def reversal_watch(settings: Settings, store: Store, source: str, now: datetime 
 
 def run_shortlist(settings: Settings, store: Store, source: str, now: datetime | None = None,
                   strategy: StockOptionSelling | None = None, save: bool = True,
-                  symbols: list[str] | None = None) -> dict:
+                  symbols: list[str] | None = None, session: date | None = None) -> dict:
     """Assess the universe (only `symbols` of it when given, e.g. the priority stocks) at the close of the newest
-    stored session and store the ranked list."""
+    stored session - or of `session` when given (the day the chains were captured), never an earlier one - and store
+    the ranked list."""
     now = now or utcnow()
     settings = phase9_settings(settings)                   # research pages use the Phase 9 capital
-    session = session_date(settings, store, source)
+    newest = session_date(settings, store, source)
+    if session is not None and newest != session:
+        return {"session_date": session.isoformat(), "rows": [],
+                "error": f"no daily bar for {settings.regime.index_symbol} on {session:%d-%b-%Y} (newest "
+                         f"{newest:%d-%b-%Y} if stored): the shortlist is not run on an older session"
+                if newest else f"no daily bars stored for the index"}
+    session = session or newest
     if session is None:
         return {"session_date": None, "rows": [], "error": "no daily bars stored for the index"}
     strategy = strategy or build_stock_selling(settings)

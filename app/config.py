@@ -848,6 +848,9 @@ class AfterCloseShortlist(StrictModel):
     enabled: bool = True
     chain_time: CLOCK = "15:20"                            # IST; in market hours, before the close (15:30)
     start_time: CLOCK = "15:31"                            # IST; not before the close (15:30)
+    # today's bars not there yet (daily bar not published, 5-minute bars incomplete): try again this often until then
+    bars_retry_minutes: int = Field(15, ge=5, le=120)
+    bars_deadline: CLOCK = "17:30"                         # IST; after start_time
 
     @field_validator("start_time")
     @classmethod
@@ -855,6 +858,12 @@ class AfterCloseShortlist(StrictModel):
         if hhmm(v) < _dtime(15, 30):
             raise ValueError("after_close.start_time must be at or after the close, 15:30")
         return v
+
+    @model_validator(mode="after")
+    def _deadline_after_start(self) -> "AfterCloseShortlist":
+        if hhmm(self.bars_deadline) <= hhmm(self.start_time):
+            raise ValueError("after_close.bars_deadline must be after start_time")
+        return self
 
     @field_validator("chain_time")
     @classmethod
