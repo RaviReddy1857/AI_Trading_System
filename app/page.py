@@ -572,16 +572,22 @@ const fmt=v=>v==null?'-':(typeof v==='number'?v.toLocaleString('en-IN',{maximumF
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  let j={};try{j=await r.json()}catch(e){} return {ok:r.ok,json:j}}
+function commitHtml(m){
+ if(!m) return '';
+ const rows=m.items.length?m.items.map(x=>`<li>${esc(x.symbol)}: ${esc(x.what)} - Rs ${fmt(x.committed_inr)}</li>`).join(''):'<li>nothing committed</li>';
+ return `<details><summary>Capital committed Rs ${fmt(m.committed_inr)} + this signal Rs ${fmt(m.new_inr)} = Rs ${fmt(m.after_inr)} (usable Rs ${fmt(m.usable_inr)} of Rs ${fmt(m.capital_inr)})</summary>
+  <div class="mute">${esc(m.book)}</div><ul>${rows}</ul></details>`}
 function cardHtml(c){
  const est=c.estimate, tr=c.track_record||{}, sc=c.score||{};
  let h=`<div class="card sig ${c.status} ${c.expired?'expired':''}"><h3>${esc(c.instrument)} - ${c.direction} - ${c.status}${c.expired?' (expired)':''}</h3>`;
  h+=`<div class="kv"><span>${esc(c.trade_type_name)}</span><span>strategy ${esc(c.strategy_id)} v${esc(c.strategy_version)}</span>
   <span>regime ${esc(c.regime)}</span><span>data ${esc(c.data_as_of)}</span><span>valid until ${esc(c.valid_until)}</span>
   <span>score ${sc.score==null?'not scored':sc.score} (ranking aid, not a probability)</span></div>`;
- if(c.status!=='APPROVED'){h+=`<details><summary>NO TRADE: ${esc(c.reason_codes.join(', '))}</summary><ul>${c.reasons.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul></details></div>`;return h}
+ if(c.status!=='APPROVED'){h+=`<details><summary>NO TRADE: ${esc(c.reason_codes.join(', '))}</summary><ul>${c.reasons.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul></details>${commitHtml(c.commitment)}</div>`;return h}
  h+=`<div class="kv"><span>entry zone <b>${fmt(c.entry_zone[0])} - ${fmt(c.entry_zone[1])}</b></span><span>stop <b>${fmt(c.stop)}</b></span>
   <span>target <b>${fmt(c.target)}</b></span><span>${c.lots?('lots <b>'+c.lots+'</b>'):('quantity <b>'+fmt(c.quantity)+'</b>')}</span>
   <span>risk Rs ${fmt(c.risk_inr)} (${fmt(c.risk_pct)}%)</span><span>margin/cash Rs ${fmt(c.margin_inr)}</span><span>${esc(c.capital_fit||'')}</span></div>`;
+ h+=commitHtml(c.commitment);
  h+=`<b>Why now</b><ul>${c.why_now.map(r=>'<li>'+esc(r)+'</li>').join('')}</ul>`;
  if(est){h+=`<b>${esc(est.label)}</b><div class="kv"><span>profit if target Rs ${fmt(est.profit_if_target_inr)}</span>
   <span>loss if stop Rs ${fmt(est.loss_if_stop_inr)}</span><span>risk-reward ${fmt(est.risk_reward)}</span><span>costs Rs ${fmt(est.costs_inr)}</span>

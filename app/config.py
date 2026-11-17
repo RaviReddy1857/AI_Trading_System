@@ -1007,6 +1007,14 @@ class Execution(StrictModel):
         return v
 
 
+class PaperBook(StrictModel):
+    """The paper book: every approved signal's paper trade runs here, a simulated book with its own capital and
+    limits, never counted against my real capital. Its capital per pool is `capital_pct` of that pool's capital."""
+    capital_pct: float = Field(100.0, gt=0, le=1000)
+    uncommitted_cash_pct: float = Field(25.0, ge=0, lt=100)   # share of the paper capital that stays uncommitted
+    max_open_trades: int = Field(10, ge=1, le=500)            # open + pending paper trades per pool
+
+
 class EngineCfg(StrictModel):
     """The live signal loop (paper mode). Bars are 5 minutes; nothing is ever sent to the broker."""
     enabled: bool = True
@@ -1038,6 +1046,7 @@ class Settings(StrictModel):
     exits: Exits = Exits()
     execution: Execution = Execution()
     engine: EngineCfg = EngineCfg()
+    paper: PaperBook = PaperBook()
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":

@@ -81,6 +81,24 @@ def estimate(sig, decision) -> dict | None:
     return out
 
 
+ORIGIN_TEXT = {"PENDING": "approved signal awaiting your decision", "MANUAL": "your position (entered by hand)",
+               "SIGNAL": "your position (from a signal you took)"}
+
+
+def commitment(decision) -> dict | None:
+    """What the capital-pool check counted (decision facts["pool"]): my real book only - my open positions and the
+    approved signals awaiting my decision. Paper trades run in their own simulated book and are never in it."""
+    pf = (decision.facts or {}).get("pool") if hasattr(decision, "facts") else None
+    if not pf:
+        return None
+    return {"book": "REAL: your open positions and approved signals awaiting your decision (paper trades are a "
+                    "separate simulated book and are not counted)",
+            "committed_inr": pf.get("committed_inr"), "new_inr": pf.get("new_inr"), "after_inr": pf.get("after_inr"),
+            "usable_inr": pf.get("usable_inr"), "capital_inr": pf.get("capital_inr"), "fit": pf.get("capital_fit"),
+            "items": [{"what": ORIGIN_TEXT.get(x.get("origin"), str(x.get("origin")).lower()), "symbol": x.get("symbol"),
+                       "id": x.get("id"), "committed_inr": x.get("committed_inr")} for x in pf.get("items") or []]}
+
+
 def build_card(sig, decision, *, score: dict | None, regime: str | None, bias: str | None,
                events_week: list[dict] | None, track: dict | None, alert: dict | None, now: datetime,
                coverage=None) -> dict:
@@ -107,6 +125,7 @@ def build_card(sig, decision, *, score: dict | None, regime: str | None, bias: s
         "estimate": estimate(sig, decision),
         "track_record": track, "score": score,
         "reasons": list(decision.reasons), "reason_codes": list(decision.reason_codes),
+        "commitment": commitment(decision),
         "warnings": list(decision.warnings) + list((sig.details or {}).get("warnings") or []),
         "alert": alert,
         "note": "Research only: you place every order yourself in ICICI Direct.",

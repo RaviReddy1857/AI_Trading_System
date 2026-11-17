@@ -155,6 +155,11 @@ def pool_capital(settings, pool: str) -> float:
     return settings.account.capital_inr
 
 
+def paper_capital(settings, pool: str) -> float:
+    """The simulated capital of a pool's paper book (`paper.capital_pct` of the pool's capital)."""
+    return pool_capital(settings, pool) * settings.paper.capital_pct / 100
+
+
 def _leg(leg, name):
     return leg.get(name) if isinstance(leg, dict) else getattr(leg, name, None)
 
@@ -946,14 +951,13 @@ class Journal:
 
     # ---- realised P&L per pool ----
     def realised(self, pool: str, since: date | None = None, until: date | None = None) -> Decimal | None:
-        """Realised P&L of a pool (my closed positions and the paper trades of signals I did not take), after
+        """Realised P&L of a pool in my real book (my closed positions only; paper trades run in the paper book), after
         estimated charges, for closes dated (IST) from `since` to `until` inclusive. None when a figure is not known.
 
         Same basis as the open P&L (`pool_account`): with `since`, a close of a position opened before `since` counts
         only its change from the last closing mark before `since` (net of the close less that mark per unit x units
         closed), so a position that gained up to yesterday's close and lost today shows today's loss whether it is
         still open or closed. No such mark: not known (None), as for the open P&L. Without `since`: since entry."""
-        taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
         total = Decimal(0)
 
         def amount(ref: str, entry_utc: datetime, net, units: int) -> Decimal | None:
@@ -978,43 +982,42 @@ class Journal:
             if v is None:
                 return None
             total += v
-        for t in self.paper_trades(status="CLOSED", pool=pool):
-            if t["signal_id"] in taken or not t["exit_utc"]:
-                continue
-            day = ist_day(datetime.fromisoformat(t["exit_utc"]))
-            if (since and day < since) or (until and day > until):
-                continue
-            v = amount(f"paper:{t['signal_id']}", datetime.fromisoformat(t["entry_utc"]), t["net_pnl_inr"], t["quantity"])
-            if v is None:
-                return None
-            total += v
         return _paise(total)
 
     def held_positions(self, pool: str) -> list[Position]:
-        """Open positions that count in a pool's account: my open positions, and the open paper trades of
-        signals I did not take (a taken signal counts once, as my position)."""
-        taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
-        out = list(self.positions("OPEN", pool))
-        out += [self.paper_position(t) for t in self.paper_trades(status="OPEN", pool=pool) if t["signal_id"] not in taken]
-        return out
+        """My open positions in a pool (the real book). Paper trades are never counted here: they run in the paper
+        book (`paper_book`)."""
+        return list(self.positions("OPEN", pool))
 
     def pending_reservations(self, pool: str, now: datetime) -> list[dict]:
-        """Approved paper trades not filled yet (PENDING) and still within their valid-until, of signals I did not
-        take: each reserves its approved risk and margin, a sector slot and a place in its correlated group from
-        approval until it fills (it is then an open paper trade) or expires - as the backtests reserve accepted
-        entries until they fill."""
-        taken = {sid for sid, d in self.decisions().items() if d and d["decision"] == TOOK}
+        """The real book's reservations: approved signals of the pool still within their valid-until on which I have
+        recorded no decision. Each reserves its approved risk and margin, a sector slot and a place in its correlated
+        group until I take it (it is then my position), skip it, or it expires - so several approvals before I act
+        cannot together exceed the limits. Their paper trades do not matter here (the paper book)."""
+        decided = set(self.decisions())
         out = []
-        for t in self.paper_trades(status="PENDING", pool=pool):
-            if t["signal_id"] in taken:
+        for r in self.unexpired_signals(now):
+            if r["pool"] != pool or r["status"] != "APPROVED" or r["signal_id"] in decided:
                 continue
-            try:
-                valid_until = datetime.fromisoformat(json.loads(t["note"] or "{}")["valid_until_utc"])
-            except (KeyError, ValueError, TypeError):
-                valid_until = None                      # not known: it keeps its reservation (never released early)
-            if valid_until is not None and now >= valid_until:
-                continue
-            out.append(t)
+            d = r["decision"] or {}
+            out.append({"signal_id": r["signal_id"], "symbol": r["symbol"], "trade_type": r["trade_type"],
+                        "risk_inr": d.get("risk_inr"), "margin_inr": d.get("margin_inr")})
+        return out
+
+    # ---- the paper book (simulated; its own capital and limits) ----
+    def paper_open(self, pool: str, now: datetime) -> list[dict]:
+        """Paper trades that occupy the paper book: OPEN ones, and PENDING ones within their valid-until."""
+        out = []
+        for t in self.paper_trades(pool=pool):
+            if t["status"] == "OPEN":
+                out.append(t)
+            elif t["status"] == "PENDING":
+                try:
+                    vu = datetime.fromisoformat(json.loads(t["note"] or "{}")["valid_until_utc"])
+                except (KeyError, ValueError, TypeError):
+                    vu = None                           # not known: it keeps its place
+                if vu is None or now < vu:
+                    out.append(t)
         return out
 
 
@@ -1063,7 +1066,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     be computed is passed with None, so the engine says PORTFOLIO_UNKNOWN with the position named.
     Equity = pool capital + net deposits since the first equity point (`net_flows`; CASH_INDEX only) + realised
     to date + open P&L now; earlier closes from `equity_history`. Approved paper trades not filled yet are passed
-    as positions with their approved risk and margin and no P&L (`Journal.pending_reservations`)."""
+    as positions with their approved risk and margin and no P&L (`Journal.pending_reservations`). This is my REAL
+    book only: paper trades (open, pending or closed) are never counted here; they run in `paper_book`."""
     from .risk.portfolio import AccountState, OpenPosition
     cap = pool_capital(settings, pool)
     today = ist_day(now)
@@ -1100,8 +1104,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
                                  None if committed is None else float(committed),
                                  None if today_pnl is None else float(today_pnl),
                                  None if month_pnl is None else float(month_pnl), origin=p.origin))
-    # approved paper trades not filled yet reserve their approved risk and margin (no P&L yet): sector,
-    # correlated-group, capital-pool and selling-spread limits count them from approval until fill or expiry
+    # approved signals awaiting my decision reserve their approved risk and margin (no P&L yet): sector,
+    # correlated-group, capital-pool and selling-spread limits count them until I take or skip them, or they expire
     pending = journal.pending_reservations(pool, now)
     for t in pending:
         risk, margin = _num(t["risk_inr"]), _num(t["margin_inr"])
@@ -1130,6 +1134,46 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
              "equity_inr": curve[-1][1] if curve else None,
              "equity_points": len(curve) if curve else 0}
     return state, facts
+
+
+def paper_book(journal: Journal, settings, pool: str, now: datetime, new_row: dict | None = None) -> dict:
+    """The paper book of a pool: its simulated capital (`paper_capital`), what its open and pending paper trades
+    commit (cash value at entry; options: premium paid or the approved margin; pending: the approved margin or cash
+    value), and whether `new_row` (a pending paper trade) fits its limits: `paper.uncommitted_cash_pct` of the paper
+    capital stays uncommitted, at most `paper.max_open_trades` open + pending. Never touches my real book."""
+    from .risk.portfolio import pool_check
+    from .risk.portfolio import OpenPosition
+    cap = paper_capital(settings, pool)
+    held = journal.paper_open(pool, now)
+    rows, unknown = [], []
+    for t in held:
+        if t["status"] == "OPEN":
+            c = committed_inr(journal.paper_position(t))
+        else:
+            c = _num(t["margin_inr"])
+        if c is None:
+            unknown.append(f"paper {t['symbol']} ({t['signal_id']}): commitment not known")
+            continue
+        rows.append(OpenPosition(f"paper:{t['signal_id']}", t["symbol"], "OTHER", _num(t["risk_inr"]), float(c), 0.0,
+                                 0.0, origin=f"PAPER_{t['status']}"))
+    new_inr = 0.0
+    if new_row is not None:
+        new_inr = _num(new_row.get("margin_inr")) or 0.0
+    code, text, facts = pool_check(cap, rows, new_inr, settings.paper.uncommitted_cash_pct)
+    n = len(held) + (1 if new_row is not None else 0)
+    facts.update(book="PAPER", pool=pool, open_or_pending=len(held), max_open_trades=settings.paper.max_open_trades,
+                 unknown=unknown)
+    why = []
+    if unknown:
+        why.append("PAPER_BOOK_UNKNOWN: " + "; ".join(unknown))
+    if code:
+        why.append(f"PAPER_BOOK_LIMIT: paper {text}")
+    if new_row is not None and n > settings.paper.max_open_trades:
+        why.append(f"PAPER_BOOK_LIMIT: {n} paper trades open or pending with this one, above paper.max_open_trades "
+                   f"{settings.paper.max_open_trades}")
+    facts["fits"] = not why
+    facts["why"] = why
+    return facts
 
 
 def record_marks(journal: Journal, pool: str, now: datetime, marks, costs) -> int:

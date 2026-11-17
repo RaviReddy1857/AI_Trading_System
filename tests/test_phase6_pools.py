@@ -107,7 +107,7 @@ def test_open_pnl_today_is_measured_from_the_previous_days_mark():
     assert acct.equity_curve[-1] == (date(2026, 11, 16), 200500.0)
 
 
-def test_paper_trade_of_a_taken_signal_counts_once():
+def test_paper_trades_are_never_in_my_real_book_and_a_taken_signal_is_my_position():
     s = settings()
     j = journal_with_start(s)
     sig = cash_signal(entry=100.0, stop=95.0, target=110.0)
@@ -116,10 +116,10 @@ def test_paper_trade_of_a_taken_signal_counts_once():
            "direction": "LONG", "legs_json": None, "quantity": 10, "status": "OPEN", "entry_utc": NOW.isoformat(),
            "entry_price": 100.0, "stop": 95.0, "target": 110.0, "horizon": "INTRADAY", "strategy_id": "orb_v2"}
     j.upsert_paper(row)
-    assert len(j.held_positions(CASH_INDEX)) == 1                 # the paper trade
+    assert j.held_positions(CASH_INDEX) == []                     # the paper trade runs in the paper book
     j.record_decision(sig.signal_id, {"decision": "TOOK", "fill_price": 100.2}, NOW)
     held = j.held_positions(CASH_INDEX)
-    assert len(held) == 1 and held[0].origin == "SIGNAL"          # my position replaces its paper twin
+    assert len(held) == 1 and held[0].origin == "SIGNAL"          # my position
 
 
 def test_deposits_belong_to_the_cash_pool_only():

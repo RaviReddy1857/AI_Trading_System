@@ -552,6 +552,13 @@ exits:                          # exit calls for open positions (R = entry to th
 execution:
   strike_distance_bands_pct: [1, 2, 5, 10]   # slippage report groups: strike within 1%, 1-2%, 2-5%, 5-10%, 10%+ of spot
 
+# The paper book: paper trades run in their own simulated book (never against your real capital). Its capital per pool
+# is capital_pct of that pool's capital; a paper trade that does not fit is NOT_OPENED (the signal card is unchanged).
+paper:
+  capital_pct: 100.0
+  uncommitted_cash_pct: 25.0
+  max_open_trades: 10
+
 engine:
   enabled: true                 # the live signal loop (paper mode; nothing is ever sent to the broker)
   poll_seconds: 2

@@ -302,7 +302,7 @@ class SignalEngine:
                           coverage=self._coverage(sig, now))
         # the signal and its pending paper trade in one transaction: a crash never leaves one without the other
         if not self.j.save_signal(sig, decision, now, score=sc["score"], card=card,
-                                  paper=self.paper.pending_row(sig, decision)):
+                                  paper=self.paper.admit(self.paper.pending_row(sig, decision), now)):
             return None
         self.signals[sig.signal_id] = sig
         quotes = self.paper._quotes(sig, now)

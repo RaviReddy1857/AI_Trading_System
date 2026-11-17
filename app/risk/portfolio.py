@@ -114,6 +114,9 @@ def pool_check(capital: float, positions, new_inr, uncommitted_pct: float) -> tu
     """The uncommitted-cash rule: (RISK_BUDGET_USED or None, why, facts)."""
     label, shortfall, facts = capital_fit(capital, committed_inr(positions), new_inr, uncommitted_pct)
     facts["capital_fit"] = label
+    # what makes up the commitment, one row per position or reservation (shown on the signal card)
+    facts["items"] = [{"id": p.position_id, "symbol": p.symbol, "origin": p.origin,
+                       "committed_inr": float(paise(p.committed_inr))} for p in positions]
     if label == FITS:
         return None, "within the capital pool", facts
     return (RISK_BUDGET_USED, f"capital committed would be Rs {facts['after_inr']:,.2f}, above Rs "

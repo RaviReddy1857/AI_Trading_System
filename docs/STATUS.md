@@ -27,6 +27,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | 6 | Live signals and alerts (paper mode) | Built and tested on fixtures in four milestones: journal and positions with two capital pools; live loop, cards, score, paper trader, execution records, exit calls for every trade type; Telegram (send-only, OFF until switched on), trade-type switches, plan and summary, settlement alert sending; failure recovery. Not yet seen: a real Telegram message, a live market day, a real feed drop | 1079 passing (whole suite) | 2026-11-16 |
 | - | Review fixes (Codex re-check of 9dd57af..d35c2e6, 4 findings): paper entry at the fill quote's time with late-poll exit catch-up; first-quote captures kept across a restart, lost ones marked and out of the slippage report; option fills from one snapshot quoting every leg; Telegram 200 with an unexpected body is uncertain | Fixed and tested | 1,118 passing (whole suite) | 2026-11-17 |
 | - | Event lists: "EVENT COVERAGE MISSING: results dates unknown" instead of "none" when the week's results-date coverage is missing or incomplete (pre-market plan, signal cards) | Fixed and tested | 1,126 passing (whole suite) | 2026-11-17 |
+| - | Two books: signal cards' risk checks use my real positions and the approved signals awaiting my decision only; paper trades run in a simulated paper book with its own limits; the card shows the commitment breakdown | Fixed and tested | 1,134 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2528,6 +2529,40 @@ nothing had been entered. Now an event list says "none" only when coverage is co
 
 Tests: `tests/test_event_coverage_text.py` (8; the plan on the old code printed "none in events.csv"). Whole suite
 1,126 passing, 0 failing.
+
+## Two books: paper trades no longer count against my real capital (2026-11-17)
+
+**What happened.** The GRASIM card of 17-Nov 10:00 IST was NO_TRADE with RISK_BUDGET_USED ("capital committed would be
+Rs 1,97,768.05, above Rs 1,50,000.00") while I had no open positions. From the live database (read-only): the Rs
+1,48,144.05 already committed was three OPEN paper trades at entry price x quantity - SBIN 45 x 1,105.75 = 49,758.75,
+SBIN 45 x 1,106.50 = 49,792.50, ADANIENT 18 x 2,699.60 = 48,592.80 - plus GRASIM's own Rs 49,624. The account the risk
+engine used (`journal.pool_account`) counted open paper trades (`held_positions`), pending paper fills
+(`pending_reservations`) and closed paper P&L (`realised`; the -6.09 "P&L today" on the card was open paper P&L).
+
+**Now.**
+- REAL book (`pool_account`, every signal card's risk checks, the pools and the end-of-day pool P&L): my open positions,
+  my closes, and the approved signals still within their valid-until on which I have recorded no decision (each
+  reserves its approved risk and margin until I take it - it is then my position - skip it, or it expires; a paper fill
+  does not release it). No paper trade, open, pending or closed, is in it.
+- PAPER book (`journal.paper_book`, new config section `paper:`): every paper trade, with its own simulated capital per
+  pool (`paper.capital_pct` of the pool's capital, 100), its own uncommitted share (`paper.uncommitted_cash_pct`, 25)
+  and at most `paper.max_open_trades` (10) open + pending. A paper trade that does not fit is stored NOT_OPENED with
+  "PAPER_BOOK_LIMIT: ..." (`PaperTrader.admit`); the signal and its card are not changed. `GET /api/paper` shows each
+  pool's paper book.
+- The card shows the commitment breakdown (`card.commitment`, page /signals, on approved and NO TRADE cards): committed
+  + this signal = after, usable of capital, and one line per item ("your position (entered by hand)", "your position
+  (from a signal you took)", "approved signal awaiting your decision") with its rupees.
+- Changed test: `test_phase6_pools` "a taken signal counts once" became "paper trades are never in my real book".
+
+The stored equity history has only the two start points (no paper P&L was ever written into it), so nothing stored
+needed correcting. The running app keeps the old behaviour until it is restarted; data/ was only read (read-only), not
+changed.
+
+Not tested here: the paper book over a live day; the paper book has no daily stop or drawdown of its own (only the
+capital and count limits asked for).
+
+Tests: `tests/test_two_books.py` (8; 7 fail on the code before, the eighth guards that an expired pending paper trade
+frees its place). Whole suite 1,134 passing, 0 failing.
 
 ## Open issues
 
