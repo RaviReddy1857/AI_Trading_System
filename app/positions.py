@@ -11,8 +11,9 @@ Kinds (`exit_calls.kind`):
 - BREAKEVEN (gain of `exits.breakeven_after_r` x the initial risk R), TRAIL (from `exits.trail_after_r`, the stop
   `exits.trail_distance_r` x R behind the best price seen), PARTIAL (at `exits.partial_at_r`, book
   `exits.partial_pct` of two or more units, once).
-- TIME: intraday at the earlier of `backtest.intraday_exit_time` and `session.cash_intraday_cutoff` (15:00;
-  ICICI's own square-off time is not confirmed, and the call says so); swing after the strategy's `max_hold_days` sessions; long
+- TIME: intraday at the entry day's cutoff: before 3 Aug 2026 `backtest.intraday_exit_time` (15:15); from 3 Aug 2026
+  the session period's `cash_intraday_cutoff` (15:00; ICICI's own square-off time is not confirmed, and the call says
+  so); swing after the strategy's `max_hold_days` sessions; long
   options at the strategy's exit before expiry or its holding limit; index spreads `exit_days_before_expiry`;
   stock option spreads by the phase 9 rules (time exit, forced exit before expiry week).
 - ENTRY_INVALIDATED: the underlying closes beyond the level the entry needed (`invalidation`, with
@@ -112,8 +113,9 @@ def time_exit_at(pos: Position, settings, calendar) -> tuple[datetime | None, st
     entry_day = ist_day(pos.entry_utc)
     if pos.trade_type == "INTRADAY_STOCKS" or pos.horizon == "INTRADAY":
         sc = session_calendar()
-        t = min(exit_t, sc.intraday_cutoff)
-        note = "" if sc.cutoff_confirmed else " (ICICI's own intraday square-off time after the closing auction is not confirmed)"
+        t = sc.intraday_exit(entry_day, exit_t)                     # dated: 15:15 before 3 Aug 2026, 15:00 after
+        note = "" if sc.cutoff_confirmed or sc.intraday_cutoff(entry_day) is None else \
+            " (ICICI's own intraday square-off time after the closing auction is not confirmed)"
         return datetime.combine(entry_day, t, IST).astimezone(timezone.utc), f"intraday: out by {t:%H:%M} IST{note}"
     strat = getattr(settings.strategies, pos.strategy_id, None) if pos.strategy_id else None
     hold = getattr(strat, "max_hold_days", None)

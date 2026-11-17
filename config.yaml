@@ -102,9 +102,10 @@ session:
     - {from_date: 2000-01-01, open: "09:15", fno_continuous_end: "15:30", fno_close: "15:30", other_close: "15:30",
        index_continuous_end: "15:30", index_close: "15:30", derivatives_close: "15:30"}
     - {from_date: 2026-08-03, open: "09:15", fno_continuous_end: "15:15", fno_close: "15:35", other_close: "15:30",
-       index_continuous_end: "15:15", index_close: "15:35", derivatives_close: "15:40"}
-  # Cash intraday trades (live signals, paper trades, exit calls): no new entry from, and out by, this time.
-  cash_intraday_cutoff: "15:00"
+       index_continuous_end: "15:15", index_close: "15:35", derivatives_close: "15:40",
+       cash_intraday_cutoff: "15:00"}
+  # cash_intraday_cutoff (per period): cash intraday trades (live signals, paper trades, exit calls) take no new entry
+  # from, and are out by, this time; a period without it uses backtest.intraday_exit_time (15:15) as before 3 Aug.
   cash_intraday_cutoff_confirmed: false   # UNCONFIRMED: ICICI Direct's own intraday square-off time after CAS
   cash_intraday_cutoff_source: "not confirmed with ICICI Direct; 15:00 chosen to be out before the 15:15 end of continuous trading"
 

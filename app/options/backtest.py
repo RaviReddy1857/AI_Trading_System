@@ -306,11 +306,17 @@ class QuoteOverride:
 
 class HistoryQuotes:
     """Quotes at the close of one past day, from the price source. Last traded prices only; open
-    interest is known per contract but not across the chain, so the highest-OI rule cannot be applied."""
+    interest is known per contract but not across the chain, so the highest-OI rule cannot be applied.
+
+    An option's daily bar (close, volume, open interest) is final only at the options' close of its day (15:30
+    before 3 Aug 2026, 15:40 after: app/session.py). With `asof` (the decision time), reading a bar of day `d` before
+    that raises LookAheadError: a decision at the stocks' 15:35 close could otherwise see trades of 15:35-15:40."""
     oi_available = False
 
-    def __init__(self, prices, underlying: str, d: date, spot: float, step: float | None):
+    def __init__(self, prices, underlying: str, d: date, spot: float, step: float | None,
+                 asof: datetime | None = None):
         self.prices, self.underlying, self.d, self.spot, self.step = prices, underlying, d, spot, step
+        self.asof = asof
 
     def strikes(self, expiry: date) -> list[float]:
         step = self.step or _auto_step(self.spot)
@@ -326,6 +332,11 @@ class HistoryQuotes:
         return atm_candidates(self.spot, self.step)
 
     def quote(self, expiry: date, strike: float, right: str) -> OptionQuote | None:
+        final_at = close_utc(DERIVATIVES, self.d)
+        if self.asof is not None and self.asof < final_at:
+            from ..strategies.base import LookAheadError
+            raise LookAheadError(f"option daily bar of {self.d} is final at {final_at.astimezone(IST):%H:%M} IST, after "
+                                 f"the decision time {self.asof.astimezone(IST):%H:%M}")
         b = self.prices.bar(self.underlying, expiry, strike, right, self.d)
         return None if b is None else OptionQuote(strike, right, None, None, b.close, b.oi, None, b.volume)
 
@@ -573,10 +584,14 @@ class OptionEngine:
         iv, rank = self.iv_at(sym, d)
         lot = self.lot_size(sym)
         exps = tuple(ExpiryInfo(e, k, lot) for e, k in self.expiries(sym) if e >= d)[:8]
-        asof = close_utc(CASH_FNO, d)        # at the underlying's official close (15:35 from 3 Aug 2026)
+        # Decided at the options' close (15:30 before 3 Aug 2026; 15:40 after): the underlying's official close
+        # (15:35) and the options' daily close, volume and open interest (final at 15:40) are all known then; the
+        # fills are at the next session's open, as before (review fix, 2026-11-17).
+        asof = close_utc(DERIVATIVES, d)
         return OptionContext(
             underlying=sym, kind=kind, asof=asof, regime=self.base.regime.at_close(d).regime, spot=spot,
-            expiries=exps, quotes=HistoryQuotes(self.prices, sym, d, spot, cfg.backtest_strike_step if cfg else None),
+            expiries=exps, quotes=HistoryQuotes(self.prices, sym, d, spot, cfg.backtest_strike_step if cfg else None,
+                                                asof=asof),
             costs=self.costs, capital_inr=self.s.account.capital_inr, rate=self.rate,
             dividend=(cfg.dividend_yield_pct if cfg else 0.0) / 100.0, iv_reference_pct=iv, iv_rank=rank,
             trigger=trigger, allowed_kinds=tuple(cfg.expiries) if cfg else ("monthly",), margin=None,

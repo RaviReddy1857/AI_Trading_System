@@ -220,18 +220,25 @@ class ChainLoader:
                             self.rate.wait()
                             if self._requests:
                                 self._sleep(self.settings.options.chain.request_pause_seconds)
-                        if stop_at is not None and clock() >= stop_at:      # checked after any wait: never sent late
+                        def stopped(counted: bool) -> bool:
+                            if stop_at is None or clock() < stop_at:
+                                return False
                             summary[key] = {"error": f"MISSED: {right} not fetched before "
                                                      f"{stop_at.astimezone(IST):%H:%M} IST"
-                                                     + (" (the other side is stored)" if stamp is not None else ""),
+                                                     + (" (the other side is stored)" if stamp is not None else "")
+                                                     + (" (counted in the day's budget, not sent)" if counted else ""),
                                             "missed": True, "saved": saved}
+                            return True
+                        if stopped(False):                     # checked after any wait: never sent late
                             break
-                        if stamp is None:
-                            stamp = clock() if real_time else now      # this chain's own fetch time
                         self._requests += 1
                         sent += 1
                         if on_request is not None:
                             on_request()
+                        if stopped(True):                      # and again right before the call (review fix)
+                            break
+                        if stamp is None:
+                            stamp = clock() if real_time else now      # this chain's own fetch time
                         good, bad = parse_chain_rows(self.source.fetch(inst, spec, right), right)
                         for reason, raw in bad:
                             if reason == "missing bid/ask":

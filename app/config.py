@@ -264,10 +264,17 @@ class SessionPeriod(StrictModel):
     index_continuous_end: CLOCK = "15:30"    # index values from trades end ...
     index_close: CLOCK = "15:30"             # ... indicative values until this time
     derivatives_close: CLOCK = "15:30"       # stock and index options
+    # cash intraday: no new entry from, and out by, this time (the broker's square-off in this period); None = no
+    # cutoff of its own: `backtest.intraday_exit_time` (15:15) applies, as before 3 Aug 2026
+    cash_intraday_cutoff: CLOCK | None = None
 
     @model_validator(mode="after")
     def _ordered(self) -> "SessionPeriod":
         o = hhmm(self.open)
+        if self.cash_intraday_cutoff is not None and not (
+                o < hhmm(self.cash_intraday_cutoff) <= min(hhmm(self.fno_continuous_end), hhmm(self.other_close))):
+            raise ValueError(f"session period {self.from_date}: cash_intraday_cutoff {self.cash_intraday_cutoff} must "
+                             f"be after the open and not after continuous trading ends")
         for a, b in (("fno_continuous_end", "fno_close"), ("index_continuous_end", "index_close")):
             if not o < hhmm(getattr(self, a)) <= hhmm(getattr(self, b)):
                 raise ValueError(f"session period {self.from_date}: need open < {a} <= {b}")
@@ -281,15 +288,14 @@ def _default_periods() -> list[SessionPeriod]:
     return [SessionPeriod(from_date=_date(2000, 1, 1)),
             SessionPeriod(from_date=_date(2026, 8, 3), fno_continuous_end="15:15", fno_close="15:35",
                           other_close="15:30", index_continuous_end="15:15", index_close="15:35",
-                          derivatives_close="15:40")]
+                          derivatives_close="15:40", cash_intraday_cutoff="15:00")]
 
 
 class SessionCfg(StrictModel):
     """The dated session calendar per segment (read by app/session.py; live code and backtests both use it), and
     the broker's intraday square-off for cash intraday trades."""
     periods: list[SessionPeriod] = Field(default_factory=_default_periods)
-    cash_intraday_cutoff: CLOCK = "15:00"          # cash intraday: no new entry from, and out by, this time
-    cash_intraday_cutoff_confirmed: bool = False   # ICICI's own square-off time is not confirmed
+    cash_intraday_cutoff_confirmed: bool = False   # ICICI's own square-off time (the periods' cutoff) not confirmed
     cash_intraday_cutoff_source: str = ""
 
     @model_validator(mode="after")
@@ -299,11 +305,6 @@ class SessionCfg(StrictModel):
         days = [p.from_date for p in self.periods]
         if days != sorted(days) or len(set(days)) != len(days):
             raise ValueError("session.periods must be in date order with different from_date values")
-        sq = hhmm(self.cash_intraday_cutoff)
-        for p in self.periods:
-            if not hhmm(p.open) < sq <= min(hhmm(p.fno_continuous_end), hhmm(p.other_close)):
-                raise ValueError(f"session.cash_intraday_cutoff {self.cash_intraday_cutoff} must be after the "
-                                 f"open and not after continuous trading ends ({p.from_date} period)")
         return self
 
 

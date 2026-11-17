@@ -15,7 +15,8 @@ signal is shown past its valid-until as expired, and the risk engine refuses it 
 Session hours come from the dated session calendar (app/session.py). Bars are processed until the last segment closes
 (15:30 before 3 Aug 2026; 15:40 after, for option exits). New signals are made only on bars that close inside the
 index's continuous trading (never in the closing auction); a cash intraday signal only on a bar closing before the
-intraday square-off (`session.cash_intraday_cutoff`, 15:00) and inside its stock's continuous trading. After the
+intraday cutoff of the day (dated: `backtest.intraday_exit_time` 15:15 before 3 Aug 2026, the session period's
+`cash_intraday_cutoff` 15:00 after) and inside its stock's continuous trading. After the
 last close the session is closed (closing equity): from 3 Aug 2026 a held position in an F&O stock waits for Breeze's
 daily bar, the official closing-auction price, until `stock_option_selling.after_close.bars_deadline`; without it
 the close is written from the last continuous trade and labelled APPROXIMATE.
@@ -219,7 +220,9 @@ class SignalEngine:
         # new signals only on a bar that closes inside the index's continuous trading (never in the closing auction
         # or after it); exits and paper trades below run on every bar to the last close (options to 15:40)
         new_signals = b < self.cal.hours(INDEX, day).continuous_end_utc
-        cutoff = at_utc(day, session_calendar().intraday_cutoff)   # cash intraday: no entry from the square-off
+        # cash intraday: no entry from the day's cutoff (15:15 before 3 Aug 2026, 15:00 after)
+        from .config import hhmm
+        cutoff = at_utc(day, session_calendar().intraday_exit(day, hhmm(self.s.backtest.intraday_exit_time)))
         for st in (self.cash if new_signals and b < cutoff else ()):
             for i in self.s.watchlist:
                 if i.kind != "stock" or not five[i.symbol] or five[i.symbol][-1].start + FIVE != b:

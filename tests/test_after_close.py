@@ -327,7 +327,9 @@ def test_a_shortlist_not_finished_by_1730_is_sent_then_saying_so(tmp_path):
     scheduled(n, datetime(2026, 11, 16, 17, 29, tzinfo=IST).astimezone(timezone.utc))
     assert "shortlist:2026-11-16" not in n.book.sent
     scheduled(n, datetime(2026, 11, 16, 17, 30, tzinfo=IST).astimezone(timezone.utc))
-    assert "NOT FINISHED by 17:30" in n.book.sent["shortlist:2026-11-16"][1]
+    assert "shortlist:2026-11-16" not in n.book.sent                        # its last attempt runs at 17:30: waited for
+    scheduled(n, datetime(2026, 11, 16, 18, 0, tzinfo=IST).astimezone(timezone.utc))
+    assert "NOT FINISHED by 18:00" in n.book.sent["shortlist:2026-11-16"][1]
     # never started: NOT RUN at 17:30; a step still RUNNING at 17:30 is waited for 30 minutes
     j2 = Journal(Store(":memory:"), s)
     assert "NOT RUN" in shortlist_message(s, j2, DAY, datetime(2026, 11, 16, 17, 30, tzinfo=IST).astimezone(timezone.utc))
@@ -447,7 +449,9 @@ def test_today_without_the_daily_bar_it_waits_then_builds_an_approximate_close_a
     _run(job, T_CHAINS)
     st = _run(job, T_FINISH)
     assert st["status"] == WAITING and st["session_bars"]["from_5m"] == []      # waits for the official close
-    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # the last attempt before 17:30
+    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # not the last attempt (review fix)
+    assert st["status"] == WAITING and st["next_retry_utc"].startswith("2026-11-17T12:00")   # 17:30 IST itself
+    st = _run(job, datetime(2026, 11, 17, 17, 30, tzinfo=IST))              # the last attempt, at the deadline
     assert st["status"] == DONE and st["steps"]["shortlist"]["session_date"] == "2026-11-17"     # never 16-Nov
     assert st["session_bars"]["from_5m"] == ["NIFTY", "RELIANCE", "TCS"] and st["session_bars"]["missing"] == {}
     assert "NO_CHAIN" not in st["steps"]["shortlist"]["reasons"]            # today's chains are used
@@ -480,7 +484,9 @@ def test_today_with_incomplete_bars_it_waits_and_retries_then_uses_the_published
 def test_today_past_the_deadline_without_the_index_bar_it_fails_and_never_uses_an_older_session(tmp_path):
     job, s, store, j = _today_job(tmp_path, five_min=11)
     _run(job, T_CHAINS)
-    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # next try 17:35 > 17:30: last attempt
+    st = _run(job, datetime(2026, 11, 17, 17, 20, tzinfo=IST))              # waits: the last attempt is at 17:30
+    assert st["status"] == WAITING
+    st = _run(job, datetime(2026, 11, 17, 17, 30, tzinfo=IST))              # the last attempt, at the deadline
     assert st["status"] == DONE and not st["steps"]["shortlist"]["ok"]
     assert "no bar for NIFTY on 17-Nov-2026" in st["steps"]["shortlist"]["error"]
     assert "not run on an older session" in st["steps"]["shortlist"]["error"]

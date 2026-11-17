@@ -78,13 +78,14 @@ def test_from_3_aug_fno_stocks_auction_1515_to_1535_options_to_1540_other_stocks
 def test_config_yaml_holds_the_same_calendar_and_load_settings_sets_it():
     s = load_settings()
     d = SessionCfg()                                          # config.yaml = the code's defaults (both dated)
-    assert s.session.periods == d.periods and s.session.cash_intraday_cutoff == d.cash_intraday_cutoff
+    assert s.session.periods == d.periods and s.session.periods[-1].cash_intraday_cutoff == "15:00"
+    assert s.session.periods[0].cash_intraday_cutoff is None                # before 3 Aug: the 15:15 exit applies
     assert S.calendar().cfg == s.session
     assert all(i.fno for i in s.watchlist if i.kind == "stock")     # every Nifty 50 stock is an F&O stock
     raw = _raw(periods=[{"from_date": "2000-01-01"},
                         {"from_date": "2026-08-03", "fno_continuous_end": "14:00", "fno_close": "15:35",
-                         "index_continuous_end": "15:15", "index_close": "15:35", "derivatives_close": "15:40"}],
-               cash_intraday_cutoff="13:30")
+                         "index_continuous_end": "15:15", "index_close": "15:35", "derivatives_close": "15:40",
+                         "cash_intraday_cutoff": "13:30"}])
     raw["stock_option_selling"]["after_close"]["chain_time"] = "13:00"
     raw["stock_option_selling"]["settlement"]["forced_exit_by"] = "13:00"
     raw["backtest"]["intraday_exit_time"] = "14:00"
@@ -93,7 +94,8 @@ def test_config_yaml_holds_the_same_calendar_and_load_settings_sets_it():
 
 
 @pytest.mark.parametrize("change, message", [
-    ({"session": {"cash_intraday_cutoff": "15:20"}}, "must be after the open and not after continuous trading"),
+    ({"session": {"periods": [{"from_date": "2000-01-01", "cash_intraday_cutoff": "15:31"}]}},
+     "must be after the open and not after continuous trading"),
     ({"session": {"periods": [{"from_date": "2026-08-03"}, {"from_date": "2000-01-01"}]}}, "in date order"),
     ({"session": {"periods": [{"from_date": "2000-01-01", "fno_continuous_end": "15:40", "fno_close": "15:35"}]}},
      "need open < fno_continuous_end <= fno_close"),
@@ -355,7 +357,9 @@ def test_after_close_waits_for_the_daily_bar_and_builds_an_approximate_close_onl
     st = job.run(at(POST, 15, 41))
     assert st["status"] == "WAITING" and st["session_bars"]["from_5m"] == []          # it waits for the daily bar
     assert "official close" in st["session_bars"]["missing"]["NIFTY"]
-    st = job.run(at(POST, 17, 26))                                          # the last try before 17:30
+    st = job.run(at(POST, 17, 26))                                          # not the last try: 17:30 is
+    assert st["status"] == "WAITING" and st["next_retry_utc"] == at(POST, 17, 30).isoformat()
+    st = job.run(at(POST, 17, 30))                                          # the last try, at the deadline
     assert st["status"] == "DONE" and st["session_bars"]["approximate"] == ["NIFTY", "RELIANCE", "TCS"]
     from app.options.after_close import summary_lines
     text = "\n".join(summary_lines(s, j, POST, at(POST, 17, 30)))
@@ -485,8 +489,7 @@ def test_backtest_never_enters_or_exits_on_a_bar_outside_continuous_trading():
     S.configure(SessionCfg(periods=[SessionPeriod(from_date=date(2000, 1, 1)),
                                     SessionPeriod(from_date=date(2026, 8, 3), fno_continuous_end="14:00",
                                                   fno_close="15:35", index_continuous_end="15:15", index_close="15:35",
-                                                  derivatives_close="15:40")],
-                           cash_intraday_cutoff="13:30"))
+                                                  derivatives_close="15:40", cash_intraday_cutoff="13:30")]))
     trades, _ = _run(s, store, days)
     by_day = {}
     for e, x, why in _trade_times(trades):

@@ -135,9 +135,17 @@ class SessionCalendar:
             return False
         return self.open_time(now.date()) <= now.time() <= self.latest_close(now.date())
 
-    @property
-    def intraday_cutoff(self) -> time:
-        return hhmm(self.cfg.cash_intraday_cutoff)
+    def intraday_cutoff(self, day: date) -> time | None:
+        """The cash intraday cutoff of `day`'s period (15:00 from 3 Aug 2026), or None when the period has none
+        (then `backtest.intraday_exit_time` applies, as before 3 Aug 2026)."""
+        v = self.period(day).cash_intraday_cutoff
+        return hhmm(v) if v else None
+
+    def intraday_exit(self, day: date, configured: time) -> time:
+        """When cash intraday trades stop entering and are out on `day`: the period's cutoff, never later than the
+        configured exit time (`backtest.intraday_exit_time`)."""
+        c = self.intraday_cutoff(day)
+        return configured if c is None else min(configured, c)
 
     @property
     def cutoff_confirmed(self) -> bool:

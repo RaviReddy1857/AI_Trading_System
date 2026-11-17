@@ -37,6 +37,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Kill switch counts live price ticks only (unpriced chain strikes and bad history bars never count); 5-minute bars and crossed quotes of 17-Nov investigated (report only) | Fixed and tested | 1,174 passing (whole suite) | 2026-11-17 |
 | - | Closing auction session from 3 Aug 2026: dated session calendar per segment; auction ticks never a signal, fill, exit trigger or quality event (AUCTION on the dashboard); option exits to 15:40; cash intraday cutoff 15:00 (unconfirmed); chain capture 14:50-15:15 with per-chain times; official close awaited (5-minute close APPROXIMATE); backtests never trade an auction bar - stored results unchanged (A/B proof) | Built and tested; not yet seen on a live day | 1,205 passing (whole suite) | 2026-11-17 |
 | - | Closing auction follow-up (your decisions): shortlist as its own Telegram message (on completion or at 17:30); stock option forced exit due by 15:00 on E-5, 15:40 the hard limit for the red/URGENT alert; 15:00 intraday cutoff kept unconfirmed; orb_v2 310 vs 322 explained (the 15-Nov import's RBI_POLICY row on 05-Aug makes that day EVENT) | Built and tested | 1,211 passing (whole suite) | 2026-11-17 |
+| - | Review fixes (Codex review of b012f3f..b7b1bf7, 4 findings): option backtest decides at the options' close (15:40) with a look-ahead guard - no stored result changes; chain stop re-checked right before each call; last after-close retry at 17:30 itself; dated intraday cutoff (15:15 before 3 Aug, 15:00 after); per-test time limit and the Node page harness no longer hangs | Fixed and tested | 1,222 passing (whole suite; slowest test 38 s) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3040,6 +3041,50 @@ Tests: `tests/test_after_close.py` (the shortlist message on completion, at 17:3
 `tests/test_phase9_settlement.py` (15:00 due, 15:40 overdue and URGENT, the forced-exit call wording; deadline
 expectations moved from 15:40 to 15:00), `tests/test_closing_auction.py` (forced_exit_by outside continuous trading
 refused). Not tested live: a real Telegram shortlist message; a real E-5 day.
+
+## Review fixes: Codex review of b012f3f..b7b1bf7 (four findings), 2026-11-17
+
+Each fix has a test in `tests/test_review9_fixes.py` that fails on the code before it (6 of its 9 tests fail there;
+the other 3 are cutoff cases where old and new agree).
+
+1. **HIGH, look-ahead in the option backtest decision** (`app/options/backtest.py`). From 3 Aug 2026 the context was
+   stamped at the stocks' 15:35 close but read option daily bars (close, volume, OI) that are final only at the
+   options' 15:40 close. **Chosen: decide at the options' close** (`OptionContext.asof` = 15:40 from 3 Aug 2026,
+   15:30 before), when the underlying's official close and the options' daily values are all known; fills stay at
+   the next session's open. `HistoryQuotes` now carries the decision time and raises LookAheadError when an option
+   daily bar of the day is read by a decision before the options' close (test: a 15:35 decision cannot read the bar,
+   and nothing of it is read). **No stored result changes:** before 3 Aug the options' close and the stocks' close
+   are both 15:30, so every pre-August context is identical (test), and the stored option prices end 30-Jun-2026
+   (daily) / 25-Jun-2026 (5-minute).
+2. **MEDIUM, chain call after the stop** (`app/options/chain.py`): the 15:15 stop is checked after the rate-limit
+   wait and again after `on_request()`, immediately before the Breeze call. A request counted by `on_request()` but
+   stopped there is reported "counted in the day's budget, not sent" (at most one per run; the count errs high).
+3. **MEDIUM, last retry before the deadline** (`app/options/after_close.py`): retries every 15 minutes and the last
+   one AT 17:30 (`next_retry = min(now + 15 min, deadline)`); the approximate close is built only when the official
+   daily bar is still missing at 17:30 (test: a bar published at 17:28 is used). The tests that approved finishing
+   at 17:20 now expect WAITING then, and DONE at 17:30. The shortlist message also waits (up to 30 minutes) for a job
+   still WAITING for that last attempt, so it is not sent as NOT FINISHED a moment before it finishes.
+4. **MEDIUM, undated intraday cutoff** (`app/config.py` `SessionPeriod.cash_intraday_cutoff`, `app/session.py`
+   `intraday_cutoff(day)` / `intraday_exit(day, configured)`, `app/positions.py`, `app/engine.py`): the cutoff is
+   now a field of the session period - none before 3 Aug 2026 (the configured `backtest.intraday_exit_time`, 15:15,
+   for exits and entries, as before), 15:00 from 3 Aug 2026 (still unconfirmed). The session-level
+   `cash_intraday_cutoff` key moved into the 2026-08-03 period of `session.periods`. Tests: intraday positions of
+   31 Jul (out 15:15) and 4 Aug (out 15:00, "not confirmed"); entries on 31 Jul until the bar closing 15:10, on 4 Aug
+   none from 15:00.
+
+**The stalled test (Codex's first run).** It cannot be reproduced here (the suite runs to the end), so this is the
+analysis: the only tests that run another program or wait on outside I/O are `tests/test_sos_page.py` (runs the
+page's own browser script in Node) and `tests/test_data_import.py` (git). The "web-client" test is
+`test_sos_page.py`: its Node harness printed the result after 200 ms but did not exit, so Node ran until every timer
+and pending fetch of the page script ended - a page that polls with setInterval (as every other page of the app does)
+or a fetch that never settles keeps it running until the 60-second subprocess timeout, per test. Fixed: the harness
+calls `process.exit(0)` after printing, stdin is closed, timeout 30 s (new test: a page with a running setInterval and
+a never-settling fetch returns in under 10 s). The git calls of `test_data_import.py` had no timeout (a credential or
+signing prompt would wait forever): now 60 s with stdin closed. And every test now has a time limit
+(`tests/conftest.py`: `TEST_TIMEOUT_SECONDS`, default 300, or `@pytest.mark.timeout(n)`): on expiry the stacks of
+every thread are printed and the test fails with TestTimeout; one stuck inside a C call ends the run 60 s later with
+the stacks printed. `pytest-timeout` is not installed (no new package), so this is in conftest
+(`tests/test_hang_guard.py` proves a hung test fails).
 
 ## Open issues
 

@@ -183,9 +183,9 @@ def make_repo(path, breeze_closes):
     other = [100.0] * len(days)
     other[3] = None
     pq.write_table(table(other), path / "data/NSE/ABB_NS.parquet")
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], cwd=path, check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "data"], cwd=path, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, timeout=60, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], cwd=path, check=True, timeout=60, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "data"], cwd=path, check=True, timeout=60, stdin=subprocess.DEVNULL)
 
 
 def test_ACCEPTANCE_one_time_import_tags_rows_keeps_breeze_first_and_cross_checks(tmp_path):
@@ -201,7 +201,7 @@ def test_ACCEPTANCE_one_time_import_tags_rows_keeps_breeze_first_and_cross_check
     raw["external_data"] = {**raw["external_data"], "repo_path": str(repo), "history_since": date(2025, 1, 1)}
     s = Settings.model_validate(raw)
     rep = run_import(s, store, repo, NOW, fno=["RELIANCE", "ABB", "ICICILIFE"], priority=["RELIANCE"])
-    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL).stdout.strip()
     assert rep["commit"] == head
     # 1. corporate actions since 2019, tagged; preference-share bonus kept for the record without a price factor
     ca = store.corporate_actions()

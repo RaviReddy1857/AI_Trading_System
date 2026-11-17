@@ -86,9 +86,12 @@ global.fetch = async url => { const [status, body] = responses[url] || [404, {de
   return {ok: status < 400, status, json: async () => body}; };
 process.on("unhandledRejection", e => { console.log(JSON.stringify({UNHANDLED: String(e)})); });
 %s
-setTimeout(() => console.log(JSON.stringify(Object.fromEntries(Object.entries(els).map(([k, v]) => [k, v.innerHTML || v.textContent])))), 200);
+setTimeout(() => { console.log(JSON.stringify(Object.fromEntries(Object.entries(els).map(([k, v]) => [k, v.innerHTML || v.textContent]))));
+  process.exit(0); }, 200);
 """ % (json.dumps(responses), json.dumps(ids), script)
-    r = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=60)
+    # process.exit: a page timer (setInterval) or a fetch that never settles cannot keep Node running; stdin closed
+    # and a timeout, so this test fails instead of hanging the suite
+    r = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stderr
     out = {}
     for line in r.stdout.splitlines():
@@ -126,3 +129,16 @@ def test_page_fills_every_section_when_every_call_succeeds():
     assert "UNHANDLED" not in got and not any("Could not load" in v for v in got.values())
     for k in ("rest", "setrules", "psym", "camps", "rev"):
         assert got[k], k
+
+
+@pytest.mark.skipif(NODE is None, reason="Node is not installed: the page script cannot be run here")
+@pytest.mark.timeout(40)
+def test_a_page_with_a_timer_and_a_fetch_that_never_settles_does_not_hang_the_harness():
+    """A page that polls (setInterval, as every other page of the app does) and waits on a fetch that never answers
+    used to keep Node alive until the 60 s subprocess timeout; the harness now ends after printing."""
+    import time
+    page = ('<div id="x"></div><script>setInterval(()=>{},1000);'
+            'fetch("/never").then(()=>{});new Promise(()=>{});document.getElementById("x").textContent="ok";</script>')
+    t0 = time.monotonic()
+    out = _run_page({}, page)
+    assert out["x"] == "ok" and time.monotonic() - t0 < 10

@@ -142,7 +142,8 @@ Hours are dated, per segment (`app/session.py`; live code and backtests read the
   on the dashboard. They are never a signal, a paper fill, an exit trigger, a bar or a quality event (they no longer
   trip the kill switch). No new signal of any kind is made after 15:15; exit calls and paper exits for options carry
   on until 15:40.
-- Cash intraday: no new entry from, and out by, **15:00** (`session.cash_intraday_cutoff`). ICICI Direct's own
+- Cash intraday: from 3 Aug 2026 no new entry from, and out by, **15:00** (the `cash_intraday_cutoff` of the
+  3-Aug period in `session.periods`; before 3 Aug the configured 15:15 exit applies). ICICI Direct's own
   intraday square-off time after the auction is **not confirmed**: confirm it and set
   `cash_intraday_cutoff_confirmed: true` (the exit call says "not confirmed" until then).
 - Every Nifty 50 stock is an F&O stock; give a watchlist line `fno: false` for a cash-only stock.
@@ -615,12 +616,16 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 - `tests/test_safety.py` - fails if order code, order routes, write routes outside
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
+- Test time limit: every test fails after `TEST_TIMEOUT_SECONDS` (default 300) instead of hanging the
+  suite (`tests/conftest.py`; a test may set `@pytest.mark.timeout(n)`).
+
 ## Not yet tested
 - **Daily shortlist** (docs/STATUS.md): the app captures the priority stocks' chains from 14:50 IST (live
   bid/ask, each chain stamped with its own fetch time) and stops at 15:15, the end of continuous trading (chains not
   fetched by then are reported MISSED); from 15:41, after every segment has closed, it updates the history and builds
   the shortlist for the chains' session only, waiting for Breeze's daily bar (the official closing-auction close)
-  until 17:30 - only then is a missing close built from 5-minute bars, labelled APPROXIMATE (about 226 Breeze calls
+  until 17:30 (the last attempt runs at 17:30 itself) - only then is a missing close built from 5-minute bars,
+  labelled APPROXIMATE (about 226 Breeze calls
   a day). Tested with fake Breeze sources; not yet run live at 14:50.
 - **Closing auction handling** (docs/STATUS.md): tested on fixtures only; not yet seen on a live day (AUCTION on the
   dashboard from 15:15, no crossed-quote events, option exits to 15:40, the session close waiting for the daily bar).

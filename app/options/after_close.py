@@ -251,8 +251,10 @@ class AfterCloseJob:
         index = self.s.regime.index_symbol
         built, from_daily, missing = {}, [], {}
         deadline = datetime.combine(day, hhmm(cfg.bars_deadline), IST).astimezone(timezone.utc)
-        nxt = now + timedelta(minutes=cfg.bars_retry_minutes)
-        last_try = nxt > deadline
+        # retries every bars_retry_minutes, the last one AT the deadline itself (never earlier): only a bar still
+        # missing then is replaced by an approximate close (review fix, 2026-11-17)
+        nxt = min(now + timedelta(minutes=cfg.bars_retry_minutes), deadline)
+        last_try = now >= deadline
         for sym in [index] + [x for x in st["priority_stocks"] if x != index]:
             got = self.store.history_bars("bars_1d", sym, self.source, since=datetime.combine(
                 day, MARKET_OPEN, IST).astimezone(timezone.utc), limit=1)
@@ -335,7 +337,8 @@ def shortlist_message(settings, journal, day: date, now: datetime) -> str | None
     """The stock option shortlist as its own Telegram message (user, 2026-11-17), or None while it is not due:
     sent once the after-close job has finished (DONE: a result, or a failure it reached), or at
     `after_close.bars_deadline` (17:30) when it has not - then saying NOT RUN / NOT FINISHED, as the summary rules
-    say. A step still RUNNING at the deadline is waited for `RUNNING_GRACE_MINUTES` more. None when the job is off."""
+    say. A step still RUNNING at the deadline, or WAITING for its last attempt (which runs at the deadline itself),
+    is waited for `RUNNING_GRACE_MINUTES` more. None when the job is off."""
     cfg = settings.stock_option_selling.after_close
     if not cfg.enabled:
         return None
@@ -345,7 +348,7 @@ def shortlist_message(settings, journal, day: date, now: datetime) -> str | None
     if st.get("status") != DONE:
         if now < deadline:
             return None
-        if st.get("status") == RUNNING and now < deadline + timedelta(minutes=RUNNING_GRACE_MINUTES):
+        if st.get("status") in (RUNNING, WAITING) and now < deadline + timedelta(minutes=RUNNING_GRACE_MINUTES):
             return None
     return "\n".join([f"STOCK OPTION SHORTLIST {day:%a %d-%b-%Y}"] + summary_lines(settings, journal, day, now))
 
