@@ -2844,6 +2844,52 @@ confirm; stamp each chain with its own fetch time and stop the capture at the cl
 
 Whole suite 1,174 passing, 0 failing, 0 clock reads outside the fixed clock.
 
+## Closing auction session from 3 Aug 2026: audit of every 15:30 assumption (2026-11-17, before any code change)
+
+**The change (as given by the user; NSE/BSE circulars NSE/CMTR/72394, 73362, 74466 and NSE/FAOP/74467, not fetched
+here):** from 3 Aug 2026 a Closing Auction Session (CAS) runs 15:15-15:35 for F&O-eligible stocks in the cash segment
+and sets their official close; their continuous trading ends at 15:15; equity derivatives (stock and index options)
+trade until 15:40; index values keep updating with an indicative close during CAS; non-F&O stocks trade until 15:30.
+Pre-open was realigned from 7 Sep 2026 (the new pre-open times were not given; nothing here models pre-open beyond
+dropping Breeze's 09:00-09:10 bars).
+
+**Evidence in our own data (live database, read only):** the 17-Nov CROSSED_QUOTE storm (4,978 ticks on 50 stocks,
+15:21-15:29, frozen last price, bid and ask about 3% apart on the wrong sides; "Investigation" section above) is the
+CAS order book. Breeze's stored 5-minute bars change on 3 Aug: RELIANCE 28/29-Jul has normal 15:15-15:25 bars; from
+4-Aug the 15:15 bar is flat with volume 100-141, the 15:20 bar is missing or a jump (15-Sep: open/low 1,203.40 against
+1,239 around it, volume 0), and the 15:25 bar carries the auction volume. NIFTY's 15:15 and 15:20 bars are flat from
+4-Aug, then jump at 15:25 (indicative close).
+
+Every place that assumed one 09:15-15:30 session for everything (file:line before the change):
+
+| # | Area | Where | What it assumed |
+|---|---|---|---|
+| 1 | Market hours | `app/quality.py:13-32` `MARKET_OPEN`/`MARKET_CLOSE`, `is_market_hours` | 09:15-15:30 for every symbol |
+| 2 | Price status | `app/quality.py:81` `freshness`; `app/hub.py:84` `_status`, `snapshot`, `quote`, `live_quote`, `_status_at` | a tick in 09:15-15:30 is a trade (LIVE); no AUCTION state |
+| 3 | Quality checks | `app/hub.py:46` `on_tick` -> `check_tick` | every tick is a trade quote: CAS ticks became CROSSED_QUOTE events, 1-minute bars and first-quote captures |
+| 4 | Session calendar | `app/calendar.py:46-56` `is_open`, `target_session` | one close (15:30) for all segments; no dates |
+| 5 | Signal loop | `app/engine.py:141` (`step`: bars until 15:30), `:180` (swing as-of at 15:30) | cash, swing and option signals and exits on every bar to 15:30 |
+| 6 | Kill switch | `app/risk/engine.py:417` `market_open=is_market_hours`; `app/risk/limits.py:151` | open until 15:30; the index not LIVE always adds a reason (would raise KILL_SWITCH exit calls during CAS) |
+| 7 | Heartbeat, sleep | `app/recovery.py:54,80` (feed check while open), `:108` (engine heartbeat to 15:30), `:124` (sleep overlap) | the index LIVE until 15:30; bars until 15:30 |
+| 8 | Option chain refresh | `app/main.py:185` `calendar.is_open` | chains refreshed until 15:30 (options trade to 15:40) |
+| 9 | Stock option actionability | `app/options/actionable.py:40` | live until 15:30 |
+| 10 | Chain capture | `config.yaml` `after_close.chain_time` 15:20; `app/options/after_close.py:137` (window to 15:30); `app/config.py:849-872`; `app/options/chain.py:225-262` | capture 15:20-15:30; one time stamp for the whole capture (17-Nov: fetched 15:20-15:34, all stamped 15:20:25) |
+| 11 | After-close job | `config.yaml` `start_time` 15:31; `app/options/after_close.py:43-63, 245-260` | the close at 15:30; a missing daily bar is replaced at once by a close built from 75 five-minute bars (to 15:25: inside CAS from 3 Aug, not the official close) |
+| 12 | Session close (equity) | `app/engine.py:144-148` | equity closed at 15:31 from the last live marks (the last continuous trade, not the CAS close) |
+| 13 | Intraday exits | `app/positions.py:110-114` `time_exit_at` (intraday at `backtest.intraday_exit_time` 15:15); `app/paper.py` | intraday out at 15:15 (the start of CAS from 3 Aug; ICICI square-off time unknown) |
+| 14 | Swing/option holding exits | `app/positions.py:121` (15:25 bar) | the last bar of every segment starts 15:25 |
+| 15 | ORB and other cash strategies | `config.yaml` `strategies.*.last_signal_time` (11:30 / 14:30), `backtest.last_entry_time` 14:45; `app/engine.py` cash loop | entries until the strategy's own last time; nothing stopped intraday entries at a broker square-off |
+| 16 | Cash backtest | `app/backtest.py:66-75` (bars 09:15 to the exit), `:341` (swing close at 15:30) | every bar before 15:15/15:30 is a trade; daily close at 15:30 |
+| 17 | Option backtests | `app/options/backtest.py:152-160` `session_end`, `:574, :716, :728, :1461` | session (marks, exits) ends 15:30 |
+| 18 | Greeks / option history | `app/options/greeks.py:20` `EXPIRY_CLOSE`; `app/options/option_history.py:588, 667`; `app/options/analytics.py:228`; `app/options/shortlist.py:96` | options expire and the underlying closes at 15:30 |
+| 19 | History download | `app/history.py:104-116` (`in_session`, daily bar complete at 15:30), `:278-286` (`last_complete_bar_start`); `app/store.py:308` (purge outside 09:15-15:30) | the daily bar is final at 15:30 (from 3 Aug the official close is set at 15:35) |
+| 20 | Settlement deadline | `app/options/settlement.py:47, 193` | the forced exit is due at 15:30 of E-5 (stock options trade to 15:40) |
+| 21 | Telegram summary time | `config.yaml` `alerts.end_of_day_time` 15:45; `app/schedule.py` | after a 15:30 close (still after 15:40; not validated) |
+| 22 | Config validators | `app/config.py:225-231` (`HHMM` 09:15-15:30, strategy times), `:849-872` (after-close times) | one session to 15:30 |
+| 23 | Regime | `config.yaml` `regime.ignore_5m_bar_starts` 15:15, 15:20; `app/regime.py:274` (live while open) | "unreliable Breeze bars" - from 3 Aug these are the CAS bars |
+| 24 | Holidays | `app/calendar.py`, `data/holidays.csv` | trading days only; unchanged by CAS; special sessions (Muhurat) not modelled |
+| 25 | Watchlist | `config.yaml` watchlist | no field saying which stocks are F&O stocks |
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
