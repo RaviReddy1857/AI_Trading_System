@@ -220,11 +220,16 @@ class Store:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM quality_events").fetchone()[0]
 
-    def quality_event_count_since(self, at: datetime) -> int:
-        """Quarantined ticks recorded at or after `at` (phase 5 kill switch)."""
+    def quality_event_count_since(self, at: datetime, reasons=None) -> int:
+        """Quality events recorded at or after `at`; only those with a reason in `reasons` when given (the kill
+        switch passes app.quality.TICK_REASONS: quarantined live price ticks only)."""
+        sql, args = "SELECT COUNT(*) FROM quality_events WHERE at_utc >= ?", [at.isoformat()]
+        if reasons is not None:
+            rs = sorted(reasons)
+            sql += f" AND reason IN ({','.join('?' * len(rs))})"
+            args += rs
         with self._lock:
-            return self._db.execute("SELECT COUNT(*) FROM quality_events WHERE at_utc >= ?",
-                                    (at.isoformat(),)).fetchone()[0]
+            return self._db.execute(sql, args).fetchone()[0]
 
     # ---------------- rejected imports (phase 6 recovery) ----------------
     def log_import_failure(self, kind: str, at: datetime, reason: str) -> None:

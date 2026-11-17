@@ -175,12 +175,14 @@ class ChainLoader:
         return list(self.settings.options.underlyings)
 
     def load(self, symbols: list[str] | None = None, now: datetime | None = None, max_requests: int | None = None,
-             on_request: Callable[[], None] | None = None, keep_unquoted: bool = False) -> dict:
+             on_request: Callable[[], None] | None = None, keep_unquoted: bool = True) -> dict:
         """Fetch and store the chains of `symbols` (default: the index underlyings). One failing
         symbol does not stop the others. `max_requests`: at most this many calls (the rest are reported as not
         asked: the day's budget is used); `on_request` is called for every call sent (the day's count). Remote calls
-        keep `options.chain.max_calls_per_minute`. `keep_unquoted`: a strike without a valid bid/ask is also stored,
-        with bid and ask empty (`unquoted_row`), and counted (`no_bid_ask`); otherwise it is only quarantined."""
+        keep `options.chain.max_calls_per_minute`. A strike without a valid bid/ask is stored with bid and ask empty
+        (`unquoted_row`) and counted in the summary (`no_bid_ask`); one with a zero or missing bid/ask is NOT a quality
+        event (it never counts toward the kill switch). Crossed or malformed rows are still logged as BAD_OPTION_QUOTE
+        (not a tick reason: not counted either). `keep_unquoted=False`: unpriced strikes are not stored."""
         now = now or utcnow()
         sent = 0
         today = now.astimezone(IST).date()
@@ -211,6 +213,8 @@ class ChainLoader:
                             on_request()
                         good, bad = parse_chain_rows(self.source.fetch(inst, spec, right), right)
                         for reason, raw in bad:
+                            if reason == "missing bid/ask":
+                                continue                       # unpriced, counted in the summary only
                             self.store.save_quality_event(
                                 now, sym, BAD_OPTION_QUOTE, _num(raw.get("ltp")), _num(raw.get("best_bid_price")),
                                 _num(raw.get("best_offer_price")),

@@ -34,6 +34,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Stock option shortlist built by the app every trading day after the close (chains, history, shortlist; 226 Breeze calls a normal day in the daily budget); result in the 15:45 summary | Built and tested | 1,154 passing (whole suite) | 2026-11-17 |
 | - | Stock option chains at 15:20 (live bid/ask), paced at 60 chain calls a minute; strikes without a valid bid/ask stored as unpriced; history and shortlist after 15:31 | Built and tested | 1,159 passing (whole suite) | 2026-11-17 |
 | - | Shortlist for the chains' session only (today's close from 5-minute bars, or wait and retry until 17:30); kill switch of 17-Nov reported (unchanged) | Fixed and tested | 1,166 passing (whole suite) | 2026-11-17 |
+| - | Kill switch counts live price ticks only (unpriced chain strikes and bad history bars never count); 5-minute bars and crossed quotes of 17-Nov investigated (report only) | Fixed and tested | 1,174 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2782,6 +2783,66 @@ together) would trip it on their own.
 
 Tests: `tests/test_after_close.py` (23; the 7 new ones, on 17-Nov dates, fail on the code before). Whole suite
 1,166 passing, 0 failing, 0 clock reads outside the fixed clock.
+
+## Kill switch counts live price ticks only (2026-11-17, the user's decision)
+
+- `app.quality.TICK_REASONS` (BAD_PRICE, CROSSED_QUOTE, PRICE_JUMP, VOLUME_WENT_BACK, BAD_VOLUME, BAD_PREV_CLOSE: what
+  `check_tick` finds in a live stock or index tick); the kill switch's quarantine count
+  (`RiskService.market_state` -> `store.quality_event_count_since(since, TICK_REASONS)`) counts only these. Stale or
+  missing index prices stay a separate kill-switch rule (index status not LIVE).
+- Option chains (`ChainLoader.load`, every load: the index refresh and the 15:20 capture): a strike with a zero or
+  missing bid/ask is stored as unpriced (bid and ask empty) and counted in the chain summary (`no_bid_ask`); it is not a
+  quality event. A crossed or malformed chain row is still logged as BAD_OPTION_QUOTE (stored unpriced when it has a
+  strike), never counted.
+- History bars with bad values (e.g. a negative volume) are logged as BAD_BAR and rejected, never counted.
+- On the 17-Nov 15:20 window this counts 3 (the VOLUME_WENT_BACK ticks), not 25: the switch would have stayed off.
+  Threshold unchanged (20 in 5 minutes).
+
+Tests: `tests/test_kill_switch_ticks.py` (8; 6 fail on the code before); `test_phase4` chain loader and two
+`test_after_close` tests updated to the new rule.
+
+## Investigation, report only: today's 5-minute bars stop at 10:05 (2026-11-17)
+
+- Live bars are stored as **1-minute** bars (`bars_1m`, built by `MarketHub`'s BarBuilder from good live ticks):
+  20,024 rows today, 53 symbols, from 09:15. The engine builds 5-minute bars from them **in memory** for the strategies
+  (`five_minute_bars`); they are never written. `bars_5m` holds only Breeze's **history download**.
+- Today's `bars_5m`: 11 bars per symbol, 09:15-10:05, saved by the start-up history download. At 15:35 the job's
+  history step asked Breeze again for 17-Nov 00:00 to 15:35 and saved 636 rows = 53 daily bars (16-Nov again) +
+  583 = 53 x 11 five-minute bars: Breeze returned the same 09:15-10:05 bars again, not the rest of the day. The SDK log
+  keeps no history reply body, so why cannot be seen; on 16-Nov `bars_5m` holds 74 of 75 for NIFTY.
+- Lost: nothing from the history table (it is re-downloadable). From the live feed, the stocks have no 1-minute bars
+  from about 15:17 to 15:28 (362 of 375 today; NIFTY 374): every tick then was quarantined (crossed, see below), and the
+  machine slept 15:25-15:30 (ASLEEP alert).
+- Tomorrow: the 5-minute fallback (needs all 75 stored Breeze 5-minute bars) would not have worked today and probably
+  will not tomorrow if Breeze's intraday history for the current day lags like this. Then the job waits and retries
+  until 17:30. A fallback from the live 1-minute bars would have the gaps above, and any close built from bars is the
+  last trade, not NSE's official close (a weighted average over the last 30 minutes); Breeze's daily bar is the safe
+  source. Not changed.
+
+## Investigation, report only: CROSSED_QUOTE on all stocks from 15:21 (2026-11-17)
+
+- Mapping (`breeze_feed.tick_from_breeze`): last = `last`, bid = `bPrice`, ask = `sPrice` (the best bid and offer of
+  Breeze's "exchange quotes" message); subscription with `get_market_depth=False`, so depth levels are never read. Zero
+  or missing bid/ask on either side -> no quote; indices carry no bid/ask.
+- Raw ticks are NOT stored (only the parsed fields in quality_events, and good ticks as bars), and the SDK's
+  websocket log holds only subscription messages: the 3 raw ticks cannot be shown from today's data.
+- Stored parsed ticks: 4,978 CROSSED_QUOTE on 50 stocks, 15:21:21 to 15:29:33 IST (and 1 at 14:32). NTPC last 321.05,
+  bid 330.40, ask 321.05 then 311.20; MAXHEALTH last 1029.70, bid 1022.00 then 1055.60, ask 994.20; MARUTI last 12642,
+  bid 12630 then 13018, ask 12260. The last price is frozen in every one, bid and ask about 3% apart on the wrong
+  sides, on every stock at once, only in the last minutes; the same mapping gave normal quotes all day before. A
+  swapped mapping would give the same width the other way round (6% spreads), so a swap does not explain it.
+- The pattern (frozen last price, crossed book across all stocks, only near the close) looks like an auction order
+  book (orders collected, not matched) rather than a parser or field-mapping bug. Whether NSE ran a closing auction
+  session for these stocks that day is not verifiable from here. Also seen: every symbol was re-subscribed at
+  15:19:44-15:19:54 (websocket log), right before it started.
+- Related, found while checking: the 15:20 chain capture took 15:20 to 15:34 (Breeze replied slowly, 7-9 chain replies
+  a minute; the rate limit never waited), so about a fifth of the chains were fetched after the close, all stamped
+  15:20:25 (the capture's start). Not changed.
+
+Suggested next steps (not done): log raw ticks (no credentials are in a tick) for a few minutes around the close to
+confirm; stamp each chain with its own fetch time and stop the capture at the close.
+
+Whole suite 1,174 passing, 0 failing, 0 clock reads outside the fixed clock.
 
 ## Open issues
 

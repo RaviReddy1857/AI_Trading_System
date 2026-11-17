@@ -23,7 +23,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 1,166 passed, whatever the date or time
+python -m pytest -q          # should say 1,174 passed, whatever the date or time
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 The tests never depend on the machine's clock: a test that reads the date or time uses the shared `fixed_clock`

@@ -19,6 +19,9 @@ PRICE_JUMP = "PRICE_JUMP"
 VOLUME_WENT_BACK = "VOLUME_WENT_BACK"
 BAD_VOLUME = "BAD_VOLUME"            # negative or non-finite cumulative volume
 BAD_PREV_CLOSE = "BAD_PREV_CLOSE"    # negative or non-finite previous close
+# The problems of LIVE PRICE TICKS of stocks and indices (`check_tick`): the only quality events the kill switch counts.
+# Option chain rows and history bars are logged under other reasons and never count toward it.
+TICK_REASONS = frozenset({BAD_PRICE, CROSSED_QUOTE, PRICE_JUMP, VOLUME_WENT_BACK, BAD_VOLUME, BAD_PREV_CLOSE})
 
 
 def is_market_hours(now_utc: datetime, holidays: Collection[date] = ()) -> bool:

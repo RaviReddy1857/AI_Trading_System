@@ -156,20 +156,21 @@ def test_a_strike_without_a_valid_bid_ask_at_1520_is_stored_as_unpriced_and_repo
     assert (got[1000.0]["bid"], got[1000.0]["ask"]) == (9.5, 10.5)
     assert all(got[k]["bid"] is None and got[k]["ask"] is None for k in (1010.0, 1020.0, 1030.0))
     assert got[1010.0]["last"] == 5.0                                        # the last trade kept, never used as a price
-    assert sum(1 for e in store.recent_quality_events(100) if e["reason"] == "BAD_OPTION_QUOTE") == 24   # still logged
+    # zero or missing bid/ask: no quality event (counted above only); the crossed strike is still logged
+    assert sum(1 for e in store.recent_quality_events(100) if e["reason"] == "BAD_OPTION_QUOTE") == 8
     job.run(AT.astimezone(timezone.utc))
     text = "\n".join(summary_lines(s, j, DAY, datetime(2026, 11, 16, 15, 45, tzinfo=IST)))
     assert "chains at 15:20: 24 of 32 strikes had no valid bid/ask (stored as unpriced)" in text
     assert "No candidates" not in text
 
 
-def test_the_live_index_refresh_keeps_dropping_unpriced_strikes(tmp_path):
+def test_keep_unquoted_false_still_drops_unpriced_strikes(tmp_path):
     s = _settings(tmp_path)
     store = Store(":memory:")
     InstrumentBook(store, "sim").save([ContractSpec("RELIANCE", EXP, LOT, "monthly", (1000.0, 1010.0),
                                                     AT.astimezone(timezone.utc))])
     loader = ChainLoader(s, store, FakeChainSource([raw(1000, 9.5, 10.5), raw(1010, 0, 0)]), InstrumentBook(store, "sim"))
-    out = loader.load(["RELIANCE"], now=CHAINS_AT.astimezone(timezone.utc))
+    out = loader.load(["RELIANCE"], now=CHAINS_AT.astimezone(timezone.utc), keep_unquoted=False)
     assert all("no_bid_ask" not in v for v in out.values())
     assert {r["strike"] for r in store.latest_option_chain("sim", "RELIANCE", EXP)} == {1000.0}
 

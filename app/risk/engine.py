@@ -32,7 +32,7 @@ from decimal import Decimal
 from ..costs import MissingCostRates
 from ..models import APPROVED, NO_TRADE, RiskDecision, Signal, unhedged_short_legs
 from ..options.portfolio import Holding, portfolio_check
-from ..quality import is_market_hours
+from ..quality import is_market_hours, TICK_REASONS
 from .limits import (CORRELATED_LIMIT, DATA_MISSING, KILL_SWITCH, correlated_group, drawdown_state,
                      kill_switch, loss_stops, sector_check)
 from .portfolio import (CAPITAL_UNKNOWN, FITS, NEEDS_MORE_CAPITAL, PORTFOLIO_UNKNOWN, STOCK_SPREAD, TIGHT,
@@ -416,7 +416,8 @@ class RiskService:
         return MarketState(now=now, price_status=self._status_of(symbol, now), regime=regime,
                            market_open=is_market_hours(now, self.calendar.holidays),
                            index_status=self._status_of(self.s.regime.index_symbol, now),
-                           quarantined_recent=self.store.quality_event_count_since(since))
+                           # live price ticks only: option chain rows and history bars never count
+                           quarantined_recent=self.store.quality_event_count_since(since, TICK_REASONS))
 
     def option_budget(self) -> float | None:
         """The effective option risk limit for the Options page's index spread width search (drawdown halving

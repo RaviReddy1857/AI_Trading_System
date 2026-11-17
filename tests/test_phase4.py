@@ -332,14 +332,16 @@ def test_chain_loader_stores_good_rows_and_logs_quarantined_ones():
     src = FakeChainSource({"CE": [chain_row(24000, 100, 101), chain_row(24100, 0, 0)],
                            "PE": [chain_row(24000, 90, 91), chain_row(23900, 50, 49)]}, fail={"BANKNIFTY"})
     out = ChainLoader(s, store, src, book).load(now=NOW)
-    assert out["NIFTY:2026-12-08"] == {"saved": 2, "quarantined": 2}
+    # 24100 CE (bid/ask 0) and 23900 PE (crossed) are stored as unpriced and counted, not priced
+    assert out["NIFTY:2026-12-08"] == {"saved": 4, "quarantined": 2, "no_bid_ask": 2}
     assert "error" in out["BANKNIFTY:2026-12-08"]                       # one failing symbol does not stop the others
     rows = store.latest_option_chain("sim", "NIFTY", EXP_M)
     assert [(r["strike"], r["right"], r["bid"], r["ask"], r["oi"]) for r in rows] == [
-        (24000.0, "CE", 100.0, 101.0, 1000.0), (24000.0, "PE", 90.0, 91.0, 1000.0)]
+        (23900.0, "PE", None, None, 1000.0), (24000.0, "CE", 100.0, 101.0, 1000.0), (24000.0, "PE", 90.0, 91.0, 1000.0),
+        (24100.0, "CE", None, None, 1000.0)]
     assert rows[0]["as_of"] == NOW
     ev = [e for e in store.recent_quality_events(20) if e["reason"] == BAD_OPTION_QUOTE]
-    assert len(ev) == 4                                                 # 2 bad rows x 2 NIFTY expiries
+    assert len(ev) == 2                     # the crossed row x 2 NIFTY expiries; a zero bid/ask is not a quality event
     assert ChainLoader(s, store, src, book).load(["TCS"], now=NOW)["TCS"]["error"].startswith("no contracts")
 
 
