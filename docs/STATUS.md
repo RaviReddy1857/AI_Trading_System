@@ -30,6 +30,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Two books: signal cards' risk checks use my real positions and the approved signals awaiting my decision only; paper trades run in a simulated paper book with its own limits; the card shows the commitment breakdown | Fixed and tested | 1,134 passing (whole suite) | 2026-11-17 |
 | - | Paper books per strategy: each strategy's own paper book per pool (pool capital, real-book sizing); only the per-strategy cap of 10 open + pending refuses | Fixed and tested | 1,136 passing (whole suite) | 2026-11-17 |
 | - | Tests never depend on the machine's clock: shared fixed_clock fixture, --fake-clock and --clock-report; full suite passes under six faked clocks (weekday, weekend, holiday, 09:00, 15:45, 23:59) | Done | 1,139 passing (whole suite, any clock) | 2026-11-17 |
+| - | /stock-option-selling page: shortlist built in memory when none is stored (every stock with every reason), each section loads on its own | Fixed and tested | 1,143 passing (whole suite) | 2026-11-17 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -2627,6 +2628,36 @@ Proof (full suite, system clock faked with --fake-clock, all passing, 0 clock re
 | real clock (Tue 17-Nov-2026) | - | 1,139 passed | 0 |
 
 Also kept as is: the per-strategy paper books report `over_capital` and have no capital limit (only the cap of 10).
+
+## The /stock-option-selling page was empty on the live app (2026-11-17)
+
+**Found (without restarting the app; data/ only read, through a read-only SQLite backup into a scratch folder):**
+- All four API calls of the page answered 200 on the live app (shortlist 0.8 s, reversals 3-4 s, campaigns,
+  settlement), at every time of day tried on the copy (08:30 to 18:00 IST).
+- The shortlist had no rows: no shortlist was ever stored on the live database (`session_date` null). The list is
+  only built by `python -m app.options.shortlist` after the close, so "not on the list" could never show anything.
+- The page filled every section from one script, one call after another, the stock list and both shortlist tables
+  last. Any one call failing (or slow, reversals takes 3-4 s) left every later section empty - the settlement rules,
+  the stock list, the shortlist tables. With today's responses the script itself runs cleanly (checked in Node);
+  the failing call at the time of the report cannot be named: the app logs only to its console window, which is
+  not readable from here (logs/apiLogs.log is the broker SDK's own log).
+- Even once built, a stock left out before the rules ran showed only its first reason (NO_CHAIN), never
+  EVENT_COVERAGE_UNKNOWN.
+
+**Fixed:**
+- `GET /api/stock-option-selling/shortlist`: when no shortlist is stored for the newest session, the same assessment
+  is built in memory from the stored data (`run_shortlist(save=False)`, nothing written; `computed: true` with a
+  note). On the live data: all 50 stocks listed, each NO_CHAIN (no option chain stored for 16-Nov) and
+  EVENT_COVERAGE_UNKNOWN (no COVERAGE row).
+- `run_shortlist`: a stock left out before the rules also carries EVENT_COVERAGE_UNKNOWN when its event coverage does
+  not run to its next monthly expiry (`shortlist.coverage_reason`, the stock option selling rule).
+- The page: each section loads on its own; a failing call shows "Could not load: <url>: HTTP <status>" in its own
+  section only.
+
+Tests: `tests/test_sos_page.py` (4; 3 fail on the code before). The page tests run the page script in Node with a
+DOM of the page's own ids; they are skipped where Node is not installed. Whole suite 1,143 passing, 0 failing.
+
+Not tested here: the page in a real browser; the live app serves the fix after its next restart.
 
 ## Open issues
 

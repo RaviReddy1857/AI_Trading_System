@@ -23,7 +23,7 @@ cd AI_Trading_System
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m pytest -q          # should say 1,139 passed, whatever the date or time
+python -m pytest -q          # should say 1,143 passed, whatever the date or time
 python -m app.main           # then open http://127.0.0.1:8000
 ```
 The tests never depend on the machine's clock: a test that reads the date or time uses the shared `fixed_clock`
@@ -590,6 +590,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
   `/journal/`, `/data/import/`, `/capital/`, or a public host appear
 
 ## Not yet tested
+- **/stock-option-selling page** (docs/STATUS.md): the section-by-section loading is tested by running the page
+  script in Node (skipped without Node), not in a real browser.
 - **Two books** (docs/STATUS.md): the real book (my positions and approved signals awaiting my decision) and
   the paper books, one per strategy and pool (`paper.max_open_trades` in config.yaml), are tested on fixtures,
   not over a live day.

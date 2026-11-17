@@ -69,6 +69,20 @@ def live_daily(settings: Settings, store: Store, bars: list, sym: str) -> tuple:
     return AdjustedHistory(bars, acts, settings.history.max_overnight_gap_pct, fixes).window(len(bars) - 1, len(bars))
 
 
+def coverage_reason(settings: Settings, store: Store, book: InstrumentBook, sym: str, session: date,
+                    now: datetime) -> str | None:
+    """EVENT_COVERAGE_UNKNOWN with why, when the stock's event coverage does not run to its next monthly expiry (the
+    stock option selling rule, `stock_selling.event_coverage`); None when covered or the expiry is not known."""
+    from .stock_selling import EVENT_COVERAGE_UNKNOWN, event_coverage
+    nxt = next((x.expiry for x in book.specs(sym, session, now) if x.kind == "monthly"), None)
+    if nxt is None:
+        return None
+    rows = [Event(e["date"], e["type"], e["note"] or "", e["symbol"] or "") for e in store.all_events()
+            if e["type"] == "COVERAGE" and e["symbol"] == sym]
+    ok, text = event_coverage(rows, sym, session, nxt, settings.stock_option_selling.event_coverage_max_age_days)
+    return None if ok else f"{EVENT_COVERAGE_UNKNOWN}: {text}"
+
+
 def stock_context(settings: Settings, store: Store, source: str, book: InstrumentBook, desk: OptionDesk,
                   costs: CostModel, margins: MarginBook, sym: str, session: date, now: datetime,
                   regime: str = "UNKNOWN") -> tuple[OptionContext | None, str | None]:
@@ -386,9 +400,12 @@ def run_shortlist(settings: Settings, store: Store, source: str, now: datetime |
     for sym in stocks:
         ctx, why = stock_context(settings, store, source, book, desk, costs, margins, sym, session, now)
         if ctx is None:
+            # every reason that is known without the chain: the data problem, and the event coverage
+            whys = [why] + [x for x in (coverage_reason(settings, store, book, sym, session, now),) if x]
             left_out.append({"stock": sym, "expiry": None, "side": None, "rank": None, "status": "EXCLUDED",
-                             "score": None, "scores": {}, "reasons": [why], "label": RESEARCH_LABEL,
-                             "actionable": False, "not_actionable_because": [why], "snapshot": {"session_date": session.isoformat()}})
+                             "score": None, "scores": {}, "reasons": whys, "label": RESEARCH_LABEL,
+                             "actionable": False, "not_actionable_because": whys,
+                             "snapshot": {"session_date": session.isoformat()}})
         else:
             contexts.append(ctx)
     stored_corr = store_correlations(settings, store, source)

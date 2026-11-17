@@ -493,28 +493,46 @@ async function profile(sym){
  <h3>30-day moves after past events: history, not a forecast</h3>
  <table><thead><tr><th>Scenario</th><th>Cases</th><th>Trigger dates not counted</th><th>Sample</th><th>Median</th><th>10th pct</th><th>90th pct</th><th>Worst</th><th>Share of cases down</th><th style="text-align:left">Note</th></tr></thead><tbody>${sc}</tbody></table>`;
 }
-(async()=>{
- const r=await (await fetch("/api/stock-option-selling/shortlist")).json();
+async function api(url){
+ const res=await fetch(url);
+ if(!res.ok){let t="";try{t=JSON.stringify((await res.json()).detail??"")}catch(e){} throw new Error(`${url}: HTTP ${res.status} ${t}`)}
+ return res.json();
+}
+function failed(ids,e){for(const id of ids){const el=document.getElementById(id); if(el) el.innerHTML=`<span class="down">Could not load: ${esc(e.message||e)}</span>`}}
+async function section(ids,fn){try{await fn()}catch(e){console.error(e);failed(ids,e)}}
+async function loadShortlist(){
+ const r=await api("/api/stock-option-selling/shortlist");
  document.getElementById("label").textContent=r.label+(r.alerts?"":" - no alerts");
- document.getElementById("asof").textContent=r.session_date?`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`:"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
+ document.getElementById("asof").textContent=r.session_date?(r.computed?`Session ${r.session_date}, ${r.computed_note}`:`Session ${r.session_date}, built ${r.created_utc} (feed ${r.feed}). Top ${r.shortlist_size} by weighted score.`):"No shortlist stored yet. After the close run:  python -m app.options.shortlist";
  const cg=r.correlation_groups||{};
  document.getElementById("note").textContent=r.note+" Weights: "+JSON.stringify(r.weights)+"."
   +(cg.date?` Correlated groups on ${cg.date} (same sector or correlation >= 0.7): ${(cg.groups||[]).filter(g=>g.length>1).map(g=>g.join(", ")).join(" | ")||"none"}; group sizes ${JSON.stringify(cg.sizes)}${cg.problem_count?`; ${cg.problem_count} pair(s) without a measurable relationship`:""}.`:"");
  const top=r.rows.filter(x=>x.status==="SHORTLISTED"), rest=r.rows.filter(x=>x.status!=="SHORTLISTED");
- const rv=await (await fetch("/api/stock-option-selling/reversals")).json();
- document.getElementById("revnote").textContent=rv.note+(rv.alerts_approved?"":" Alerts: not approved.")+(rv.session_date?` Session ${rv.session_date}.`:"");
- const cand=c=>c.trade?`<b>${esc(c.candidate)}</b>: ${esc(c.trade.why_now.slice(1,3).join("; "))}`:`<b>${esc(c.candidate)}</b>: no trade (${esc((c.reasons||[]).join("; "))})`;
- document.getElementById("rev").innerHTML=rv.rows.map(x=>`<tr><td>${esc(x.stock)}</td><td><span class="tag ${x.state==="REVERSAL_CONFIRMED"?"warn":""}">watch: ${esc(x.state.replace(/_/g," ").toLowerCase())}</span></td><td>${f(x.close)}</td><td>${f(x.drawdown_pct)}%</td><td>${f(x.base_low)}</td><td>${(x.stall_zones||[]).map(f).join(", ")||"-"}</td><td style="text-align:left;white-space:normal">${x.confirmed_on?`REVERSAL_CONFIRMED on ${esc(x.confirmed_on)}: ${x.reasons.map(esc).join("; ")}<br>${x.candidates.map(cand).join("<br>")}`:""}</td></tr>`).join("")||'<tr><td colspan="7" class="mute">no stock is washed out today</td></tr>';
- const cs=await (await fetch("/api/stock-option-selling/campaigns")).json();
- const sr=await (await fetch("/api/stock-option-selling/settlement")).json();
- document.getElementById("setnote").textContent=`${sr.note} Alerts start ${sr.alerts_from.from_trading_days} trading days before expiry for a sold leg in the money or within ${sr.alerts_from.near_money_pct}% of spot; URGENT from ${sr.alerts_from.urgent_from_trading_days} trading days (the forced exit). ${sr.positions_note}`+(sr.calendar&&!sr.calendar.covered?` CALENDAR: ${sr.calendar.note}`:"");
- if(sr.calendar&&!sr.calendar.covered)document.getElementById("setnote").className="down";
- document.getElementById("setrules").innerHTML=sr.rules.map(x=>`<tr><td style="text-align:left">${esc(x.rule)}</td><td style="text-align:left">${esc(x.value)}</td><td class="${x.confirmed?'':'down'}">${x.confirmed?'yes':'NO'}</td><td style="text-align:left" class="down">${esc(x.label)}</td></tr>`).join("");
- document.getElementById("camps").innerHTML=cs.campaigns.map(c=>`<tr><td>${esc(c.stock)}</td><td>${side(c.side)}</td><td>${c.rolls}</td><td>${f(c.realised_pnl_inr)}</td><td>${f(c.hedge_cost_inr)}</td><td>${f(c.charges_inr)}</td><td>${f(c.best_possible_outcome_inr)}</td><td style="text-align:left" class="${c.message?'down':''}">${esc(c.message||(c.open?'open':'closed'))}</td></tr>`).join("")||`<tr><td colspan="8" class="mute">${esc(cs.note)}</td></tr>`;
  const ps=document.getElementById("psym"); ps.innerHTML='<option value="">-</option>'+(r.stocks||[]).map(s=>`<option>${esc(s)}</option>`).join(""); ps.onchange=()=>ps.value&&profile(ps.value);
  document.getElementById("top").innerHTML=top.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry)}</td><td>${x.score==null?"incomplete":f(x.score)}</td>${["iv_rank","iv_falling","rel_strength","strike_distance","range_profile","liquidity"].map(k=>`<td>${x.scores[k]==null?"-":f(x.scores[k])} <span class="mute">(${x.contributions&&x.contributions[k]!=null?f(x.contributions[k]):"-"})</span></td>`).join("")}<td style="text-align:left;white-space:normal"><span class="tag">${esc(x.label||"research candidate")}${x.snapshot?` - ${esc(x.snapshot.session_date)} close`:""}</span> ${x.actionable?"<b>actionable</b>":`<span class="mute">not actionable: ${esc((x.not_actionable_because||[]).map(s=>s.split(":")[0]).join(", "))}</span>`}<br>${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="12" class="mute">no stock passes every rule today</td></tr>';
  document.getElementById("rest").innerHTML=rest.map(x=>`<tr><td>${esc(x.stock)}</td><td>${side(x.side)}</td><td>${esc(x.expiry||"-")}</td><td style="text-align:left;white-space:normal">${x.reasons.map(esc).join("<br>")}</td></tr>`).join("")||'<tr><td colspan="4" class="mute">-</td></tr>';
-})();
+}
+async function loadReversals(){
+ const rv=await api("/api/stock-option-selling/reversals");
+ document.getElementById("revnote").textContent=rv.note+(rv.alerts_approved?"":" Alerts: not approved.")+(rv.session_date?` Session ${rv.session_date}.`:"");
+ const cand=c=>c.trade?`<b>${esc(c.candidate)}</b>: ${esc((c.trade.why_now||[]).slice(1,3).join("; "))}`:`<b>${esc(c.candidate)}</b>: no trade (${esc((c.reasons||[]).join("; "))})`;
+ document.getElementById("rev").innerHTML=rv.rows.map(x=>`<tr><td>${esc(x.stock)}</td><td><span class="tag ${x.state==="REVERSAL_CONFIRMED"?"warn":""}">watch: ${esc(x.state.replace(/_/g," ").toLowerCase())}</span></td><td>${f(x.close)}</td><td>${f(x.drawdown_pct)}%</td><td>${f(x.base_low)}</td><td>${(x.stall_zones||[]).map(f).join(", ")||"-"}</td><td style="text-align:left;white-space:normal">${x.confirmed_on?`REVERSAL_CONFIRMED on ${esc(x.confirmed_on)}: ${(x.reasons||[]).map(esc).join("; ")}<br>${(x.candidates||[]).map(cand).join("<br>")}`:""}</td></tr>`).join("")||'<tr><td colspan="7" class="mute">no stock is washed out today</td></tr>';
+}
+async function loadSettlement(){
+ const sr=await api("/api/stock-option-selling/settlement");
+ document.getElementById("setnote").textContent=`${sr.note} Alerts start ${sr.alerts_from.from_trading_days} trading days before expiry for a sold leg in the money or within ${sr.alerts_from.near_money_pct}% of spot; URGENT from ${sr.alerts_from.urgent_from_trading_days} trading days (the forced exit). ${sr.positions_note}`+(sr.calendar&&!sr.calendar.covered?` CALENDAR: ${sr.calendar.note}`:"");
+ if(sr.calendar&&!sr.calendar.covered)document.getElementById("setnote").className="down";
+ document.getElementById("setrules").innerHTML=sr.rules.map(x=>`<tr><td style="text-align:left">${esc(x.rule)}</td><td style="text-align:left">${esc(x.value)}</td><td class="${x.confirmed?'':'down'}">${x.confirmed?'yes':'NO'}</td><td style="text-align:left" class="down">${esc(x.label)}</td></tr>`).join("");
+}
+async function loadCampaigns(){
+ const cs=await api("/api/stock-option-selling/campaigns");
+ document.getElementById("camps").innerHTML=cs.campaigns.map(c=>`<tr><td>${esc(c.stock)}</td><td>${side(c.side)}</td><td>${c.rolls}</td><td>${f(c.realised_pnl_inr)}</td><td>${f(c.hedge_cost_inr)}</td><td>${f(c.charges_inr)}</td><td>${f(c.best_possible_outcome_inr)}</td><td style="text-align:left" class="${c.message?'down':''}">${esc(c.message||(c.open?'open':'closed'))}</td></tr>`).join("")||`<tr><td colspan="8" class="mute">${esc(cs.note)}</td></tr>`;
+}
+// each section on its own: one failing or slow call never empties the others
+section(["asof","top","rest"],loadShortlist);
+section(["rev"],loadReversals);
+section(["setrules"],loadSettlement);
+section(["camps"],loadCampaigns);
 </script></body></html>"""
 
 

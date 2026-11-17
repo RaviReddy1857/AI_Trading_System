@@ -635,7 +635,20 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
     # ---- phase 9: stock option selling shortlist (read-only; built by python -m app.options.shortlist) ----
     @app.get("/api/stock-option-selling/shortlist")
     def stock_option_selling_shortlist():
+        """The stored shortlist of the newest session; when none is stored for it, the same assessment built now
+        from the stored data (`computed`: not stored, nothing written), so every stock shows why it is or is not
+        on the list. Read-only."""
+        from .options.shortlist import run_shortlist, session_date
         out = store.shortlist()
+        newest = session_date(settings, store, feed.name)
+        out["computed"] = False
+        if newest is not None and out.get("session_date") != newest.isoformat():
+            built = run_shortlist(settings, store, feed.name, save=False)
+            out = {"session_date": built.get("session_date"), "created_utc": utcnow().isoformat(),
+                   "rows": built.get("rows", []), "computed": True,
+                   "computed_note": "Not stored: assessed now from the stored data, because no shortlist was stored "
+                                    f"for {newest:%d-%b-%Y}. After the close run: python -m app.options.shortlist "
+                                    "(it loads the option chains first)."}
         sos = settings.stock_option_selling
         status = settings.strategies.status_of("stock_option_selling")
         out.update({"feed": feed.name, "shortlist_size": sos.shortlist_size, "weights": sos.score.weights.model_dump(),
