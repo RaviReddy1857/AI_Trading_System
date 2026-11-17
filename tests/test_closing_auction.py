@@ -86,6 +86,7 @@ def test_config_yaml_holds_the_same_calendar_and_load_settings_sets_it():
                          "index_continuous_end": "15:15", "index_close": "15:35", "derivatives_close": "15:40"}],
                cash_intraday_cutoff="13:30")
     raw["stock_option_selling"]["after_close"]["chain_time"] = "13:00"
+    raw["stock_option_selling"]["settlement"]["forced_exit_by"] = "13:00"
     raw["backtest"]["intraday_exit_time"] = "14:00"
     S.configure(Settings.model_validate(raw).session)
     assert S.hours(CASH_FNO, POST).continuous_end == time(14, 0)
@@ -100,11 +101,12 @@ def test_config_yaml_holds_the_same_calendar_and_load_settings_sets_it():
     ({"after_close": {"start_time": "15:31"}}, "must be after every segment's close (15:40"),
     ({"alerts": {"end_of_day_time": "15:40"}}, "end_of_day_time 15:40 must be after every segment's close"),
     ({"backtest": {"intraday_exit_time": "15:20"}}, "after continuous trading of F&O stocks ends (15:15"),
+    ({"settlement": {"forced_exit_by": "15:20"}}, "forced_exit_by 15:20 must be in continuous trading"),
 ])
 def test_times_that_contradict_the_session_are_refused(change, message):
     raw = sim_settings().model_dump()
     for k, v in change.items():
-        target = raw["stock_option_selling"]["after_close"] if k == "after_close" else raw[k]
+        target = raw["stock_option_selling"][k] if k in ("after_close", "settlement") else raw[k]
         target.update(v)
     with pytest.raises(ValueError, match=__import__("re").escape(message)):
         Settings.model_validate(raw)

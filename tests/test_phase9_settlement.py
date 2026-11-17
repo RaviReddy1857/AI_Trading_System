@@ -105,9 +105,9 @@ def test_ACCEPTANCE_the_alert_names_the_leg_the_numbers_the_deadline_and_the_act
     assert a["level"] == WARNING and a["trading_days_left"] == 7 and a["underlying"] == "RELIANCE"
     leg = a["legs"][0]
     assert (leg["leg"], leg["strike"], leg["spot"], leg["distance_pct"], leg["itm_inr"]) == ("sold 1000 PE", 1000.0, 980.0, 2.04, 10000.0)
-    # the deadline: the close of the forced-exit day (E-5), stricter than every ICICI time
-    assert a["deadline"] == datetime.combine(day(5), time(15, 40), IST).isoformat()
-    assert a["action"] == f"Exit the spread by {day(5):%d-%b-%Y} 15:40" and a["overdue"] is None
+    # the deadline: 15:00 on the forced-exit day (E-5), while the stock trades continuously, stricter than every ICICI time
+    assert a["deadline"] == datetime.combine(day(5), time(15, 0), IST).isoformat()
+    assert a["action"] == f"Exit the spread by {day(5):%d-%b-%Y} 15:00" and a["overdue"] is None
     assert "never closes or changes" in a["note"] and a["estimate"]["position"]["legs"]
     # a far out-of-the-money leg: no alert at all before the deadline; a closed position: none ever
     assert settlement_alert(put_spread(), 1100.0, at(7), SOS, CAP) is None
@@ -215,7 +215,7 @@ def test_ACCEPTANCE_expiry_week_margin_follows_the_schedule_and_an_empty_rule_is
 def test_deadline_is_the_stricter_of_the_forced_exit_and_icicis_times():
     cs = cutoffs(put_spread(), SOS)
     assert [c["rule"] for c in cs] == ["forced exit", "delivery margin", "auto close"]
-    assert [c["at"] for c in cs] == [datetime.combine(day(5), time(15, 40), IST), datetime.combine(day(4), time(15, 15), IST),
+    assert [c["at"] for c in cs] == [datetime.combine(day(5), time(15, 0), IST), datetime.combine(day(4), time(15, 15), IST),
                                      datetime.combine(EXP, time(12, 0), IST)]            # a spread: the bought leg may go at 12:00
     assert exit_deadline(put_spread(), SOS)["rule"] == "forced exit"
     # a short-only position: ICICI's earliest stated time is 13:30; a sold call adds the 11:00 shares deadline
@@ -279,7 +279,7 @@ def test_ACCEPTANCE_no_code_path_closes_or_changes_a_position():
     imported = {(n.module or "") if isinstance(n, ast.ImportFrom) else a.name
                 for n in ast.walk(ast.parse(src)) if isinstance(n, (ast.Import, ast.ImportFrom))
                 for a in (n.names if isinstance(n, ast.Import) else [n])}
-    # session: the dated session calendar (config and time only) - the deadline is the options' close (15:40)
+    # session: the dated session calendar (config and time only) - the hard limit is the options' close (15:40)
     assert imported <= {"__future__", "collections.abc", "dataclasses", "datetime", "config", "quality", "session",
                         "stock_selling"}
     calls = {n.func.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
@@ -333,8 +333,8 @@ def test_ACCEPTANCE_trading_days_use_the_holiday_calendar_not_weekdays():
     assert sm.settlement_alert(pos, 980.0, on(date(2026, 12, 16)), SOS, CAP, calendar=XMAS) is None
     # the deadline and ICICI's margin start move with the holiday: forced exit at the close of the 21st, margin on the 22nd
     cs = {c["rule"]: c["at"] for c in sm.cutoffs(pos, SOS, XMAS)}
-    assert cs["forced exit"] == on(date(2026, 12, 21), 15, 40) and cs["delivery margin"] == on(date(2026, 12, 22), 15, 15)
-    assert a["action"] == "Exit the spread by 21-Dec-2026 15:40"
+    assert cs["forced exit"] == on(date(2026, 12, 21), 15, 0) and cs["delivery margin"] == on(date(2026, 12, 22), 15, 15)
+    assert a["action"] == "Exit the spread by 21-Dec-2026 15:00"
     assert sm.overdue(pos, on(date(2026, 12, 21), 15, 40), False, SOS, XMAS)["colour"] == "red"
     assert sm.overdue(pos, on(date(2026, 12, 21), 15, 39), False, SOS, XMAS) is None
     # the expiry-week margin follows the calendar's day count: 22 December is E-4 (10%), 24 December E-2 (45%)
@@ -364,7 +364,7 @@ def test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_d
     # the card says so, in red
     assert a["calendar"]["covered"] is False and a["calendar"]["colour"] == "red" and names in a["calendar"]["note"]
     # the deadline is one session earlier too: the close of Monday 21 December (weekday E-6), not Tuesday 22
-    assert a["deadline"] == on(date(2026, 12, 21), 15, 40).isoformat()
+    assert a["deadline"] == on(date(2026, 12, 21), 15, 0).isoformat()
     assert sm.overdue(pos, on(date(2026, 12, 21), 15, 40), False, SOS, calendar)["kind"] == "EXIT_OVERDUE"
     # never later than the count with the true holiday: on every day it is at or below the covered count
     for n in range(10, 30):
@@ -512,3 +512,41 @@ def test_an_unhedged_short_is_fully_deliverable():
     # price unknown: nothing is allocated and nothing is assumed
     assert at_last(held(("SELL", "PE", 100, 100), ("BUY", "PE", 90, 100)), None)[0]["sold 100 PE"] is None
 
+
+
+# ---------------- 17-Nov-2026 (the user's decision): exit by 15:00 on E-5; 15:40 the hard limit ----------------
+def test_forced_exit_is_due_by_1500_while_the_stock_trades_and_escalates_red_urgent_only_at_1540():
+    pos = put_spread()
+    cs = cutoffs(pos, SOS)
+    assert cs[0]["rule"] == "forced exit" and cs[0]["at"] == at(5, 15, 0) and cs[0]["hard_limit"] == at(5, 15, 40)
+    assert ST.forced_exit_by == "15:00"
+    far = 1100.0                                                             # far out of the money: no level
+    assert settlement_alert(pos, far, at(5, 14, 59), SOS, CAP) is None      # nothing yet for a far OTM spread
+    a = settlement_alert(pos, far, at(5, 15, 0), SOS, CAP)                  # 15:00: exit now, while it trades
+    assert a["due_now"] is True and a["overdue"] is None and a["colour"] is None
+    assert a["action"] == f"Exit the spread NOW: due by {day(5):%d-%b-%Y} 15:00 while the stock trades continuously; hard limit 15:40"
+    b = settlement_alert(pos, far, at(5, 15, 40), SOS, CAP)                 # the hard limit: red, URGENT
+    assert b["overdue"]["kind"] == "EXIT_OVERDUE" and b["colour"] == "red" and b["due_now"] is False
+
+
+def test_the_settlement_exit_call_is_warning_from_1500_and_urgent_from_1540():
+    from app.journal import Leg, Position
+    from app.positions import settlement_call
+    s = load_settings()
+    legs = (Leg("SELL", "PE", 1000.0, EXP, 2, LOT, 10.0), Leg("BUY", "PE", 980.0, EXP, 2, LOT, 4.0))
+    pos = Position("p", "MANUAL", None, "STOCK_OPTION_SELLING", "STOCK_OPTIONS", "RELIANCE", "SPREAD", legs, 2, 6.0,
+                   at(20))
+    cal = MarketCalendar({date(2026, 1, 26): "Republic Day"})             # covers 2026: trading days = weekdays
+    assert settlement_call(pos, 1100.0, at(5, 14, 59), s, cal) is None
+    assert settlement_call(pos, 1100.0, at(5, 15, 0), s, cal)["level"] == "WARNING"
+    late = settlement_call(pos, 1100.0, at(5, 15, 40), s, cal)
+    assert late["level"] == "URGENT" and late["overdue"] is True
+
+
+def test_the_forced_exit_call_fires_from_the_open_of_e5_and_names_1500():
+    from app.options.stock_selling import SpreadPosition, exit_calls
+    sp = SpreadPosition("RELIANCE", "PE", 1000.0, 980.0, EXP, 6.0, LOT, 2)
+    calls = exit_calls(sp, SOS, day(5), 3.0, 1100.0, "UP")
+    fx = [c for c in calls if c["kind"] == "FORCED_EXPIRY_EXIT"]
+    assert fx and "exit by 15:00 while the stock trades continuously" in fx[0]["reason"]
+    assert not [c for c in exit_calls(sp, SOS, day(6), 3.0, 1100.0, "UP") if c["kind"] == "FORCED_EXPIRY_EXIT"]

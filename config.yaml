@@ -409,6 +409,8 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
     alert_from_trading_days: 7  # alerts start 7 trading days before expiry (E-7)
     urgent_from_trading_days: 5 # URGENT from E-5 for a short leg ITM or near the money (= the forced exit above)
     near_money_pct: 5           # near the money: strike within 5% of spot (set by you 2026-11-15)
+    forced_exit_by: "15:00"     # forced exit day (E-5): exit by 15:00, while the stock trades continuously (you,
+                                # 2026-11-17); the options' close (15:40) stays the hard limit for the red/URGENT alert
     broker:                     # ICICI Direct's physical-settlement rules (entered by you 2026-11-15; sources in docs/STATUS.md)
       delivery_margin:
         confirmed: true

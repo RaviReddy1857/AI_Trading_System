@@ -556,7 +556,8 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
     if left <= p.forced_exit_trading_days_before_expiry:
         out.append({"kind": "FORCED_EXPIRY_EXIT", "action": "Exit now: physical settlement",
                     "reason": f"{left} trading day(s) to expiry, inside the forced-exit window; stock options settle "
-                              f"physically"})
+                              f"physically; exit by {getattr(getattr(p, 'settlement', None), 'forced_exit_by', '15:00')} "
+                              f"while the stock trades continuously"})
     elif days <= p.time_exit_dte:
         out.append({"kind": "TIME_EXIT", "action": "Exit: time exit",
                     "reason": f"{days} day(s) to expiry, at or inside the {p.time_exit_dte}-day time exit"})

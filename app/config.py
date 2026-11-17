@@ -888,6 +888,9 @@ class Settlement(StrictModel):
     alert_from_trading_days: int = Field(7, ge=1, le=20)      # alerts start this many trading days before expiry
     urgent_from_trading_days: int = Field(5, ge=0, le=20)     # URGENT from here for an ITM or near-the-money short leg
     near_money_pct: float = Field(5.0, gt=0, le=50)           # near the money: strike within this % of spot
+    # the forced exit (close of E-n): exit by this time that day, while the stock trades continuously (user,
+    # 2026-11-17); the options' close (15:40 from 3 Aug 2026) stays the hard limit for the red/URGENT escalation
+    forced_exit_by: CLOCK = "15:00"
     broker: BrokerSettlement = BrokerSettlement()
 
     @model_validator(mode="after")
@@ -1144,6 +1147,10 @@ class Settings(StrictModel):
             if hhmm(self.alerts.end_of_day_time) <= latest:
                 raise ValueError(f"alerts.end_of_day_time {self.alerts.end_of_day_time} must be after every "
                                  f"segment's close ({latest:%H:%M}, {p.from_date} period)")
+            fx = hhmm(self.stock_option_selling.settlement.forced_exit_by)
+            if not hhmm(p.open) < fx <= hhmm(p.fno_continuous_end):
+                raise ValueError(f"stock_option_selling.settlement.forced_exit_by {fx:%H:%M} must be in continuous "
+                                 f"trading of F&O stocks (to {p.fno_continuous_end}, {p.from_date} period)")
             if hhmm(self.backtest.intraday_exit_time) > hhmm(p.fno_continuous_end):
                 raise ValueError(f"backtest.intraday_exit_time {self.backtest.intraday_exit_time} is after continuous "
                                  f"trading of F&O stocks ends ({p.fno_continuous_end}, {p.from_date} period)")

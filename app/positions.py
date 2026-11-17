@@ -338,7 +338,9 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
         reason = f"OVERDUE: {a['overdue'].get('text', 'planned exit deadline passed')}; " + reason
     if a["not_confirmed"]:
         reason += "; " + "; ".join(a["not_confirmed"])
-    return {"kind": SETTLEMENT, "action": a["action"], "reason": reason, "level": a["level"] or "URGENT",
+    # no level of its own: URGENT once overdue (the hard limit), WARNING while only the planned exit time has come
+    level = a["level"] or ("URGENT" if a["overdue"] or not a.get("due_now") else "WARNING")
+    return {"kind": SETTLEMENT, "action": a["action"], "reason": reason, "level": level,
             "overdue": bool(a["overdue"]), "values": {"alert": a}}
 
 

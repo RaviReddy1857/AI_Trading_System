@@ -22,7 +22,10 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
    Also the expiry-week delivery margin from ICICI's schedule. A rule that is not filled in gives
    "margin unknown", never zero.
 3. Planned-exit deadline (`exit_deadline`): the stricter (earlier) of the forced exit and ICICI's own
-   times. A position still open after it gets a red alert on every call until it is closed (`overdue`).
+   times. The forced exit is due at `settlement.forced_exit_by` (15:00) on its day, while the stock still trades
+   continuously: from then the alert is sent as "exit now" (`due_now`), whatever the moneyness. Its hard limit is
+   the options' close that day (15:40 from 3 Aug 2026); an ICICI time is its own hard limit. A position still open
+   after the earliest hard limit gets a red alert on every call until it is closed (`overdue`).
    Trading days are counted with the holiday calendar (data/holidays.csv). When the calendar has no holiday
    row for a year the expiry month touches, a holiday may be missing: the count is then taken on weekdays
    LESS ONE, so every alert and deadline comes one session earlier, and the alert says so (`calendar`).
@@ -190,10 +193,14 @@ def cutoffs(pos: HeldPosition, sos, calendar=None) -> list[dict]:
     b = sos.settlement.broker
     forced = sos.forced_exit_trading_days_before_expiry
     from ..session import DERIVATIVES, hours as session_hours
-    fday = dc.session(forced)       # the options' close that day (15:30 before 3 Aug 2026, 15:40 after)
-    out = [{"at": _at(fday, session_hours(DERIVATIVES, fday).close), "broker": False,
+    fday = dc.session(forced)
+    # exit by forced_exit_by (15:00), while the stock trades continuously; hard limit: the options' close that day
+    # (15:30 before 3 Aug 2026, 15:40 after)
+    out = [{"at": _at(fday, hhmm(sos.settlement.forced_exit_by)),
+            "hard_limit": _at(fday, session_hours(DERIVATIVES, fday).close), "broker": False,
             "confirmed": True, "rule": "forced exit",
-            "what": f"forced exit: no position inside the last {forced} trading days (the close of E-{forced})"}]
+            "what": f"forced exit: no position inside the last {forced} trading days (by "
+                    f"{sos.settlement.forced_exit_by} on E-{forced}, while the stock trades continuously)"}]
     dm = b.delivery_margin
     if dm.schedule_pct and pos.shorts:
         first = max(dm.schedule_pct)
@@ -211,7 +218,14 @@ def cutoffs(pos: HeldPosition, sos, calendar=None) -> list[dict]:
         out.append({"at": _at(dc.session(0), hhmm(ob.call_shares_in_demat_by)), "broker": True,
                     "confirmed": ob.call_shares_deadline_confirmed, "rule": "call shares deadline",
                     "what": "shares for a sold call must be in demat by this time on expiry day"})
+    for c in out:
+        c.setdefault("hard_limit", c["at"])          # an ICICI time is its own hard limit
     return sorted(out, key=lambda c: c["at"])
+
+
+def hard_limit(cs: Sequence[dict]) -> dict | None:
+    """The cut-off whose hard limit comes first (the red, URGENT escalation starts there)."""
+    return min(cs, key=lambda c: c["hard_limit"]) if cs else None
 
 
 def exit_deadline(pos: HeldPosition, sos, calendar=None) -> dict | None:
@@ -226,14 +240,14 @@ def overdue(pos: HeldPosition, now: datetime, closed: bool, sos, calendar=None) 
     while the position is not marked closed (the caller repeats it), None once it is closed."""
     if closed or not pos.shorts:
         return None
-    dl = exit_deadline(pos, sos, calendar)
+    dl = hard_limit(cutoffs(pos, sos, calendar))
     if dl is None:
         return {"kind": "EXIT_OVERDUE", "colour": "red", "repeat": True, "deadline": None,
                 "text": f"{pos.underlying}: expiry not known, so no exit deadline can be set: check this position now"}
-    if now < dl["at"]:
+    if now < dl["hard_limit"]:
         return None
-    return {"kind": "EXIT_OVERDUE", "colour": "red", "repeat": True, "deadline": dl["at"].isoformat(),
-            "text": f"{pos.underlying}: NOT marked closed after the exit deadline {dl['at']:%d-%b-%Y %H:%M} "
+    return {"kind": "EXIT_OVERDUE", "colour": "red", "repeat": True, "deadline": dl["hard_limit"].isoformat(),
+            "text": f"{pos.underlying}: NOT marked closed after the exit deadline {dl['hard_limit']:%d-%b-%Y %H:%M} "
                     f"({dl['what']}). Exit the position and mark it closed in the journal."}
 
 
@@ -417,19 +431,27 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
                      **moneyness(leg, spot, st.near_money_pct)})
     level = escalate(previous_level, level)
     late = overdue(pos, now, closed, sos, calendar)
-    if level is None and late is None:
-        return None
     dl = cs[0] if cs else None
+    due_now = dl is not None and late is None and now >= dl["at"]     # the planned exit time has come: exit now
+    if level is None and late is None and not due_now:
+        return None
     by = f"{dl['at']:%d-%b-%Y %H:%M}" if dl else "now (the expiry is not known)"
     kind = "spread" if pos.longs else "position"
+    hard = hard_limit(cs)
+    action = f"Exit the {kind} by {by}"
+    if due_now:
+        action = (f"Exit the {kind} NOW: due by {by}" + (" while the stock trades continuously" if dl["rule"] ==
+                                                          "forced exit" else "")
+                  + f"; hard limit {hard['hard_limit']:%H:%M}")
     return {"underlying": pos.underlying, "label": pos.label, "level": level, "colour": "red" if late or level == URGENT else None,
             "expiry": pos.expiry.isoformat() if pos.expiry else None, "trading_days_left": left,
             # how the days were counted; not covered = one session earlier, shown on the card in red
             "calendar": {"covered": dc.covered, "note": dc.note, "colour": None if dc.covered else "red"},
             "legs": legs, "estimate": delivery_estimate(pos, spot, left, sos, capital, base_margin_inr, near_month),
             "deadline": dl["at"].isoformat() if dl else None, "deadline_set_by": dl["what"] if dl else None,
-            "cutoffs": [{**c, "at": c["at"].isoformat()} for c in cs],
-            "action": f"Exit the {kind} by {by}", "overdue": late,
+            "hard_limit": hard["hard_limit"].isoformat() if hard else None, "due_now": due_now,
+            "cutoffs": [{**c, "at": c["at"].isoformat(), "hard_limit": c["hard_limit"].isoformat()} for c in cs],
+            "action": action, "overdue": late,
             "not_confirmed": not_confirmed(pos, sos, cs),
             "note": "alert and estimate only: the system never closes or changes a position"}
 
