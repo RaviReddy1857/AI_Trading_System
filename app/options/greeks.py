@@ -14,10 +14,10 @@ import math
 from datetime import date, datetime, time, timezone
 
 from ..quality import IST
+from ..session import DERIVATIVES, hours as session_hours
 
 RIGHTS = ("CE", "PE")
 MIN_SIGMA, MAX_SIGMA = 0.0005, 5.0          # 0.05% .. 500% annualised
-EXPIRY_CLOSE = time(15, 30)
 
 
 def _ok(*xs) -> bool:
@@ -29,8 +29,9 @@ def norm_cdf(x: float) -> float:
 
 
 def years_to_expiry(asof: datetime, expiry: date) -> float | None:
-    """Calendar time from `asof` to 15:30 IST on the expiry date, in years (365 days). None if past."""
-    end = datetime.combine(expiry, EXPIRY_CLOSE, IST)
+    """Calendar time from `asof` to the options' close on the expiry date (app/session.py: 15:30 IST before 3 Aug
+    2026, 15:40 after), in years (365 days). None if past."""
+    end = datetime.combine(expiry, session_hours(DERIVATIVES, expiry).close, IST)
     secs = (end - asof.astimezone(IST)).total_seconds()
     return secs / (365.0 * 86400.0) if secs > 0 else None
 

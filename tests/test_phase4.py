@@ -90,7 +90,8 @@ def test_iv_rank():
 
 
 def test_years_to_expiry_is_none_after_expiry():
-    assert years_to_expiry(NOW, EXP_M) == pytest.approx((25 + 5 / 24) / 365, abs=1e-6)
+    # to the options' close on the expiry day: 15:40 from 3 Aug 2026
+    assert years_to_expiry(NOW, EXP_M) == pytest.approx((25 + 5 / 24 + 10 / 1440) / 365, abs=1e-6)
     assert years_to_expiry(datetime(2026, 12, 8, 11, 0, tzinfo=UTC), EXP_M) is None
 
 
@@ -333,7 +334,7 @@ def test_chain_loader_stores_good_rows_and_logs_quarantined_ones():
                            "PE": [chain_row(24000, 90, 91), chain_row(23900, 50, 49)]}, fail={"BANKNIFTY"})
     out = ChainLoader(s, store, src, book).load(now=NOW)
     # 24100 CE (bid/ask 0) and 23900 PE (crossed) are stored as unpriced and counted, not priced
-    assert out["NIFTY:2026-12-08"] == {"saved": 4, "quarantined": 2, "no_bid_ask": 2}
+    assert out["NIFTY:2026-12-08"] == {"saved": 4, "quarantined": 2, "no_bid_ask": 2, "as_of_utc": NOW.isoformat()}
     assert "error" in out["BANKNIFTY:2026-12-08"]                       # one failing symbol does not stop the others
     rows = store.latest_option_chain("sim", "NIFTY", EXP_M)
     assert [(r["strike"], r["right"], r["bid"], r["ask"], r["oi"]) for r in rows] == [

@@ -38,7 +38,8 @@ def test_parse_rejects_bad_rows_and_keeps_unknown_volume_unknown():
 def test_incomplete_bars_are_not_complete():
     today = Bar("X", datetime(2026, 11, 11, 3, 45, tzinfo=timezone.utc), 1, 1, 1, 1)
     assert not is_complete(today, DAILY, T0)                               # 10:30 IST
-    assert is_complete(today, DAILY, datetime(2026, 11, 11, 10, 5, tzinfo=timezone.utc))   # 15:35
+    assert not is_complete(today, DAILY, datetime(2026, 11, 11, 10, 5, tzinfo=timezone.utc))   # 15:35: options trade
+    assert is_complete(today, DAILY, datetime(2026, 11, 11, 10, 10, tzinfo=timezone.utc))      # 15:40: every close
     forming = Bar("X", T0 - timedelta(minutes=3), 1, 1, 1, 1)
     assert not is_complete(forming, INTRADAY, T0)
     assert is_complete(forming, INTRADAY, T0 + timedelta(minutes=2))

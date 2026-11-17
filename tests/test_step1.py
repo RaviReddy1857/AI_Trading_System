@@ -103,7 +103,7 @@ def test_hub_drops_bad_ticks_and_marks_stale():
     hub.on_tick(tk(130, received_at=T0 + timedelta(seconds=1)))  # 30% jump
     row = next(r for r in hub.snapshot(T0 + timedelta(seconds=2)) if r["symbol"] == "RELIANCE")
     assert row["last"] == 100 and row["status"] == "LIVE" and row["usable"]
-    assert hub.stats() == {"good_ticks": 1, "quarantined_ticks": 1}
+    assert hub.stats() == {"good_ticks": 1, "quarantined_ticks": 1, "auction_ticks": 0}
     assert store.recent_quality_events()[0]["reason"] == PRICE_JUMP
     row = next(r for r in hub.snapshot(T0 + timedelta(seconds=90)) if r["symbol"] == "RELIANCE")
     assert row["status"] == "STALE" and not row["usable"]

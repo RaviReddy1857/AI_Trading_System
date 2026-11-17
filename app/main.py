@@ -182,7 +182,7 @@ def create_app(settings: Settings | None = None, feed=None, db_path: str | None 
                 if loaded_on != today:
                     load_instruments()
                     loaded_on = today
-                if feed.name == "sim" or calendar.is_open(utcnow()):
+                if feed.name == "sim" or calendar.is_open(utcnow()):     # to the last close: options trade to 15:40
                     bad = [k for k, v in load_chains().items() if "error" in v]
                     if bad:
                         log.warning("option chains failed: %s", bad)

@@ -8,10 +8,10 @@ from collections.abc import Collection
 from datetime import date, datetime, time, timedelta, timezone
 
 from .models import Tick
+from .session import AUCTION, CLOSED, IST, calendar as session_calendar
 
-IST = timezone(timedelta(hours=5, minutes=30))
 MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
+# No single close any more: each segment has its own, by date (app/session.py; closing auction from 3 Aug 2026).
 
 BAD_PRICE = "BAD_PRICE"
 CROSSED_QUOTE = "CROSSED_QUOTE"
@@ -24,12 +24,17 @@ BAD_PREV_CLOSE = "BAD_PREV_CLOSE"    # negative or non-finite previous close
 TICK_REASONS = frozenset({BAD_PRICE, CROSSED_QUOTE, PRICE_JUMP, VOLUME_WENT_BACK, BAD_VOLUME, BAD_PREV_CLOSE})
 
 
-def is_market_hours(now_utc: datetime, holidays: Collection[date] = ()) -> bool:
-    """Weekday 09:15-15:30 IST, excluding NSE trading holidays (data/holidays.csv)."""
-    now = now_utc.astimezone(IST)
-    if now.weekday() >= 5 or now.date() in holidays:
-        return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+def is_market_hours(now_utc: datetime, holidays: Collection[date] = (), segment: str | None = None,
+                    continuous: bool = False) -> bool:
+    """A trading day (weekday, not in data/holidays.csv) and, by the session calendar (app/session.py):
+    - `segment` None: some segment is still trading (09:15 to the last close: 15:30 before 3 Aug 2026, 15:40 after);
+    - a segment: that segment is OPEN or in its closing auction; with `continuous` only while it is OPEN
+      (continuous trading: prices are trades)."""
+    cal = session_calendar()
+    if segment is None:
+        return cal.any_open(now_utc, holidays)
+    ph = cal.phase(segment, now_utc, holidays)
+    return ph == "OPEN" if continuous else ph != CLOSED
 
 
 JUMP_WINDOW_S = 120  # only compare against a recent tick, so an overnight gap
@@ -78,10 +83,20 @@ def check_tick(tick: Tick, prev_good: Tick | None, max_jump_pct: float) -> list[
 
 
 def freshness(last_good_at: datetime | None, now_utc: datetime, stale_after_s: int,
-              enforce_hours: bool = True, holidays: Collection[date] = ()) -> str:
-    """LIVE, STALE, CLOSED or NO_DATA for one symbol."""
-    if enforce_hours and not is_market_hours(now_utc, holidays):
-        return "CLOSED"
+              enforce_hours: bool = True, holidays: Collection[date] = (), segment: str | None = None) -> str:
+    """LIVE, STALE, CLOSED or NO_DATA for one symbol; AUCTION while its segment (`segment`, app/session.py) is in
+    the closing auction (F&O stocks and indices from 3 Aug 2026: auction indications or indicative values, never
+    usable). Without a segment: CLOSED outside every segment's hours."""
+    if enforce_hours:
+        if segment is None:
+            if not is_market_hours(now_utc, holidays):
+                return "CLOSED"
+        else:
+            ph = session_calendar().phase(segment, now_utc, holidays)
+            if ph == CLOSED:
+                return "CLOSED"
+            if ph == AUCTION:
+                return "AUCTION"
     if last_good_at is None:
         return "NO_DATA"
     age = (now_utc - last_good_at).total_seconds()

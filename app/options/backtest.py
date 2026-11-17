@@ -62,6 +62,7 @@ from ..history import bar_date, daily_start
 from ..indicators import gap_breaks
 from ..models import Bar, Signal, utcnow
 from ..quality import IST
+from ..session import CASH_FNO, DERIVATIVES, close_utc, hours as session_hours
 from ..regime import fii_bias
 from ..store import Store
 from ..strategies import MarketContext, build_strategies
@@ -149,15 +150,16 @@ def option_stats(trades: list, capital: float, min_trades: int) -> dict:
 
 
 def mark_age_minutes(t) -> int:
-    """Minutes between the price an open-at-cutoff mark uses and the end (15:30 IST) of that session."""
+    """Minutes between the price an open-at-cutoff mark uses and the end of that session (the options' close)."""
     at = datetime.fromisoformat(t.mark_time or t.exit_time).astimezone(IST)
-    end = datetime.combine(at.date(), time(15, 30), IST)
+    end = datetime.combine(at.date(), session_hours(DERIVATIVES, at.date()).close, IST)
     return max(0, int((end - at).total_seconds() // 60))
 
 
 def session_end(d: date) -> datetime:
-    """15:30 IST of session d, in UTC."""
-    return datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)
+    """The end of option session d, in UTC: the options' close (app/session.py: 15:30 IST before 3 Aug 2026, 15:40
+    after)."""
+    return close_utc(DERIVATIVES, d)
 
 
 def _read_mark(m) -> tuple[date, float, datetime]:
@@ -571,7 +573,7 @@ class OptionEngine:
         iv, rank = self.iv_at(sym, d)
         lot = self.lot_size(sym)
         exps = tuple(ExpiryInfo(e, k, lot) for e, k in self.expiries(sym) if e >= d)[:8]
-        asof = datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)
+        asof = close_utc(CASH_FNO, d)        # at the underlying's official close (15:35 from 3 Aug 2026)
         return OptionContext(
             underlying=sym, kind=kind, asof=asof, regime=self.base.regime.at_close(d).regime, spot=spot,
             expiries=exps, quotes=HistoryQuotes(self.prices, sym, d, spot, cfg.backtest_strike_step if cfg else None),
@@ -713,7 +715,7 @@ class OptionEngine:
             sell_v = sum((Decimal(str(x["exit_price"])) * x["lots"] * x["lot_size"] for x in legs_out if x["action"] == "BUY"),
                          Decimal(0))
             liq = float(self.costs.options(pos.legs[0].lots, money(buy_v), money(sell_v)).total)
-        t_exit = exit_dt or datetime.combine(d, time(9, 15) if at_open else time(15, 30), IST).astimezone(timezone.utc)
+        t_exit = exit_dt or (datetime.combine(d, time(9, 15), IST).astimezone(timezone.utc) if at_open else session_end(d))
         return OptionTrade(
             strategy_id=strategy.id, strategy_version=strategy.version, variant=pos.variant, symbol=sym,
             structure=sig.details["structure"], expiry=pos.legs[0].expiry.isoformat(), legs=legs_out,
@@ -725,7 +727,7 @@ class OptionEngine:
             price_source=self.prices.label,
             max_loss_inr=pos.max_loss_inr if pos.max_loss_inr is not None else sig.details.get("max_loss_inr"),
             marks=[[m[0].isoformat(), m[1], m[2].isoformat()] for m in pos.marks],
-            mark_time=(exit_dt or datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)).isoformat()
+            mark_time=(exit_dt or session_end(d)).isoformat()
             if reason == OPEN_AT_CUTOFF else None,
             iv_rank=sig.details.get("iv_rank"), why_now=list(sig.why_now),
             entry_conditions=dict(sig.details.get("entry_conditions") or {}),
@@ -1458,7 +1460,7 @@ class OptionEngine:
             if is_long:
                 # The trigger strategy is a cash-equity rule set; an index is passed as kind "stock"
                 # because here its signal is only a trigger for an option, never a cash trade.
-                mctx = MarketContext(sym, "stock", datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc),
+                mctx = MarketContext(sym, "stock", close_utc(CASH_FNO, d),
                                      self.base.regime.at_close(d).regime, daily=tuple(bars[start:i + 1]),
                                      index_daily=self.base.index_daily(d) if trig.needs_index_daily else ())
                 got = trig.evaluate(mctx)

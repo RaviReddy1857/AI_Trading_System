@@ -152,13 +152,17 @@ def kill_switch(index_symbol: str, index_status: str | None, quarantined_recent,
                 cfg) -> list[str]:
     """Reasons the kill switch is on (empty = off): the index price is not LIVE, the clock is outside
     market hours, or at least `quarantine_max_events` ticks were quarantined in the last
-    `quarantine_window_minutes`. An input that is not known turns it on."""
+    `quarantine_window_minutes`. An input that is not known turns it on.
+
+    Market hours are the index's continuous trading (app/session.py): from 3 Aug 2026 the closing auction is
+    outside them. Outside them the index is expected not to be LIVE (closed, or indicative during the auction), so
+    that is not given as a second reason: exit calls ignore the market-hours reason and must not see a feed fault."""
     out = []
     if market_open is None:
         out.append("market hours not known")
     elif not market_open:
-        out.append("outside market hours")
-    if index_status != "LIVE":
+        out.append("outside market hours (continuous trading; the closing auction is outside them)")
+    if market_open is not False and index_status != "LIVE":
         out.append(f"{index_symbol} price is {index_status or 'not known'}, not LIVE")
     if not known(quarantined_recent):
         out.append("quarantined-tick count not known")

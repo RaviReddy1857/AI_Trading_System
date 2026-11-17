@@ -33,6 +33,7 @@ from ..costs import MissingCostRates
 from ..models import APPROVED, NO_TRADE, RiskDecision, Signal, unhedged_short_legs
 from ..options.portfolio import Holding, portfolio_check
 from ..quality import is_market_hours, TICK_REASONS
+from ..session import segment_for
 from .limits import (CORRELATED_LIMIT, DATA_MISSING, KILL_SWITCH, correlated_group, drawdown_state,
                      kill_switch, loss_stops, sector_check)
 from .portfolio import (CAPITAL_UNKNOWN, FITS, NEEDS_MORE_CAPITAL, PORTFOLIO_UNKNOWN, STOCK_SPREAD, TIGHT,
@@ -414,7 +415,9 @@ class RiskService:
         ks = self.s.risk.kill_switch
         since = (now - timedelta(minutes=ks.quarantine_window_minutes)).astimezone(timezone.utc)
         return MarketState(now=now, price_status=self._status_of(symbol, now), regime=regime,
-                           market_open=is_market_hours(now, self.calendar.holidays),
+                           # new signals only in the index's continuous trading (not in the closing auction)
+                           market_open=is_market_hours(now, self.calendar.holidays,
+                                                       segment_for(self.s, self.s.regime.index_symbol), continuous=True),
                            index_status=self._status_of(self.s.regime.index_symbol, now),
                            # live price ticks only: option chain rows and history bars never count
                            quarantined_recent=self.store.quality_event_count_since(since, TICK_REASONS))

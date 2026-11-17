@@ -225,4 +225,7 @@ class OptionDesk:
 
 
 def session_close(d: date) -> datetime:
-    return datetime.combine(d, time(15, 30), IST)
+    """The official close of a stock or index on `d` (IST): 15:30 before 3 Aug 2026, the end of the closing auction
+    (15:35) after (app/session.py)."""
+    from ..session import CASH_FNO, hours as session_hours
+    return datetime.combine(d, session_hours(CASH_FNO, d).close, IST)

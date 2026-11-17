@@ -1204,7 +1204,7 @@ def net_flows(journal: Journal, pool: str, flows, upto: date) -> Decimal:
     return sum((_d(a) for d, a in flows if (start is None or d > start) and d <= upto), Decimal(0))
 
 
-def close_equity_day(journal: Journal, settings, pool: str, now: datetime, flows=()) -> dict | None:
+def close_equity_day(journal: Journal, settings, pool: str, now: datetime, flows=(), note: str = "close") -> dict | None:
     """Write today's closing equity of a pool after the close, from the last marks of the session, with the net
     deposits to date (`net_flows`). Nothing is written when a figure is not known (a position without a mark
     today, a close without a net figure)."""
@@ -1218,5 +1218,5 @@ def close_equity_day(journal: Journal, settings, pool: str, now: datetime, flows
     if r_all is None:
         return None
     eq = _paise(_d(pool_capital(settings, pool)) + net_flows(journal, pool, flows, ist_day(now)) + r_all + total)
-    journal.write_equity(pool, ist_day(now), float(eq), float(r_all), float(total), now, "close")
-    return {"pool": pool, "day": ist_day(now).isoformat(), "equity_inr": float(eq)}
+    journal.write_equity(pool, ist_day(now), float(eq), float(r_all), float(total), now, note)
+    return {"pool": pool, "day": ist_day(now).isoformat(), "equity_inr": float(eq), "note": note}

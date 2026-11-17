@@ -38,6 +38,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from ..history import _num, _parse_dt, call_with_timeout, daily_start, in_session
 from ..models import Bar, utcnow
 from ..quality import IST, MARKET_OPEN
+from ..session import CASH_FNO, hours as session_hours
 from ..store import Store
 from .greeks import bs_price, implied_vol, years_to_expiry
 from .instruments import nice_step
@@ -585,7 +586,7 @@ class ModelPrices:
         iv_open = iv_open if iv_open is not None else iv_close
         q = self._div(underlying)
         t_open = datetime.combine(d, MARKET_OPEN, IST)
-        t_close = datetime.combine(d, time(15, 30), IST)
+        t_close = datetime.combine(d, session_hours(CASH_FNO, d).close, IST)   # the underlying's official close
         o = self._price(u.open, strike, t_open, expiry, iv_open, right, q)
         c = self._price(u.close, strike, t_close, expiry, iv_close, right, q)
         a = self._price(u.high, strike, t_close, expiry, iv_close, right, q)
@@ -664,7 +665,7 @@ def atm_iv_series(contracts: dict[tuple, dict[date, OptionBar]], closes: dict[da
             dist = abs(strike / s - 1) * 100
             if dist > max_moneyness_pct or (d in best and best[d][0] <= dist):
                 continue
-            t = years_to_expiry(datetime.combine(d, time(15, 30), IST), expiry)
+            t = years_to_expiry(datetime.combine(d, session_hours(CASH_FNO, d).close, IST), expiry)
             iv = implied_vol(b.close, s, strike, t, rate, dividend, right) if t else None
             if iv is not None:
                 best[d] = (dist, iv * 100.0)

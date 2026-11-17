@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..quality import is_market_hours
+from ..session import segment_of
 from .portfolio import portfolio_check
 
 RESEARCH_LABEL = "research candidate"
@@ -37,8 +38,9 @@ def actionable_check(settings, signal, ctx, now: datetime, chain_as_of: dict, ho
         return False, ["no complete setup passes the rules"]
     if ctx.historical:
         why.append("DATA_STALE: a historical context is never actionable")
-    if not is_market_hours(now, holidays):
-        why.append("DATA_STALE: outside market hours - a research snapshot, not a live price")
+    if not is_market_hours(now, holidays, segment_of("stock"), continuous=True):
+        why.append("DATA_STALE: outside continuous trading of F&O stocks (the closing auction is outside it) - a "
+                   "research snapshot, not a live price")
     if ctx.status != "LIVE":
         why.append(f"DATA_STALE: the underlying's price status is {ctx.status}")
     max_age = settings.options.chain.max_age_seconds

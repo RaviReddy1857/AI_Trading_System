@@ -147,7 +147,7 @@ def test_negative_breeze_quote_reaches_the_gate(tmp_path):
     assert t.bid == -1.0                                   # not hidden as "no quote"
     hub = MarketHub(settings_with_tmp_data(tmp_path), Store(":memory:"), "breeze")
     hub.on_tick(Tick(t.symbol, t.last, t.bid, t.ask, t.cum_volume, t.prev_close, received_at=T0))
-    assert hub.stats() == {"good_ticks": 0, "quarantined_ticks": 1}
+    assert hub.stats() == {"good_ticks": 0, "quarantined_ticks": 1, "auction_ticks": 0}
     for raw in ({"last": 100, "bPrice": 0, "sPrice": 100.1}, {"last": 100}):
         assert tick_from_breeze(raw, "RELIANCE", "stock").bid is None   # 0 or missing = no quote
     neg_vol = tick_from_breeze({"last": 100, "ttq": -5, "close": -3}, "RELIANCE", "stock")

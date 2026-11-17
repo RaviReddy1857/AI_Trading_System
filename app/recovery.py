@@ -15,6 +15,10 @@ market hours on a trading day:
 - Breeze login: an expired session reported by the broker (`feed.login_state`) -> red on the dashboard and the Data
   status page and one alert a day with the re-login steps. The session token is never read here or logged.
 After a restart the dashboard shows "restarted at hh:mm, data from hh:mm" (the first good tick after the start).
+
+Hours come from the session calendar (app/session.py): the engine heartbeat and the sleep check cover the market day
+to the last segment's close (15:40 from 3 Aug 2026, options); the feed check covers the index's continuous trading
+only (in the closing auction the index is indicative, AUCTION, which is expected and not a feed fault).
 """
 from __future__ import annotations
 
@@ -22,7 +26,8 @@ from datetime import datetime, timedelta, timezone
 
 from .engine import floor_bar, session_open_utc
 from .journal import ist_day
-from .quality import IST, MARKET_CLOSE
+from .quality import IST
+from .session import INDEX
 
 RELOGIN_STEPS = ("Breeze login expired. To resume: 1) open the ICICI Breeze login link and log in; 2) copy the new "
                  "API session value into BREEZE_SESSION_TOKEN in .env; 3) restart the app. No signal is issued until "
@@ -80,10 +85,12 @@ class Watchdog:
         if not self.market_open(now):
             self.stale_since = None
             return raised
-        # ---- feed ----
+        # ---- feed (the index's continuous trading only: in the closing auction it is indicative, not stale) ----
         idx = self.s.regime.index_symbol
         q = self.hub.quote(idx, now)
-        if q["status"] != "LIVE":
+        if not self.cal.is_open(now, INDEX, continuous=True):
+            self.stale_since = None
+        elif q["status"] != "LIVE":
             since = q["at"] or max(session_open_utc(ist_day(now)), self.started or now)
             if self.stale_since is None:
                 self.stale_since = since
@@ -105,7 +112,7 @@ class Watchdog:
             self.stale_since = None
         # ---- engine ----
         b = floor_bar(now)
-        close_t = datetime.combine(ist_day(now), MARKET_CLOSE, IST).astimezone(timezone.utc)
+        close_t = self.cal.last_close_utc(ist_day(now))
         last = self.engine.last_bar if self.engine is not None else None
         if (session_open_utc(ist_day(now)) < b <= close_t and (last is None or last < b)
                 and (now - b).total_seconds() >= s.alerts.heartbeat_bar_gap_seconds):
@@ -121,7 +128,7 @@ class Watchdog:
         while d <= ist_day(b):
             if self.cal.is_trading_day(d):
                 o = session_open_utc(d)
-                c = datetime.combine(d, MARKET_CLOSE, IST).astimezone(timezone.utc)
+                c = self.cal.last_close_utc(d)
                 if a < c and b > o:
                     return True
             d += timedelta(days=1)

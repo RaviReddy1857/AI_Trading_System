@@ -26,7 +26,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from .calendar import MarketCalendar
 from .config import Instrument, Settings
 from .models import Bar, utcnow
-from .quality import IST, MARKET_CLOSE, MARKET_OPEN
+from .quality import IST, MARKET_OPEN
+from .session import calendar as session_calendar
+
+# Stored 5-minute bars: those starting 09:15 to 15:25 IST. From 3 Aug 2026 an F&O stock's bars from 15:15 and the
+# index's are closing-auction bars (auction indications / indicative values, not trades): kept in storage, never
+# used as a trade bar (app/session.py `Hours.bar_in_continuous`; backtests and the after-close fallback check it).
+HISTORY_5M_END = time(15, 30)
 from .store import Store
 
 log = logging.getLogger("history")
@@ -102,10 +108,11 @@ def parse_rows(rows: list[dict], symbol: str, kind: str, interval: str) -> tuple
 
 
 def in_session(start_utc: datetime) -> bool:
-    """A 5-minute bar belongs to the normal session if it starts 09:15 to 15:25 IST.
-    Breeze also returns pre-open (09:00-09:10) and post-close (15:30-15:35) bars; they are dropped."""
+    """A 5-minute bar is stored if it starts 09:15 to 15:25 IST (`HISTORY_5M_END`). Breeze also returns pre-open
+    (09:00-09:10) and post-close (15:30-15:35) bars; they are dropped. From 3 Aug 2026 the 15:15-15:25 bars of F&O
+    stocks and the index are inside the closing auction: stored, but not trade bars (module note above)."""
     t = start_utc.astimezone(IST).time()
-    return MARKET_OPEN <= t < MARKET_CLOSE
+    return MARKET_OPEN <= t < HISTORY_5M_END
 
 
 def is_complete(bar: Bar, interval: str, now_utc: datetime) -> bool:
@@ -113,7 +120,8 @@ def is_complete(bar: Bar, interval: str, now_utc: datetime) -> bool:
         return bar.start + FIVE_MIN <= now_utc
     now_ist = now_utc.astimezone(IST)
     d = bar_date(bar)
-    return d < now_ist.date() or (d == now_ist.date() and now_ist.time() >= MARKET_CLOSE)
+    # the daily bar is final once every segment has closed (from 3 Aug 2026 the official close is set at 15:35)
+    return d < now_ist.date() or (d == now_ist.date() and now_ist.time() >= session_calendar().latest_close(d))
 
 
 # ---------------- sources ----------------
@@ -275,7 +283,7 @@ class HistoryLoader:
         while the market is open (a newer bar is always forming then)."""
         now_ist = now.astimezone(IST)
         today = now_ist.date()
-        if self.calendar.is_trading_day(today) and now_ist.time() >= MARKET_CLOSE:
+        if self.calendar.is_trading_day(today) and now_ist.time() >= session_calendar().latest_close(today):
             session = today
         else:
             session = self.calendar.previous_trading_day(today)
@@ -283,7 +291,7 @@ class HistoryLoader:
             return daily_start(session)
         if self.calendar.is_open(now):
             return None
-        return datetime.combine(session, MARKET_CLOSE, IST).astimezone(timezone.utc) - FIVE_MIN
+        return datetime.combine(session, HISTORY_5M_END, IST).astimezone(timezone.utc) - FIVE_MIN
 
     def is_up_to_date(self, inst: Instrument, interval: str, now: datetime) -> bool:
         """True when the store already holds the newest complete bar, so no request is needed."""

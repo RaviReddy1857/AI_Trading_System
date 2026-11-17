@@ -30,6 +30,7 @@ from ..indicators import after_last_break, gap_breaks
 from ..manual_data import Event
 from ..models import utcnow
 from ..quality import IST
+from ..session import CASH_FNO, close_utc
 from ..store import Store
 from .analytics import OptionDesk, atm_iv_pct
 from .base import ChainQuotes, ExpiryInfo, OptionContext
@@ -93,7 +94,7 @@ def stock_context(settings: Settings, store: Store, source: str, book: Instrumen
     if not bars or bar_date(bars[-1]) != session:
         return None, f"DATA_STALE: no daily bar for {session:%d-%b-%Y} (run python -m app.history)"
     spot = bars[-1].close
-    asof = datetime.combine(session, time(15, 30), IST).astimezone(timezone.utc)
+    asof = close_utc(CASH_FNO, session)     # the stock's official close (15:35 from 3 Aug 2026: closing auction)
     rate, div = o.risk_free_rate_pct / 100.0, (cfg.dividend_yield_pct if cfg else 0.0) / 100.0
     chains, expiries, atm_now = {}, [], None
     chain_as_of = {}

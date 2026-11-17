@@ -48,7 +48,9 @@ def test_the_17_nov_window_counts_3_ticks_not_25_rows_and_the_switch_stays_off()
     assert st.quality_event_count_since(NOW - timedelta(minutes=5)) == 25
     svc = _svc(st)
     assert svc.market_state("RELIANCE", NOW).quarantined_recent == 3
-    assert svc.status(NOW)["kill_switch"]["on"] is False
+    # 15:20:01 is inside the closing auction since 3 Aug 2026: the switch is on for that alone, not for a spike
+    assert svc.status(NOW)["kill_switch"]["reasons"] == [
+        "outside market hours (continuous trading; the closing auction is outside them)"]
 
 
 def test_crossed_quotes_in_live_ticks_still_trip_it():
@@ -56,16 +58,18 @@ def test_crossed_quotes_in_live_ticks_still_trip_it():
     for k in range(20):
         st.save_quality_event(NOW - timedelta(seconds=30 + k), "NTPC", "CROSSED_QUOTE", 321.05, 330.4, 311.2, "breeze")
     ks = _svc(st).status(NOW)["kill_switch"]
-    assert ks["on"] is True and "20 ticks quarantined" in ks["reasons"][0]
+    assert ks["on"] is True and any("20 ticks quarantined" in r for r in ks["reasons"])
 
 
 def test_the_hub_quarantines_a_crossed_tick_as_a_counted_tick_event():
     from app.hub import MarketHub
     st = Store(":memory:")
     hub = MarketHub(sim_settings(), st, "breeze", MarketCalendar())
-    hub.on_tick(Tick("NTPC", 321.05, bid=330.4, ask=311.2, received_at=NOW - timedelta(seconds=5), source="breeze"))
+    # in continuous trading (15:10): a crossed quote is a quarantined trade quote; at 15:20 it would be an auction
+    # indication (tests/test_closing_auction.py)
+    hub.on_tick(Tick("NTPC", 321.05, bid=330.4, ask=311.2, received_at=NOW - timedelta(minutes=10), source="breeze"))
     assert st.recent_quality_events(5)[0]["reason"] == "CROSSED_QUOTE"
-    assert st.quality_event_count_since(NOW - timedelta(minutes=5), TICK_REASONS) == 1
+    assert st.quality_event_count_since(NOW - timedelta(minutes=15), TICK_REASONS) == 1
 
 
 def test_the_1520_capture_with_thousands_of_unpriced_strikes_does_not_trip_it(tmp_path):
@@ -80,7 +84,7 @@ def test_the_1520_capture_with_thousands_of_unpriced_strikes_does_not_trip_it(tm
     assert st.recent_quality_events(10) == []                                  # no quality event for them
     unpriced = [r for r in st.latest_option_chain("sim", "RELIANCE", EXP) if r["bid"] is None]
     assert len(unpriced) == 2 * 301                                            # stored as unpriced (both sides)
-    assert _svc(st).status(NOW + timedelta(seconds=30))["kill_switch"]["on"] is False
+    assert not any("quarantined" in r for r in _svc(st).status(NOW + timedelta(seconds=30))["kill_switch"]["reasons"])
 
 
 def test_a_crossed_chain_strike_is_stored_unpriced_logged_but_never_counted(tmp_path):

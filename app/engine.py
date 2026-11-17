@@ -11,9 +11,18 @@ Signals are deterministic: the id comes from the strategy, version, symbol, dire
 ignores a second copy, so a restart or a repeated bar never issues a signal twice. A signal equal to one still
 valid (same strategy, symbol, direction and legs) is not issued again. Expired signals are never revived: a stored
 signal is shown past its valid-until as expired, and the risk engine refuses it (SIGNAL_EXPIRED).
+
+Session hours come from the dated session calendar (app/session.py). Bars are processed until the last segment closes
+(15:30 before 3 Aug 2026; 15:40 after, for option exits). New signals are made only on bars that close inside the
+index's continuous trading (never in the closing auction); a cash intraday signal only on a bar closing before the
+intraday square-off (`session.cash_intraday_cutoff`, 15:00) and inside its stock's continuous trading. After the
+last close the session is closed (closing equity): from 3 Aug 2026 a held position in an F&O stock waits for Breeze's
+daily bar, the official closing-auction price, until `stock_option_selling.after_close.bars_deadline`; without it
+the close is written from the last continuous trade and labelled APPROXIMATE.
 """
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 from dataclasses import replace
@@ -26,7 +35,8 @@ from .journal import (CASH_INDEX, POOLS, STOCK_OPTIONS, close_equity_day, ist_da
 from .models import Bar, Signal, utcnow
 from .paper import FIVE, bar_of
 from .positions import ExitInputs, evaluate_positions
-from .quality import IST, MARKET_CLOSE, MARKET_OPEN
+from .quality import IST, MARKET_OPEN
+from .session import INDEX, at_utc, calendar as session_calendar, segment_for
 from .scoring import ScoreInputs, rank, score
 from .strategies.base import MarketContext
 
@@ -138,15 +148,55 @@ class SignalEngine:
         if self.cal.is_open(now):
             self.paper.fill_pending(now, self.signals)
         b = floor_bar(now)
-        open_t, close_t = session_open_utc(day), datetime.combine(day, MARKET_CLOSE, IST).astimezone(timezone.utc)
+        open_t, close_t = session_open_utc(day), self.cal.last_close_utc(day)
         if open_t < b <= close_t and (self.last_bar is None or b > self.last_bar):
             return self.on_bar(b, now)
         if now > close_t + timedelta(minutes=1) and self.j.get_state(f"equity_closed:{day}") is None:
-            flows = tuple(self.store.capital_flows())
-            for pool in POOLS:
-                close_equity_day(self.j, self.s, pool, now, flows)
-            self.j.set_state(f"equity_closed:{day}", now.isoformat(), now)
+            self.close_session(day, now)
         return None
+
+    def close_session(self, day: date, now: datetime) -> dict | None:
+        """Closing equity of the day. A held cash position in a stock whose segment had a closing auction (F&O stocks
+        from 3 Aug 2026) is marked at Breeze's daily bar close (the official closing-auction price) once it is
+        stored; until then this waits (None), up to `after_close.bars_deadline`, then closes on the last marks
+        (the last continuous trade) labelled APPROXIMATE."""
+        from .config import hhmm
+        from .history import daily_start
+        from .journal import open_pnl
+        held = [p for pool in POOLS for p in self.j.held_positions(pool)
+                if not p.is_option and self.cal.hours(segment_for(self.s, p.symbol), day).has_auction]
+        closes, missing = {}, []
+        for sym in sorted({p.symbol for p in held}):
+            got = self.store.history_bars("bars_1d", sym, self.source, since=daily_start(day), limit=1)
+            if got and got[0].start == daily_start(day):
+                closes[sym] = got[0].close
+            else:
+                missing.append(sym)
+        deadline = at_utc(day, hhmm(self.s.stock_option_selling.after_close.bars_deadline))
+        if missing and now < deadline:
+            key = f"equity_close_waiting:{day}"
+            was = json.loads(self.j.get_state(key) or "{}")
+            if was.get("waiting_for") != missing:              # written once per change, not on every poll
+                self.j.set_state(key, json.dumps({"waiting_for": missing, "since_utc": now.isoformat(),
+                                                  "until_utc": deadline.isoformat()}), now)
+            return None
+        for p in held:
+            if p.symbol in closes:
+                v = open_pnl(p, [closes[p.symbol]], self.costs)
+                if v is not None:
+                    self.j.save_mark(p.position_id, now, float(v) / p.quantity)
+        if missing:
+            note = (f"close APPROXIMATE: no Breeze daily bar (official closing-auction close) by "
+                    f"{self.s.stock_option_selling.after_close.bars_deadline} for {', '.join(missing)}: their last "
+                    f"continuous trade was used")
+        elif closes:
+            note = f"close: official closing-auction close (Breeze daily bar) for {', '.join(sorted(closes))}"
+        else:
+            note = "close"
+        flows = tuple(self.store.capital_flows())
+        out = {pool: close_equity_day(self.j, self.s, pool, now, flows, note=note) for pool in POOLS}
+        self.j.set_state(f"equity_closed:{day}", json.dumps({"at_utc": now.isoformat(), "note": note}), now)
+        return out
 
     def on_bar(self, b: datetime, now: datetime | None = None) -> dict:
         """Everything that happens when the 5-minute bar ending at `b` has closed."""
@@ -166,29 +216,37 @@ class SignalEngine:
                                                     limit=300) for i in self.s.watchlist}
         candidates: list[tuple[Signal, frozenset | None]] = []
         first_bar = b == session_open_utc(day) + FIVE or (self.last_bar is None or ist_day(self.last_bar) != day)
-        for st in self.cash:
+        # new signals only on a bar that closes inside the index's continuous trading (never in the closing auction
+        # or after it); exits and paper trades below run on every bar to the last close (options to 15:40)
+        new_signals = b < self.cal.hours(INDEX, day).continuous_end_utc
+        cutoff = at_utc(day, session_calendar().intraday_cutoff)   # cash intraday: no entry from the square-off
+        for st in (self.cash if new_signals and b < cutoff else ()):
             for i in self.s.watchlist:
                 if i.kind != "stock" or not five[i.symbol] or five[i.symbol][-1].start + FIVE != b:
                     continue
+                if not b < self.cal.hours(segment_for(self.s, i.symbol), day).continuous_end_utc:
+                    continue                      # the stock's own continuous trading has ended
                 ctx = MarketContext(i.symbol, i.kind, b, regime or "UNKNOWN", intraday=tuple(five[i.symbol]),
                                     daily=tuple(daily[i.symbol]), status=self._status(i.symbol, now),
                                     prior_sessions=self._prior(i.symbol, day, st.prior_sessions_needed),
                                     index_daily=tuple(daily.get(self.s.regime.index_symbol, ())))
                 candidates += [(sig, st.allowed_regimes) for sig in self._safe(st, ctx)]
-        if first_bar:
+        if first_bar and new_signals:
             prev = self.cal.previous_trading_day(day)
-            asof = datetime.combine(prev, MARKET_CLOSE, IST).astimezone(timezone.utc)
             for st in self.swing:
                 for i in self.s.watchlist:
                     d = [x for x in daily[i.symbol] if x.start.astimezone(IST).date() <= prev]
                     if i.kind != "stock" or not d or d[-1].start.astimezone(IST).date() != prev:
                         continue
+                    # as of the stock's official close of the previous session (15:35 from 3 Aug 2026)
+                    asof = self.cal.hours(segment_for(self.s, i.symbol), prev).close_utc
                     ctx = MarketContext(i.symbol, i.kind, asof, regime or "UNKNOWN", daily=tuple(d),
                                         status=self._status(i.symbol, now),
                                         index_daily=tuple(x for x in daily.get(self.s.regime.index_symbol, ())
                                                           if x.start.astimezone(IST).date() <= prev))
                     candidates += [(sig, st.allowed_regimes) for sig in self._safe(st, ctx)]
-        candidates += self._option_signals(now, [s for s, _ in candidates])
+        if new_signals:
+            candidates += self._option_signals(now, [s for s, _ in candidates])
         stored, approved = [], []
         for sig, allowed in candidates:
             out = self._handle(sig, allowed, now, regime, bias, events_week, five, daily)

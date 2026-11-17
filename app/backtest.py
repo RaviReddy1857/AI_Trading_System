@@ -14,6 +14,12 @@ Rules (CLAUDE.md, architecture.md section 14):
   required. Other sessions are not traded (counted in data_exclusions). A trade whose holding period
   crosses a missing bar, or whose session ends before the exit bar, is dropped, never closed at a
   made-up EOD price (a guard: with complete sessions it cannot happen).
+- Closing auction (from 3 Aug 2026, app/session.py): a 5-minute bar of an F&O stock that is not inside its
+  continuous trading (15:15-15:35 is the closing auction) is never an entry or exit bar: the exit time of a session is
+  the earlier of `intraday_exit_time` and the end of the stock's continuous trading, and an entry bar must start before
+  it. With the defaults (exit at the close of the bar ending 15:15, last entry 14:45) no trade changes; sessions
+  before 3 Aug 2026 are untouched. A swing trade's daily close is the stock's official close (15:30 before 3 Aug 2026,
+  the closing-auction close at 15:35 after), as stored by Breeze.
 - Daily-bar (swing) trades: a session the index traded but the stock has no daily bar for is a
   missing bar. A trade whose holding period crosses one is dropped (DROPPED_MISSING_DAILY_BAR_DURING_TRADE,
   under data_exclusions): its stop or target may have been hit that day, so the outcome is unknown.
@@ -57,6 +63,8 @@ from .store import Store
 from .strategies import MarketContext, Strategy, build_strategies
 
 log = logging.getLogger("backtest")
+from .session import INDEX, hours as session_hours, segment_for
+
 FIVE_MIN = timedelta(minutes=5)
 SESSION_OPEN = time(9, 15)
 # Counter keys that describe data removed by the completeness rules, not skipped signals. They are
@@ -271,10 +279,17 @@ class Engine:
     def run_intraday(self, strategy: Strategy, sym: str, kind: str, sessions: list[date],
                      skipped: Counter) -> list[Trade]:
         seg = self._segment(strategy)
-        exit_at, last_entry = hhmm(self.cfg.intraday_exit_time), hhmm(self.cfg.last_entry_time)
+        exit_cfg, last_entry_cfg = hhmm(self.cfg.intraday_exit_time), hhmm(self.cfg.last_entry_time)
+        market_seg = segment_for(self.s, sym) if kind == "stock" else INDEX
         trades: list[Trade] = []
         data = self.five(sym)
         for d in sessions:
+            # never an entry or exit on a bar outside the stock's continuous trading (the closing auction from
+            # 3 Aug 2026): exit no later than its end, and the entry bar starts before it
+            cont_end = session_hours(market_seg, d).continuous_end
+            exit_at = min(exit_cfg, cont_end)
+            last_entry = min(last_entry_cfg,
+                             (datetime.combine(d, cont_end) - FIVE_MIN).time())
             bars = data.get(d, [])
             if not bars:
                 skipped["SESSIONS_NO_BARS"] += 1
@@ -327,6 +342,7 @@ class Engine:
     def run_swing(self, strategy: Strategy, sym: str, kind: str, sessions: list[date],
                   skipped: Counter, max_hold: int) -> list[Trade]:
         seg = self._segment(strategy)
+        market_seg = segment_for(self.s, sym) if kind == "stock" else INDEX
         allowed = set(sessions)
         last_allowed = max(sessions) if sessions else None
         bars = self.daily(sym)
@@ -338,7 +354,7 @@ class Engine:
             d = bar_date(bar)
             if last_allowed is None or d > last_allowed:
                 break
-            close_t = datetime.combine(d, time(15, 30), IST).astimezone(timezone.utc)
+            close_t = session_hours(market_seg, d).close_utc    # the official close (closing auction from 3 Aug 2026)
             if i in brk:
                 start = i
                 if pos is not None:

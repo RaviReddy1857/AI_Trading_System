@@ -72,6 +72,9 @@ class Instrument(StrictModel):
     breeze_code: str = Field(min_length=1)
     kind: Literal["index", "stock"]
     sector: str | None = None        # stocks: the Industry column of the Nifty 50 file
+    # stocks: in NSE's F&O list (closing auction session from 3 Aug 2026, see `session`). Every Nifty 50 stock is;
+    # set false for a cash-only stock (it trades continuously to its own close). Ignored for an index.
+    fno: bool = True
 
 
 class Server(StrictModel):
@@ -249,6 +252,59 @@ CLOCK = Annotated[str, AfterValidator(_clock)]
 
 def hhmm(v: str) -> _dtime:
     return _dtime.fromisoformat(v)
+
+
+class SessionPeriod(StrictModel):
+    """NSE session times (IST) in force from `from_date` until the next period starts (app/session.py)."""
+    from_date: _date
+    open: CLOCK = "09:15"                    # continuous trading starts (every segment)
+    fno_continuous_end: CLOCK = "15:30"      # F&O stocks, cash segment: continuous trading ends ...
+    fno_close: CLOCK = "15:30"               # ... and the session closes (after a closing auction when later)
+    other_close: CLOCK = "15:30"             # non-F&O stocks: continuous to the close
+    index_continuous_end: CLOCK = "15:30"    # index values from trades end ...
+    index_close: CLOCK = "15:30"             # ... indicative values until this time
+    derivatives_close: CLOCK = "15:30"       # stock and index options
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "SessionPeriod":
+        o = hhmm(self.open)
+        for a, b in (("fno_continuous_end", "fno_close"), ("index_continuous_end", "index_close")):
+            if not o < hhmm(getattr(self, a)) <= hhmm(getattr(self, b)):
+                raise ValueError(f"session period {self.from_date}: need open < {a} <= {b}")
+        for a in ("other_close", "derivatives_close"):
+            if not o < hhmm(getattr(self, a)):
+                raise ValueError(f"session period {self.from_date}: {a} must be after open")
+        return self
+
+
+def _default_periods() -> list[SessionPeriod]:
+    return [SessionPeriod(from_date=_date(2000, 1, 1)),
+            SessionPeriod(from_date=_date(2026, 8, 3), fno_continuous_end="15:15", fno_close="15:35",
+                          other_close="15:30", index_continuous_end="15:15", index_close="15:35",
+                          derivatives_close="15:40")]
+
+
+class SessionCfg(StrictModel):
+    """The dated session calendar per segment (read by app/session.py; live code and backtests both use it), and
+    the broker's intraday square-off for cash intraday trades."""
+    periods: list[SessionPeriod] = Field(default_factory=_default_periods)
+    cash_intraday_cutoff: CLOCK = "15:00"          # cash intraday: no new entry from, and out by, this time
+    cash_intraday_cutoff_confirmed: bool = False   # ICICI's own square-off time is not confirmed
+    cash_intraday_cutoff_source: str = ""
+
+    @model_validator(mode="after")
+    def _valid(self) -> "SessionCfg":
+        if not self.periods:
+            raise ValueError("session.periods needs at least one period")
+        days = [p.from_date for p in self.periods]
+        if days != sorted(days) or len(set(days)) != len(days):
+            raise ValueError("session.periods must be in date order with different from_date values")
+        sq = hhmm(self.cash_intraday_cutoff)
+        for p in self.periods:
+            if not hhmm(p.open) < sq <= min(hhmm(p.fno_continuous_end), hhmm(p.other_close)):
+                raise ValueError(f"session.cash_intraday_cutoff {self.cash_intraday_cutoff} must be after the "
+                                 f"open and not after continuous trading ends ({p.from_date} period)")
+        return self
 
 
 class Rate(StrictModel):
@@ -846,18 +902,13 @@ class AfterCloseShortlist(StrictModel):
     chains at `chain_time`, while bids and asks are live; then, after the close, the bar history and the shortlist; in
     the end-of-day summary."""
     enabled: bool = True
-    chain_time: CLOCK = "15:20"                            # IST; in market hours, before the close (15:30)
-    start_time: CLOCK = "15:31"                            # IST; not before the close (15:30)
+    # IST; the capture runs from here and stops when F&O stocks' continuous trading ends (15:15 from 3 Aug 2026,
+    # `session`); chains not fetched by then are recorded as missed. Checked against `session` in Settings.
+    chain_time: CLOCK = "14:50"
+    start_time: CLOCK = "15:41"                            # IST; after every segment's close (15:40 from 3 Aug 2026)
     # today's bars not there yet (daily bar not published, 5-minute bars incomplete): try again this often until then
     bars_retry_minutes: int = Field(15, ge=5, le=120)
     bars_deadline: CLOCK = "17:30"                         # IST; after start_time
-
-    @field_validator("start_time")
-    @classmethod
-    def _after_close(cls, v: str) -> str:
-        if hhmm(v) < _dtime(15, 30):
-            raise ValueError("after_close.start_time must be at or after the close, 15:30")
-        return v
 
     @model_validator(mode="after")
     def _deadline_after_start(self) -> "AfterCloseShortlist":
@@ -865,13 +916,6 @@ class AfterCloseShortlist(StrictModel):
             raise ValueError("after_close.bars_deadline must be after start_time")
         return self
 
-    @field_validator("chain_time")
-    @classmethod
-    def _in_market_hours(cls, v: str) -> str:
-        if not _dtime(9, 15) <= hhmm(v) < _dtime(15, 30):
-            raise ValueError("after_close.chain_time must be in market hours (09:15 to before 15:30): bids and asks "
-                             "are live only then")
-        return v
 
 
 class StockOptionSelling(StrictModel):
@@ -1082,6 +1126,28 @@ class Settings(StrictModel):
     execution: Execution = Execution()
     engine: EngineCfg = EngineCfg()
     paper: PaperBook = PaperBook()
+    session: SessionCfg = SessionCfg()       # dated session times per segment (closing auction from 3 Aug 2026)
+
+    @model_validator(mode="after")
+    def times_inside_the_session(self) -> "Settings":
+        """Times that depend on the session: checked against every period (the newest one is today's)."""
+        ac = self.stock_option_selling.after_close
+        for p in self.session.periods:
+            latest = max(hhmm(p.fno_close), hhmm(p.other_close), hhmm(p.index_close), hhmm(p.derivatives_close))
+            if not hhmm(p.open) <= hhmm(ac.chain_time) < hhmm(p.fno_continuous_end):
+                raise ValueError(f"after_close.chain_time {ac.chain_time} must be in continuous trading, before "
+                                 f"{p.fno_continuous_end} (F&O stocks, {p.from_date} period): bids and asks are live "
+                                 f"only then")
+            if hhmm(ac.start_time) <= latest:
+                raise ValueError(f"after_close.start_time {ac.start_time} must be after every segment's close "
+                                 f"({latest:%H:%M}, {p.from_date} period)")
+            if hhmm(self.alerts.end_of_day_time) <= latest:
+                raise ValueError(f"alerts.end_of_day_time {self.alerts.end_of_day_time} must be after every "
+                                 f"segment's close ({latest:%H:%M}, {p.from_date} period)")
+            if hhmm(self.backtest.intraday_exit_time) > hhmm(p.fno_continuous_end):
+                raise ValueError(f"backtest.intraday_exit_time {self.backtest.intraday_exit_time} is after continuous "
+                                 f"trading of F&O stocks ends ({p.fno_continuous_end}, {p.from_date} period)")
+        return self
 
     @model_validator(mode="after")
     def regime_symbols_in_watchlist(self) -> "Settings":
@@ -1169,4 +1235,7 @@ def load_settings(path: str | Path | None = None, local_path: str | Path | None 
         if not isinstance(over, dict):
             raise ValueError(f"{local.name} must hold config.yaml keys (a mapping), not {type(over).__name__}")
         raw = _merge(raw, over)
-    return Settings.model_validate(raw)
+    settings = Settings.model_validate(raw)
+    from .session import configure            # the session calendar every module reads (live and backtests)
+    configure(settings.session)
+    return settings

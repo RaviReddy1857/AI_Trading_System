@@ -32,7 +32,8 @@ feed:
 # Check any code with:  python scripts/lookup_code.py RELIANCE
 # Index codes verified against ICICI on 2026-11-11. The stock lines between the nifty50
 # markers are rewritten by:  python scripts/update_watchlist.py  (from data/nifty50.csv)
-# Market breadth in the regime uses every stock below.
+# Market breadth in the regime uses every stock below. Every stock is taken to be an F&O stock (closing auction from
+# 3 Aug 2026, `session`) unless its line says fno: false.
 watchlist:
   - {symbol: NIFTY,     breeze_code: NIFTY,  kind: index, sector: "Index"}   # sector: phase 5 sector limit
   - {symbol: BANKNIFTY, breeze_code: CNXBAN, kind: index, sector: "Index"}
@@ -89,6 +90,23 @@ watchlist:
   - {symbol: "TRENT", breeze_code: "TRENT", kind: stock, sector: "Consumer Services"}
   - {symbol: "ULTRACEMCO", breeze_code: "ULTCEM", kind: stock, sector: "Construction Materials"}
   # <<< nifty50
+
+# ---- Session calendar (2026-11-17): dated hours per segment, read by live code and backtests (app/session.py) ----
+# From 3 Aug 2026 (NSE/BSE circulars NSE/CMTR/72394, 73362, 74466 and NSE/FAOP/74467, as given by you; not fetched
+# here): F&O stocks trade continuously until 15:15, then a Closing Auction Session (CAS) 15:15-15:35 sets their
+# official close; index values are indicative during CAS; options trade until 15:40; non-F&O stocks until 15:30.
+# Prices during CAS are auction indications, never trades. Pre-open was realigned from 7 Sep 2026: not modelled
+# (only continuous trading from 09:15 is used). Add a period when NSE changes the hours again.
+session:
+  periods:
+    - {from_date: 2000-01-01, open: "09:15", fno_continuous_end: "15:30", fno_close: "15:30", other_close: "15:30",
+       index_continuous_end: "15:30", index_close: "15:30", derivatives_close: "15:30"}
+    - {from_date: 2026-08-03, open: "09:15", fno_continuous_end: "15:15", fno_close: "15:35", other_close: "15:30",
+       index_continuous_end: "15:15", index_close: "15:35", derivatives_close: "15:40"}
+  # Cash intraday trades (live signals, paper trades, exit calls): no new entry from, and out by, this time.
+  cash_intraday_cutoff: "15:00"
+  cash_intraday_cutoff_confirmed: false   # UNCONFIRMED: ICICI Direct's own intraday square-off time after CAS
+  cash_intraday_cutoff_source: "not confirmed with ICICI Direct; 15:00 chosen to be out before the 15:15 end of continuous trading"
 
 # ---- Market-regime rules (phase 2). Result: TRENDING_UP / TRENDING_DOWN / RANGE /
 # VOLATILE / EVENT, or UNKNOWN when any input is missing or stale. ----
@@ -368,8 +386,10 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
   enabled: true
   after_close:                  # the app builds the shortlist every trading day (no manual command): Breeze calls
     enabled: true               # counted in options.backtest.daily_request_budget; result in the 15:45 summary
-    chain_time: "15:20"         # the priority stocks' chains, while bids and asks are live (before the close)
-    start_time: "15:31"         # after the close: the bar history, then the shortlist (for the chains' session)
+    chain_time: "14:50"         # the priority stocks' chains from here, while bids and asks are live; the capture
+                                # stops when F&O stocks' continuous trading ends (15:15, `session`): the rest is missed.
+                                # 120 calls at Breeze's real speed (7-9 replies a minute, 17-Nov) take 13-17 minutes
+    start_time: "15:41"         # after every segment's close (options 15:40): the bar history, then the shortlist
     bars_retry_minutes: 15      # today's bars not there yet: try again this often (only the symbols without them) ...
     bars_deadline: "17:30"      # ... until this time; the summary says where the session's close came from
   min_iv_rank: 50               # sell only when the stock's IV rank is at least this

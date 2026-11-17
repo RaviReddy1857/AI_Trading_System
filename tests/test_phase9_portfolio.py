@@ -198,7 +198,7 @@ def test_ACCEPTANCE_a_signal_is_actionable_only_with_live_fresh_known_inputs():
     assert codes(actionable_check(cfg, sig, ctx, now, {exp: now - timedelta(minutes=20)}, [], sectors, none_corr, history_verified=True)[1]) == ["DATA_STALE"]
     assert codes(actionable_check(cfg, sig, ctx, now, {}, [], sectors, none_corr, history_verified=True)[1]) == ["DATA_STALE"]
     after = now + timedelta(hours=6)                                  # 17:30 IST
-    assert "outside market hours" in actionable_check(cfg, sig, ctx, after, {exp: after}, [], sectors, none_corr, history_verified=True)[1][0]
+    assert "outside continuous trading" in actionable_check(cfg, sig, ctx, after, {exp: after}, [], sectors, none_corr, history_verified=True)[1][0]
     from dataclasses import replace
     assert "STALE" in actionable_check(cfg, sig, replace(ctx, status="STALE"), now, fresh, [], sectors, none_corr, history_verified=True)[1][0]
     from app.options.base import ChainQuotes, OptionQuote

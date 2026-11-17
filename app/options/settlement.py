@@ -44,7 +44,6 @@ LEVELS = (None, NOTICE, WARNING, URGENT)
 NOT_CONFIRMED = "ICICI rule not confirmed"
 MARGIN_UNKNOWN = "margin unknown"
 PRICE_UNKNOWN = "price unknown"
-MARKET_CLOSE = time(15, 30)
 
 
 @dataclass(frozen=True)
@@ -190,7 +189,9 @@ def cutoffs(pos: HeldPosition, sos, calendar=None) -> list[dict]:
     dc = day_count(pos.expiry, calendar)
     b = sos.settlement.broker
     forced = sos.forced_exit_trading_days_before_expiry
-    out = [{"at": _at(dc.session(forced), MARKET_CLOSE), "broker": False,
+    from ..session import DERIVATIVES, hours as session_hours
+    fday = dc.session(forced)       # the options' close that day (15:30 before 3 Aug 2026, 15:40 after)
+    out = [{"at": _at(fday, session_hours(DERIVATIVES, fday).close), "broker": False,
             "confirmed": True, "rule": "forced exit",
             "what": f"forced exit: no position inside the last {forced} trading days (the close of E-{forced})"}]
     dm = b.delivery_margin

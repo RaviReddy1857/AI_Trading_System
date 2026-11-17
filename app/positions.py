@@ -11,7 +11,8 @@ Kinds (`exit_calls.kind`):
 - BREAKEVEN (gain of `exits.breakeven_after_r` x the initial risk R), TRAIL (from `exits.trail_after_r`, the stop
   `exits.trail_distance_r` x R behind the best price seen), PARTIAL (at `exits.partial_at_r`, book
   `exits.partial_pct` of two or more units, once).
-- TIME: intraday at `backtest.intraday_exit_time`; swing after the strategy's `max_hold_days` sessions; long
+- TIME: intraday at the earlier of `backtest.intraday_exit_time` and `session.cash_intraday_cutoff` (15:00;
+  ICICI's own square-off time is not confirmed, and the call says so); swing after the strategy's `max_hold_days` sessions; long
   options at the strategy's exit before expiry or its holding limit; index spreads `exit_days_before_expiry`;
   stock option spreads by the phase 9 rules (time exit, forced exit before expiry week).
 - ENTRY_INVALIDATED: the underlying closes beyond the level the entry needed (`invalidation`, with
@@ -106,11 +107,14 @@ def own_price(pos: Position, prices: list[float] | None) -> float | None:
 
 def time_exit_at(pos: Position, settings, calendar) -> tuple[datetime | None, str]:
     """When the position's time exit is due (UTC) and why; (None, why) when no time rule applies."""
+    from .session import DERIVATIVES, calendar as session_calendar, segment_for
     exit_t = hhmm(settings.backtest.intraday_exit_time)
     entry_day = ist_day(pos.entry_utc)
     if pos.trade_type == "INTRADAY_STOCKS" or pos.horizon == "INTRADAY":
-        return datetime.combine(entry_day, exit_t, IST).astimezone(timezone.utc), \
-            f"intraday: out by {settings.backtest.intraday_exit_time} IST"
+        sc = session_calendar()
+        t = min(exit_t, sc.intraday_cutoff)
+        note = "" if sc.cutoff_confirmed else " (ICICI's own intraday square-off time after the closing auction is not confirmed)"
+        return datetime.combine(entry_day, t, IST).astimezone(timezone.utc), f"intraday: out by {t:%H:%M} IST{note}"
     strat = getattr(settings.strategies, pos.strategy_id, None) if pos.strategy_id else None
     hold = getattr(strat, "max_hold_days", None)
     sessions_end = None
@@ -118,7 +122,10 @@ def time_exit_at(pos: Position, settings, calendar) -> tuple[datetime | None, st
         d = entry_day
         for _ in range(hold):
             d = calendar.next_trading_day(d)
-        sessions_end = (datetime.combine(d, time(15, 25), IST).astimezone(timezone.utc),
+        # the last 5-minute bar of continuous trading that day: the share's own segment (15:10 bar for an F&O stock
+        # from 3 Aug 2026), the options' for an option position (15:35 bar); 15:25 for both before 3 Aug 2026
+        seg = DERIVATIVES if pos.is_option else segment_for(settings, pos.symbol)
+        sessions_end = (session_calendar().hours(seg, d).continuous_end_utc - timedelta(minutes=5),
                         f"held {hold} sessions (max_hold_days of {pos.strategy_id})")
     expiry_rule = None
     if pos.is_option:

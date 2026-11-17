@@ -106,8 +106,8 @@ def test_ACCEPTANCE_the_alert_names_the_leg_the_numbers_the_deadline_and_the_act
     leg = a["legs"][0]
     assert (leg["leg"], leg["strike"], leg["spot"], leg["distance_pct"], leg["itm_inr"]) == ("sold 1000 PE", 1000.0, 980.0, 2.04, 10000.0)
     # the deadline: the close of the forced-exit day (E-5), stricter than every ICICI time
-    assert a["deadline"] == datetime.combine(day(5), time(15, 30), IST).isoformat()
-    assert a["action"] == f"Exit the spread by {day(5):%d-%b-%Y} 15:30" and a["overdue"] is None
+    assert a["deadline"] == datetime.combine(day(5), time(15, 40), IST).isoformat()
+    assert a["action"] == f"Exit the spread by {day(5):%d-%b-%Y} 15:40" and a["overdue"] is None
     assert "never closes or changes" in a["note"] and a["estimate"]["position"]["legs"]
     # a far out-of-the-money leg: no alert at all before the deadline; a closed position: none ever
     assert settlement_alert(put_spread(), 1100.0, at(7), SOS, CAP) is None
@@ -215,7 +215,7 @@ def test_ACCEPTANCE_expiry_week_margin_follows_the_schedule_and_an_empty_rule_is
 def test_deadline_is_the_stricter_of_the_forced_exit_and_icicis_times():
     cs = cutoffs(put_spread(), SOS)
     assert [c["rule"] for c in cs] == ["forced exit", "delivery margin", "auto close"]
-    assert [c["at"] for c in cs] == [datetime.combine(day(5), time(15, 30), IST), datetime.combine(day(4), time(15, 15), IST),
+    assert [c["at"] for c in cs] == [datetime.combine(day(5), time(15, 40), IST), datetime.combine(day(4), time(15, 15), IST),
                                      datetime.combine(EXP, time(12, 0), IST)]            # a spread: the bought leg may go at 12:00
     assert exit_deadline(put_spread(), SOS)["rule"] == "forced exit"
     # a short-only position: ICICI's earliest stated time is 13:30; a sold call adds the 11:00 shares deadline
@@ -230,8 +230,8 @@ def test_deadline_is_the_stricter_of_the_forced_exit_and_icicis_times():
 
 def test_ACCEPTANCE_a_position_not_closed_by_its_deadline_gets_a_red_alert_until_it_is_marked_closed():
     pos = put_spread()
-    assert overdue(pos, at(5, 15, 29), False, SOS) is None                # one minute before the deadline
-    red = [overdue(pos, when, False, SOS) for when in (at(5, 15, 30), at(4, 9, 15), at(4, 9, 20), at(1), at(0, 14, 0))]
+    assert overdue(pos, at(5, 15, 39), False, SOS) is None                # one minute before the deadline
+    red = [overdue(pos, when, False, SOS) for when in (at(5, 15, 40), at(4, 9, 15), at(4, 9, 20), at(1), at(0, 14, 0))]
     assert all(r and r["kind"] == "EXIT_OVERDUE" and r["colour"] == "red" and r["repeat"] is True for r in red)
     assert "NOT marked closed" in red[0]["text"] and "mark it closed in the journal" in red[0]["text"]
     assert overdue(pos, at(1), True, SOS) is None                         # marked closed: it stops
@@ -279,7 +279,9 @@ def test_ACCEPTANCE_no_code_path_closes_or_changes_a_position():
     imported = {(n.module or "") if isinstance(n, ast.ImportFrom) else a.name
                 for n in ast.walk(ast.parse(src)) if isinstance(n, (ast.Import, ast.ImportFrom))
                 for a in (n.names if isinstance(n, ast.Import) else [n])}
-    assert imported <= {"__future__", "collections.abc", "dataclasses", "datetime", "config", "quality", "stock_selling"}
+    # session: the dated session calendar (config and time only) - the deadline is the options' close (15:40)
+    assert imported <= {"__future__", "collections.abc", "dataclasses", "datetime", "config", "quality", "session",
+                        "stock_selling"}
     calls = {n.func.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert not calls & {"execute", "commit", "save", "write", "write_text", "open", "post", "send"}
 
@@ -331,10 +333,10 @@ def test_ACCEPTANCE_trading_days_use_the_holiday_calendar_not_weekdays():
     assert sm.settlement_alert(pos, 980.0, on(date(2026, 12, 16)), SOS, CAP, calendar=XMAS) is None
     # the deadline and ICICI's margin start move with the holiday: forced exit at the close of the 21st, margin on the 22nd
     cs = {c["rule"]: c["at"] for c in sm.cutoffs(pos, SOS, XMAS)}
-    assert cs["forced exit"] == on(date(2026, 12, 21), 15, 30) and cs["delivery margin"] == on(date(2026, 12, 22), 15, 15)
-    assert a["action"] == "Exit the spread by 21-Dec-2026 15:30"
-    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 30), False, SOS, XMAS)["colour"] == "red"
-    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 29), False, SOS, XMAS) is None
+    assert cs["forced exit"] == on(date(2026, 12, 21), 15, 40) and cs["delivery margin"] == on(date(2026, 12, 22), 15, 15)
+    assert a["action"] == "Exit the spread by 21-Dec-2026 15:40"
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 40), False, SOS, XMAS)["colour"] == "red"
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 39), False, SOS, XMAS) is None
     # the expiry-week margin follows the calendar's day count: 22 December is E-4 (10%), 24 December E-2 (45%)
     m = lambda d: sm.settlement_alert(pos, 990.0, on(d), SOS, CAP, calendar=XMAS, base_margin_inr=80000.0)["estimate"]["margin"]
     assert m(date(2026, 12, 22))["pct_of_base"] == 10 and m(date(2026, 12, 24))["margin_inr"] == 36000.0
@@ -362,8 +364,8 @@ def test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_d
     # the card says so, in red
     assert a["calendar"]["covered"] is False and a["calendar"]["colour"] == "red" and names in a["calendar"]["note"]
     # the deadline is one session earlier too: the close of Monday 21 December (weekday E-6), not Tuesday 22
-    assert a["deadline"] == on(date(2026, 12, 21), 15, 30).isoformat()
-    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 30), False, SOS, calendar)["kind"] == "EXIT_OVERDUE"
+    assert a["deadline"] == on(date(2026, 12, 21), 15, 40).isoformat()
+    assert sm.overdue(pos, on(date(2026, 12, 21), 15, 40), False, SOS, calendar)["kind"] == "EXIT_OVERDUE"
     # never later than the count with the true holiday: on every day it is at or below the covered count
     for n in range(10, 30):
         d = date(2026, 12, n)

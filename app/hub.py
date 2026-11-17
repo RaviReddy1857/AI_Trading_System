@@ -5,7 +5,13 @@ It also keeps the first good tick of every 1-minute bucket of each symbol (the l
 the database, so a restart does not lose it), so the paper trader fills a pending trade at the first quote after the
 bar close (`first_quote`) however late its poll runs, never at a later tick. When that capture was lost (the app was
 not receiving quotes at the planned fill: stopped, or started after it), the first quote received after is returned
-as a substitute, marked `substitute`, never as the first quote."""
+as a substitute, marked `substitute`, never as the first quote.
+
+Closing auction (from 3 Aug 2026, app/session.py): a tick of an F&O stock or the index received while its segment is
+in the auction is an auction indication (stock) or an indicative value (index), not a trade. It is kept apart
+(`auction`, shown as AUCTION on the dashboard) and is never checked as a trade quote (no quality event), never part
+of a bar, never a first quote for a paper fill and never the last good tick; the symbol's status is AUCTION, which is
+not usable. Live (non-sim) feeds only, like the market-hours rule."""
 from __future__ import annotations
 
 import threading
@@ -18,6 +24,7 @@ from .calendar import MarketCalendar
 from .config import Settings
 from .models import Tick, utcnow
 from .quality import IST, is_finite, check_tick, freshness
+from .session import AUCTION, calendar as session_calendar, segment_of
 from .store import Store
 
 log = logging.getLogger("hub")
@@ -40,11 +47,27 @@ class MarketHub:
         self._bars = BarBuilder(lambda bar: store.save_bar(bar, feed_name))
         # symbol -> {minute start: first good tick at or after it, within that minute}
         self._first: dict[str, OrderedDict] = {}
+        self._segment = {i.symbol: segment_of(i.kind, getattr(i, "fno", True)) for i in settings.watchlist}
+        self._auction: dict[str, Tick] = {}       # the latest closing-auction tick per symbol (never a trade)
+        self._auction_count = 0
+
+    def segment(self, symbol: str) -> str:
+        from .session import CASH_FNO
+        return self._segment.get(symbol, CASH_FNO)
+
+    def in_auction(self, symbol: str, at: datetime) -> bool:
+        """True when the symbol's segment is in its closing auction at `at` (live feeds only)."""
+        return self.enforce_hours and session_calendar().phase(self.segment(symbol), at,
+                                                               self.calendar.holidays) == AUCTION
 
     _FIRST_KEEP = 60                  # minutes of first-of-minute ticks kept per symbol
 
     def on_tick(self, tick: Tick) -> None:
         with self._lock:
+            if self.in_auction(tick.symbol, tick.received_at):
+                self._auction[tick.symbol] = tick          # an auction indication: not a trade, not a quality event
+                self._auction_count += 1
+                return
             reasons = check_tick(tick, self._last_good.get(tick.symbol),
                                  self.settings.feed.max_jump_pct)
             if reasons:
@@ -81,10 +104,10 @@ class MarketHub:
     def enforce_hours(self) -> bool:
         return self.feed_name != "sim"
 
-    def _status(self, t: Tick | None, now: datetime) -> str:
+    def _status(self, t: Tick | None, now: datetime, symbol: str | None = None) -> str:
         return freshness(t.received_at if t else None, now,
                          self.settings.feed.stale_after_seconds, self.enforce_hours,
-                         self.calendar.holidays)
+                         self.calendar.holidays, self.segment(symbol) if symbol else None)
 
     def snapshot(self, now: datetime | None = None) -> list[dict]:
         now = now or utcnow()
@@ -92,7 +115,11 @@ class MarketHub:
         with self._lock:
             for inst in self.settings.watchlist:
                 t = self._last_good.get(inst.symbol)
-                status = self._status(t, now)
+                status = self._status(t, now, inst.symbol)
+                if status == "AUCTION":
+                    a = self._auction.get(inst.symbol)
+                    if a is not None and a.received_at.astimezone(IST).date() == now.astimezone(IST).date():
+                        t = a                              # shown: the latest auction indication (not usable)
                 change = None
                 if t and is_finite(t.prev_close) and t.prev_close > 0:
                     change = round((t.last - t.prev_close) / t.prev_close * 100, 2)
@@ -117,7 +144,7 @@ class MarketHub:
         now = now or utcnow()
         with self._lock:
             t = self._last_good.get(symbol)
-            if self._status(t, now) != "LIVE":
+            if self._status(t, now, symbol) != "LIVE":
                 return None
             hi, lo, src = None, None, None
             if (is_finite(t.day_high) and is_finite(t.day_low)
@@ -137,7 +164,7 @@ class MarketHub:
         now = now or utcnow()
         with self._lock:
             t = self._last_good.get(symbol)
-            status = self._status(t, now)
+            status = self._status(t, now, symbol)
             if t is None:
                 return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
             return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
@@ -166,11 +193,12 @@ class MarketHub:
         if found is None:
             return None
         substitute = started is not None and started > after and found["at"] >= started
-        return {"status": self._status_at(found["at"]), "bid": found["bid"], "ask": found["ask"],
+        return {"status": self._status_at(found["at"], symbol), "bid": found["bid"], "ask": found["ask"],
                 "last": found["last"], "at": found["at"], "substitute": substitute}
 
-    def _status_at(self, at: datetime) -> str:
-        return freshness(at, at, self.settings.feed.stale_after_seconds, self.enforce_hours, self.calendar.holidays)
+    def _status_at(self, at: datetime, symbol: str | None = None) -> str:
+        return freshness(at, at, self.settings.feed.stale_after_seconds, self.enforce_hours, self.calendar.holidays,
+                         self.segment(symbol) if symbol else None)
 
     def first_tick_at(self) -> datetime | None:
         """Time of the first good tick since the app started (the "data from" of a restart)."""
@@ -184,7 +212,8 @@ class MarketHub:
 
     def stats(self) -> dict:
         with self._lock:
-            return {"good_ticks": self._good_count, "quarantined_ticks": self._bad_count}
+            return {"good_ticks": self._good_count, "quarantined_ticks": self._bad_count,
+                    "auction_ticks": self._auction_count}
 
     def close(self) -> None:
         with self._lock:

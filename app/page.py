@@ -14,7 +14,7 @@ PAGE_HTML = """<!doctype html>
  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
  table{border-collapse:collapse;width:100%} th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
  th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
- .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)}
+ .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)} .AUCTION{color:var(--warn)}
  .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
  .badges{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
  .badge{font-weight:700;font-size:16px;border-radius:6px;padding:6px 12px;border:2px solid currentColor}
@@ -72,7 +72,7 @@ async function tick(){
   document.getElementById("asof").textContent="As of "+new Date(p.as_of_utc).toLocaleTimeString();
   document.getElementById("rows").innerHTML=p.rows.map(r=>`<tr><td>${esc(r.symbol)}</td><td>${f(r.last)}</td>
    <td class="${r.change_pct>0?"up":r.change_pct<0?"down":""}">${f(r.change_pct)}</td>
-   <td>${f(r.bid)}</td><td>${f(r.ask)}</td><td>${f(r.age_seconds,1)}</td><td class="${r.status}">${r.status}</td></tr>`).join("");
+   <td>${f(r.bid)}</td><td>${f(r.ask)}</td><td>${f(r.age_seconds,1)}</td><td class="${r.status}" title="${r.status==='AUCTION'?'closing auction: an auction indication (index: indicative value), not a trade; never used for a signal, a fill or an exit':''}">${r.status}</td></tr>`).join("");
   const q=await j("/api/quality");
   document.getElementById("qstats").innerHTML=`<span>Good ticks: <b>${q.good_ticks}</b></span><span>Quarantined: <b>${q.quarantined_ticks}</b></span>`;
   document.getElementById("qrows").innerHTML=q.recent_events.slice(0,8).map(e=>`<tr><td>${esc(e.at_utc.slice(11,19))}</td><td>${esc(e.symbol)}</td><td>${esc(e.reason)}</td><td>${f(e.last)}</td></tr>`).join("")||"<tr><td colspan=4>No quarantined ticks</td></tr>";
@@ -213,7 +213,7 @@ BACKTEST_HTML = """<!doctype html>
  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
  table{border-collapse:collapse;width:100%} th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
  th{font-size:12px;color:var(--mute);font-weight:600} th:first-child,td:first-child{text-align:left}
- .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)}
+ .LIVE{color:var(--ok)} .STALE,.NO_DATA{color:var(--bad)} .CLOSED{color:var(--mute)} .AUCTION{color:var(--warn)}
  .up{color:var(--ok)} .down{color:var(--bad)} .kv{display:flex;flex-wrap:wrap;gap:6px 24px} .kv b{font-weight:600}
  .badges{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
  .badge{font-weight:700;font-size:16px;border-radius:6px;padding:6px 12px;border:2px solid currentColor}
