@@ -9,7 +9,8 @@ Two capital pools (user decision 2026-11-16, docs/STATUS.md issue 95):
 - STOCK_OPTIONS: stock option selling (every position with a sold stock option leg). Capital:
   `stock_option_selling.backtest.capital_inr`.
 - CASH_INDEX: intraday and swing stocks, index options, stock option buying. Capital: `account.capital_inr`.
-The pool of a signal is the pool whose capital the risk engine sizes it on (`risk.engine.is_stock_spread`).
+The pool of a signal is the pool whose capital the risk engine sizes it on: one leg-based classification (`trade_type_of`;
+`risk.engine.is_stock_spread` uses it) picks both.
 Each pool's realised and open P&L and equity history are kept apart, so a loss in one pool never stops or
 halves the other. Deposits and withdrawals (capital_log) belong to the CASH_INDEX pool (the trading account).
 
@@ -994,9 +995,33 @@ class Journal:
         recorded no decision. Each reserves its approved risk and margin, a sector slot and a place in its correlated
         group until I take it (it is then my position), skip it, or it expires - so several approvals before I act
         cannot together exceed the limits. Their paper trades do not matter here (the paper book)."""
-        decided = set(self.decisions())
+        return self.book_snapshot(pool, now)[1]
+
+    def book_snapshot(self, pool: str, now: datetime) -> tuple[list[Position], list[dict]]:
+        """(open positions, pending reservations) of my real book in a pool, read in ONE consistent snapshot: one
+        lock hold and one SQLite read transaction over positions, decisions and signals. A TOOK recorded meanwhile
+        (it inserts the decision and the position together, under the same lock) is therefore either not yet seen
+        (the signal is still pending) or fully seen (it is a position): its exposure is counted exactly once."""
+        with self._lock:
+            own = not self._db.in_transaction
+            if own:
+                self._db.execute("BEGIN")
+            try:
+                pos_rows = self._db.execute(f"SELECT {','.join(self._POS_COLS)} FROM positions WHERE status='OPEN' "
+                                            "AND pool=? ORDER BY opened_utc, position_id", (pool,)).fetchall()
+                decided = {r[0] for r in self._db.execute("SELECT signal_id FROM journal").fetchall()}
+                sig_rows = self._db.execute(f"SELECT {','.join(self._SIG_KEYS)} FROM signals WHERE valid_until_utc > ? "
+                                            "ORDER BY created_utc", (now.isoformat(),)).fetchall()
+            finally:
+                if own:
+                    self._db.commit()                    # ends the read transaction
+        held = [self._pos(r) for r in pos_rows]
+        return held, self._pending_from([self._sig_row(r) for r in sig_rows], decided, pool)
+
+    @staticmethod
+    def _pending_from(rows: list[dict], decided: set, pool: str) -> list[dict]:
         out = []
-        for r in self.unexpired_signals(now):
+        for r in rows:
             if r["pool"] != pool or r["status"] != "APPROVED" or r["signal_id"] in decided:
                 continue
             d = r["decision"] or {}
@@ -1097,7 +1122,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     cap = pool_capital(settings, pool)
     today = ist_day(now)
     month_start = today.replace(day=1)
-    held = journal.held_positions(pool)
+    # positions, decisions and reservations in ONE snapshot: a TOOK recorded meanwhile is counted exactly once
+    held, pending = journal.book_snapshot(pool, now)
     rows, unknown, open_now_total = [], [], Decimal(0)
     for p in held:
         prices, why = marks(p, now)
@@ -1132,7 +1158,7 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
                                  exposure=exposure_of(p.direction, p.legs), session=ist_day(p.entry_utc)))
     # approved signals awaiting my decision reserve their approved risk and margin (no P&L yet): sector,
     # correlated-group, capital-pool and selling-spread limits count them until I take or skip them, or they expire
-    pending = journal.pending_reservations(pool, now)
+    # (pending: read with the positions above, in the same snapshot)
     for t in pending:
         risk, margin = _num(t["risk_inr"]), _num(t["margin_inr"])
         if risk is None:

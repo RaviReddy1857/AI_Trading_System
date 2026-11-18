@@ -42,6 +42,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex review of 6dfdd7c, 5 items): session = the approval's IST day (stored; legacy rows fall back to their save time, then today); exposure to the underlying (BULLISH/BEARISH/NEUTRAL; unknown = EXPOSURE_UNKNOWN); switch in config.yaml (local override); signals blocked only by the rule still paper-traded (flagged); lifecycle-test stall investigated | Fixed and tested | 1,245 passing (whole suite) | 2026-11-18 |
 | - | "database is locked" at 17:11: two tests read data/market_live.db and one wrote data/backtests (overwrote the reversal _latest reports) - all moved to tmp_path; the suite refuses databases and writes under data/; store WAL + 30 s busy timeout; Position.view callers reported (no change) | Fixed and tested (full suite run with data/ quiet, database unchanged) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | - | Reversal _latest reports restored from the newest real runs; 238 test-made reports moved to data/backtests/_to_delete/; other reports and the stored runs checked (clean); the suite reads tests/fixtures/data instead of data/ (one deliberate exception: the committed-files leak guard) | Done and tested (data/ access report: only that guard) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
+| - | Astra audit 1-2: positions, decisions and reservations read in one snapshot (TOOK race); one leg-based classification for pool and risk path, INCONSISTENT_SIGNAL before sizing | Fixed and tested | 1,259 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3244,6 +3245,29 @@ spread BULLISH).
   entered by hand (the phase 4 desk issues none: credit spreads, iron condors, bought options): wrong score direction,
   Positions page view, invalidation side, underlying stop/target side and regime-flip call. Not fixed (the user's
   decision).
+
+## Codex Astra audit of main: fixes (2026-11-18)
+
+Tests: `tests/test_astra_fixes.py`.
+
+**1. HIGH, journal snapshot race.** `pool_account` read the open positions and then, in a second read, the pending
+approvals; a TOOK recorded in between (decision and position are written together) was in neither read, so its exposure
+was not counted. Now `Journal.book_snapshot(pool, now)` reads positions, decisions and unexpired signals under ONE lock
+hold and ONE SQLite read transaction; `pool_account` and `pending_reservations` use it. Test: a TOOK recorded by another
+thread right after the positions are read (it waits on the snapshot) -> the signal is counted once as pending, and
+once as my position on the next read; never zero, never twice (fails on the old journal).
+
+**2. HIGH, one classification for pool and risk path.** The journal put any stock option with a sold leg in the
+STOCK_OPTIONS pool; the engine chose the stock-spread checks by `direction == "SPREAD"`, so a hedged RELIANCE put spread
+labelled LONG took the option-buying path (account capital, no history check, no lot cap) and was APPROVED for 35 lots.
+Now `risk.engine.is_stock_spread` is the journal's leg-based `trade_type_of` (STOCK_OPTION_SELLING), so pool and risk path
+always agree (`facts.risk_path`). Before sizing, `signal_inconsistencies` refuses a signal whose asset class, legs and
+direction disagree (INCONSISTENT_SIGNAL; it is never sized): cash with legs or not LONG/SHORT; an option not LONG/SPREAD;
+all legs bought but not LONG; with a sold leg, a net credit must be SPREAD and a net debit LONG (the reversal detector's
+stock bull call spread is LONG and stays valid - it now takes the stock-option path and capital, as its pool already
+did); equal premiums, or a leg without a known premium, are refused. Invalid lot counts stay DATA_MISSING. Tests: the
+35-lot case blocked and not sized; the same spread labelled SPREAD takes the phase 9 path (history check, never more lots
+than signalled); the debit spread consistent; four other bad combinations refused.
 
 ## Open issues
 

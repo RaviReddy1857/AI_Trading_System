@@ -46,12 +46,13 @@ from .sizing import ZERO_SIZE, cash_quantity, option_lots
 
 DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME = "DATA_STALE", "SIGNAL_EXPIRED", "OUTSIDE_REGIME"
 MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN, UNHEDGED_SHORT = "MARGIN_UNKNOWN", "LOT_SIZE_UNKNOWN", "UNHEDGED_SHORT"
+INCONSISTENT_SIGNAL = "INCONSISTENT_SIGNAL"
 SIZE_HALVED = "SIZE_HALVED"
 
 REASON_CODES = (CAPITAL_UNKNOWN, PORTFOLIO_UNKNOWN, DATA_MISSING, DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME,
                 KILL_SWITCH, "DAILY_STOP", "MONTHLY_PAUSE", "DRAWDOWN_PAUSE", ZERO_SIZE, "RISK_BUDGET_USED",
                 "SECTOR_LIMIT", CORRELATED_LIMIT, "CORRELATION_UNKNOWN", MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN,
-                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN)
+                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN, INCONSISTENT_SIGNAL)
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,48 @@ class MarketState:
 
 
 def is_stock_spread(signal: Signal) -> bool:
-    return signal.asset_class == "STOCK_OPTION" and signal.direction == "SPREAD"
+    """A stock option with any sold leg: the journal's STOCK_OPTION_SELLING trade type (`journal.trade_type_of`),
+    which puts it in the STOCK_OPTIONS pool. One leg-based classification picks both the pool and the risk path
+    (the phase 9 checks, the stock-option capital and the lot cap); never the signal's direction label."""
+    from ..journal import signal_trade_type
+    try:
+        return signal_trade_type(signal) == "STOCK_OPTION_SELLING"
+    except ValueError:
+        return False
+
+
+def signal_inconsistencies(signal: Signal) -> list[str]:
+    """Why a signal's asset class, legs and direction disagree (empty = consistent). Checked before sizing: an
+    inconsistent signal is never sized (INCONSISTENT_SIGNAL). Cash: no legs, LONG or SHORT. Options: legs, every leg
+    priced; all legs bought = LONG; with a sold leg the net premium decides - a credit is a SPREAD, a debit (a bull call
+    spread) is LONG. A hedged put spread labelled LONG is therefore inconsistent."""
+    legs = signal.legs or ()
+    if signal.asset_class == "CASH_EQUITY":
+        out = ["a cash signal with option legs"] if legs else []
+        if signal.direction not in ("LONG", "SHORT"):
+            out.append(f"a cash signal must be LONG or SHORT, not {signal.direction}")
+        return out
+    if signal.asset_class not in ("INDEX_OPTION", "STOCK_OPTION"):
+        return [f"unknown asset class {signal.asset_class!r}"]
+    if not legs:
+        return []                                   # no legs: DATA_MISSING (`_legs_known`)
+    lots = [getattr(x, "lots", None) for x in legs]
+    if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 1 for n in lots):
+        return []                                   # invalid lots: DATA_MISSING (`_legs_known`)
+    if not all(known(getattr(x, "price", None)) and x.price >= 0 for x in legs):
+        return ["a leg without a known premium: credit or debit cannot be told"]
+    if signal.direction not in ("LONG", "SPREAD"):
+        return [f"an option signal must be LONG or SPREAD, not {signal.direction}"]
+    if all(x.action == "BUY" for x in legs):
+        return [] if signal.direction == "LONG" else ["every leg is bought: the direction must be LONG, not SPREAD"]
+    net = sum(Decimal(str(x.price)) * x.lots * (1 if x.action == "SELL" else -1) for x in legs)
+    if net > 0 and signal.direction != "SPREAD":
+        return [f"a net credit ({net:g} per share-lot) with a sold leg is a SPREAD, not {signal.direction}"]
+    if net < 0 and signal.direction != "LONG":
+        return [f"a net debit ({-net:g} per share-lot) is LONG, not {signal.direction}"]
+    if net == 0:
+        return ["sold and bought premiums are equal: neither a credit nor a debit"]
+    return []
 
 
 def stock_capital(settings) -> float:
@@ -155,7 +197,12 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
 
     out = {"quantity": None, "lots": None, "risk": None, "profit": None, "loss": None, "costs": None,
            "margin": None, "fit": None}
-    if cap_ok and costs is not None:
+    inconsistent = signal_inconsistencies(signal)
+    for text in inconsistent:
+        no(INCONSISTENT_SIGNAL, text)
+    facts["risk_path"] = ("cash" if signal.asset_class == "CASH_EQUITY" else
+                          "stock_option_selling" if is_stock_spread(signal) else "option")
+    if cap_ok and costs is not None and not inconsistent:
         try:
             if signal.asset_class == "CASH_EQUITY":
                 _cash(signal, settings, costs, cap, factor, positions, problems, corr, sectors, no, out, facts)
