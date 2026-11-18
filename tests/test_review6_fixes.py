@@ -3,6 +3,8 @@ before the fix and passes after it."""
 from datetime import date
 from functools import partial
 
+import pytest
+
 from app.options.portfolio import CORRELATION_UNKNOWN, Holding, portfolio_check
 from tests.test_phase9_core import settings
 
@@ -267,6 +269,21 @@ def test_doc_scanner_finds_repo_values_next_to_their_dates_and_after_the_word_re
     assert "1248.8" in got[0] and "138.76" in got[0] and any("482.875" in g for g in got[1:3])
 
 
+def test_ACCEPTANCE_tracked_docs_carry_no_repo_price_pattern():
+    """Every tracked doc (git ls-files *.md *.txt *.csv): the pattern check ("repo" followed by a price), which needs
+    none of the machine's data. The suite never opens data/ (tests/conftest.py): the check against the repo's rows held
+    on this machine is `test_ACCEPTANCE_tracked_docs_carry_no_row_of_the_external_repo` (opt-in)."""
+    from app.config import load_settings
+    from app.external_data import doc_leaks, tracked_docs
+    s = load_settings()
+    docs = tracked_docs(s.path("."))
+    assert "docs/STATUS.md" in docs and "README.md" in docs
+    leaks = doc_leaks(docs, lambda wanted: {})
+    assert leaks == [], "\n".join(leaks)
+
+
+@pytest.mark.skipif(__import__("os").environ.get("TRADING_AUDIT_REAL_DATA") != "1",
+                    reason="opt-in audit against data/ (TRADING_AUDIT_REAL_DATA=1; only when nothing writes)")
 def test_ACCEPTANCE_tracked_docs_carry_no_row_of_the_external_repo():
     """Every tracked doc (git ls-files *.md *.txt *.csv) against the repo's rows held on this machine: the
     gitignored overlays in data/external/, the store's external tables (opened read-only) and the clone.

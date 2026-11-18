@@ -40,6 +40,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Review fixes (Codex review of b012f3f..b7b1bf7, 4 findings): option backtest decides at the options' close (15:40) with a look-ahead guard - no stored result changes; chain stop re-checked right before each call; last after-close retry at 17:30 itself; dated intraday cutoff (15:15 before 3 Aug, 15:00 after); per-test time limit and the Node page harness no longer hangs | Fixed and tested | 1,222 passing (whole suite; slowest test 38 s) | 2026-11-17 |
 | - | Live risk check: approvals on the live real book (open positions + every pending reservation, all strategy versions); one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED, default on); card capital snapshot informational only | Fixed and tested | 1,231 passing (whole suite, run 15:46 IST) | 2026-11-18 |
 | - | Review fixes (Codex review of 6dfdd7c, 5 items): session = the approval's IST day (stored; legacy rows fall back to their save time, then today); exposure to the underlying (BULLISH/BEARISH/NEUTRAL; unknown = EXPOSURE_UNKNOWN); switch in config.yaml (local override); signals blocked only by the rule still paper-traded (flagged); lifecycle-test stall investigated | Fixed and tested | 1,245 passing (whole suite) | 2026-11-18 |
+| - | "database is locked" at 17:11: two tests read data/market_live.db and one wrote data/backtests (overwrote the reversal _latest reports) - all moved to tmp_path; the suite refuses databases and writes under data/; store WAL + 30 s busy timeout; Position.view callers reported (no change) | Fixed and tested (full suite run with data/ quiet, database unchanged) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3163,6 +3164,63 @@ structure; bought call vs bought put not blocked, bull put vs bought call blocke
 bought call not blocked, unknown blocked, other session or other underlying not blocked; engine end-to-end on NIFTY
 options; config.yaml switch, local override false, misspelt local key refused; paper trade for a signal blocked only by
 the rule (flagged, own strategy book, real book unchanged), none with another reason.
+
+## "database is locked" in the option download at 17:11, and Position.view callers (2026-11-18)
+
+**1. Did the test suite touch data/?** Yes, two tests opened `data/market_live.db` (read-only) during every full run:
+`tests/test_safety.py::test_live_db_never_receives_sim_rows` (a full scan of bars_1m, bars_1d, bars_5m and
+quality_events for sim rows; the file is about 736 MB) and
+`tests/test_review6_fixes.py::test_ACCEPTANCE_tracked_docs_carry_no_row_of_the_external_repo` (the external tables, the
+connection never closed). The store used SQLite's default rollback journal, in which a reader's shared lock stops a
+writer from committing, so a long read by the suite could hold off the download's commit; whether it lasted past the
+download's 30-second timeout at 17:11 cannot be proven afterwards. Also found then: TWO apps were running
+(127.0.0.1:8000 from 10:00 and 127.0.0.1:8001 from 13:41 IST) besides the download, so up to three processes may write
+the same file (not touched: the user decides). No other test opened a database under data/ (static search; the full run
+below records every file a test opens under data/).
+**Fixed:** both tests now use tmp_path (`test_safety`: a live-mode file in tmp_path refuses sim writes and holds no sim
+rows; `test_review6`: the pattern check needs no data). The checks of the real files are kept as opt-in tests
+(`TRADING_AUDIT_REAL_DATA=1`, skipped otherwise). `tests/conftest.py` refuses any SQLite connection to a file under
+data/ (RealDataAccess) and records other file reads there (`--data-access-report=FILE`). `app/store.py`: WAL (readers
+never block a writer; the switch is tried without waiting, so a store never stalls opening a busy file, which then keeps
+its mode for that connection) and `PRAGMA busy_timeout=30000`; `Store.close()`. WAL is persistent: the live file switches
+the first time the new code opens it with no other write in progress (revert: `PRAGMA journal_mode=DELETE` with nothing
+else open). Tests (`tests/test_store_concurrency.py`, 5): WAL and busy timeout set; a second writer waits for a third
+connection's open write and then succeeds; two stores writing at once both succeed (900 rows each); a reader does not
+block a writer; the suite refuses data/.
+
+**Found by the full run's data/ access report (20:29): a test WROTE into data/backtests.**
+`tests/test_phase9_reversal.py::test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline`
+used the default `backtest.reports_dir`, so every run of the suite added two fixture reports to data/backtests (named
+`reversal_*-20261116T0500..Z-*.json`, the fixture clock) and OVERWROTE `reversal_bull_call_spread_latest.json` and
+`reversal_put_spread_latest.json` with the fixture's results (last at 18-Nov 20:34:42). Fixed: the test writes to
+tmp_path, and `tests/conftest.py` now also refuses to open any file under data/ for writing. **Not repaired (the
+user's data):** the two `_latest.json` files still hold fixture output; the newest real runs are
+`reversal_bull_call_spread-20261118T130258Z-5ee451.json` and `reversal_put_spread-20261118T130250Z-9e4bc6.json` (18-Nov
+18:32-18:33; name time = file time), and the many `-20261116T0500*` files, plus those whose name time does not match
+their file time (the suite under --fake-clock, e.g. `-20261124T0537*` written 17-Nov 11:18), are test output. Every other access the report lists is a read of
+data/events.csv, holidays.csv, fii_dii.csv, nifty50.csv, data/external/*.csv or option_download_status.json by tests
+that build the app with the committed calendar paths (reads only; no database).
+
+**2. Position.view callers (report only, nothing changed).** `view` starts from the sold legs, so it is right for
+cash, single bought options, credit spreads and condors, and wrong for debit spreads (bull call spread BEARISH, bear put
+spread BULLISH).
+| Caller | Use |
+|---|---|
+| `app/engine.py` `_score_inputs` | direction of an option signal for the score (a ranking aid; not a risk number) |
+| `app/journal.py` `Position.to_view` | the "view" shown on the Positions page |
+| `app/journal.py` manual position entry (`_side`) | default side of the invalidation level of a manual option position (below for bullish, above otherwise) |
+| `app/positions.py` `evaluate` (`up`) | which side of the underlying stop / target counts as hit (exit calls) |
+| `app/positions.py` `evaluate` regime flip | "regime turned against the position" exit call |
+- **Stock option selling strategy (live):** its signals and positions are hedged credit spreads (bull put, bear call),
+  which `view` classifies correctly, so its score, exit calls and regime flip are not affected. A stock option position
+  entered by hand as a debit spread would be (wrong invalidation side, underlying stop/target side and regime flip).
+- **Pre-registered variants A-D (commit 6fa73df, docs only) and every backtest:** not affected. The option backtests
+  (`app/options/backtest.py`, `stock_backtest.py`) use their own `_Position` / `SpreadPosition` and never import
+  `journal.Position` or `positions.evaluate`.
+- **Affected today:** the reversal detector's bull call (debit) spread (`app/options/reversal.py`) and any debit spread
+  entered by hand (the phase 4 desk issues none: credit spreads, iron condors, bought options): wrong score direction,
+  Positions page view, invalidation side, underlying stop/target side and regime-flip call. Not fixed (the user's
+  decision).
 
 ## Open issues
 

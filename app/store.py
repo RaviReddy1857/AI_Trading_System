@@ -153,6 +153,9 @@ class SimDataInLiveStore(ValueError):
     pass
 
 
+BUSY_TIMEOUT_MS = 30_000      # a writer waits this long for another process's write to finish
+
+
 class Store:
     def __init__(self, db_path: str | Path, live: bool = False):
         """live=True marks the live-data file: any write whose source is 'sim'
@@ -161,9 +164,27 @@ class Store:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.live = live
         self._lock = threading.Lock()
-        # timeout: wait up to 30 s for another process (e.g. the running app) to finish a write
-        self._db = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
+        # Several processes write the same file (the app, the option download, the after-close job). WAL lets readers
+        # and one writer work at the same time; a second writer waits up to BUSY_TIMEOUT_MS for the first to finish
+        # instead of failing with "database is locked". The switch to WAL (persistent in the file) is tried without
+        # waiting: if another process holds a lock at that moment the file keeps its mode for this connection, so
+        # opening a store never stalls for it.
+        self._db = sqlite3.connect(str(db_path), check_same_thread=False, timeout=0)
+        self.journal_mode = "memory"
+        if str(db_path) != ":memory:":
+            try:
+                self.journal_mode = self._db.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower()
+            except sqlite3.OperationalError:
+                try:
+                    self.journal_mode = self._db.execute("PRAGMA journal_mode").fetchone()[0].lower()
+                except sqlite3.OperationalError:
+                    self.journal_mode = "unknown (busy at open)"
+        self._db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         self._db.executescript(SCHEMA)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
 
     def _guard(self, source) -> None:
         if self.live and str(source).strip().lower().startswith("sim"):

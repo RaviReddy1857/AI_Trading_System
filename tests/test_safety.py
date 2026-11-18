@@ -36,28 +36,43 @@ def test_no_order_routes():
     assert outside == [], f"write routes outside {WRITE_ROUTE_ALLOWLIST}: {outside}"
 
 
-def test_live_db_never_receives_sim_rows():
-    """The live SQLite file refuses sim rows, a sim feed cannot be paired with live
-    mode, and the real live file on disk (if any) holds no sim rows."""
+def _sim_rows(path) -> dict:
     import sqlite3
+    db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    try:
+        return {t: db.execute(f"SELECT COUNT(*) FROM {t} WHERE lower(source) LIKE 'sim%'").fetchone()[0]
+                for t in ("bars_1m", "bars_1d", "bars_5m", "quality_events")}
+    finally:
+        db.close()
 
-    import pytest
 
+def test_live_db_never_receives_sim_rows(tmp_path):
+    """The live SQLite file refuses sim rows and holds none after a refused write. On a live-mode file in tmp_path:
+    the suite never opens data/ (tests/conftest.py; the real file: `test_real_live_db_holds_no_sim_rows`, opt-in)."""
     from app.config import load_settings
     from app.models import Bar
     from app.store import SimDataInLiveStore, Store
 
     s = load_settings()
     assert s.storage.db_path_live != s.storage.db_path_sim
-    live = Store(":memory:", live=True)
-    with pytest.raises(SimDataInLiveStore):
-        live.save_bar(Bar("NIFTY", __import__("datetime").datetime.now(), 1, 1, 1, 1), "sim")
+    path = tmp_path / "market_live.db"
+    live = Store(path, live=True)
+    for source in ("sim", "SIM:seed", " sim"):
+        with pytest.raises(SimDataInLiveStore):
+            live.save_bar(Bar("NIFTY", __import__("datetime").datetime.now(), 1, 1, 1, 1), source)
+    live.save_bar(Bar("NIFTY", __import__("datetime").datetime(2026, 11, 16, 4, 0), 1, 1, 1, 1), "breeze")
+    live.close()
+    assert _sim_rows(path) == {"bars_1m": 0, "bars_1d": 0, "bars_5m": 0, "quality_events": 0}
+
+
+@pytest.mark.skipif(__import__("os").environ.get("TRADING_AUDIT_REAL_DATA") != "1",
+                    reason="opt-in audit of data/market_live.db (TRADING_AUDIT_REAL_DATA=1; only when nothing writes)")
+def test_real_live_db_holds_no_sim_rows():
+    from app.config import load_settings
+    s = load_settings()
     path = s.path(s.storage.db_path_live)
     if path.exists():
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        for table in ("bars_1m", "bars_1d", "bars_5m", "quality_events"):
-            n = db.execute(f"SELECT COUNT(*) FROM {table} WHERE lower(source) LIKE 'sim%'").fetchone()[0]
-            assert n == 0, f"{n} sim rows in live {table}"
+        assert set(_sim_rows(path).values()) == {0}
 
 
 def test_sdk_is_only_touched_in_one_file():

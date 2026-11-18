@@ -281,9 +281,11 @@ def test_reversal_outcomes_by_hand_and_low_sample():
     assert reversal_outcomes({"A": sc, "B": sc}, sessions, [10], 1)["outcomes"][0]["low_sample"] is False
 
 
-def reversal_world():
-    """The washed-out stock confirmed on 1 July 2025, with stored option history (model prices) around it."""
-    cfg = settings(backtest={"test_start": {"1day": date(2023, 6, 1)}, "holdout_start": {"1day": date(2025, 10, 1)}},
+def reversal_world(reports_dir):
+    """The washed-out stock confirmed on 1 July 2025, with stored option history (model prices) around it. The reports
+    are written to `reports_dir` (tmp_path), never to data/backtests."""
+    cfg = settings(backtest={"test_start": {"1day": date(2023, 6, 1)}, "holdout_start": {"1day": date(2025, 10, 1)},
+                             "reports_dir": str(reports_dir)},
                    options={"iv_rank_min_history_days": 20, "iv_rank_lookback_days": 60},
                    stock_option_selling={"min_credit_to_max_loss": 0})
     end = date(2025, 9, 30)
@@ -313,8 +315,8 @@ def reversal_world():
 
 
 @pytest.mark.usefixtures("fixed_clock")
-def test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline():
-    cfg, store, base, eng, confirmed = reversal_world()
+def test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_the_baseline(tmp_path):
+    cfg, store, base, eng, confirmed = reversal_world(tmp_path / "backtests")
     assert confirmed == date(2025, 7, 1)
     dev = [d for d in base.session_dates() if d < date(2025, 10, 1)]
     out = run_reversal_reports(cfg, store, eng, ["RELIANCE"], ["RELIANCE"], dev, date(2025, 6, 2), "")
@@ -347,6 +349,8 @@ def test_ACCEPTANCE_backtest_reports_every_reversal_and_both_candidates_against_
             gross = ((buy["exit_price"] - buy["entry_price"]) + (sell["entry_price"] - sell["exit_price"])) * 250 * t["lots"]
             assert t["gross_pnl"] == pytest.approx(gross, abs=0.03) and t["net_pnl"] == pytest.approx(gross - t["costs"]["total"], abs=0.03)
             assert set(rep["baseline"]["by_variant"]) == {"baseline"}
+    assert {p.name for p in (tmp_path / "backtests").glob("*_latest.json")} == {
+        "reversal_put_spread_latest.json", "reversal_bull_call_spread_latest.json"}           # in tmp_path only
     # the engine gives the strategies the same point-in-time reversal state as the scanner
     assert eng.reversal_scanner("RELIANCE").info_on(date(2025, 7, 1))["confirmed_today"] is True
     assert eng.reversal_scanner("RELIANCE").info_on(date(2025, 6, 30))["confirmed_today"] is False

@@ -630,6 +630,13 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 
 - Test time limit: every test fails after `TEST_TIMEOUT_SECONDS` (default 300) instead of hanging the
   suite (`tests/conftest.py`; a test may set `@pytest.mark.timeout(n)`).
+- The suite never opens a database under `data/` (a test that tries fails with RealDataAccess), so running it cannot
+  lock `data/market_live.db` while the app or a download writes. The audits of the real files are opt-in: run them only
+  when nothing writes, with `TRADING_AUDIT_REAL_DATA=1` (PowerShell: `$env:TRADING_AUDIT_REAL_DATA="1"; python -m
+  pytest -q tests/test_safety.py tests/test_review6_fixes.py`). `--data-access-report=FILE` lists other files a test
+  read under `data/`.
+- Several processes share the database file (the app, the option download, the after-close job): the store uses WAL
+  and a 30-second busy timeout, so a second writer waits for the first instead of failing with "database is locked".
 
 ## Not yet tested
 - **Daily shortlist** (docs/STATUS.md): the app captures the priority stocks' chains from 14:50 IST (live
