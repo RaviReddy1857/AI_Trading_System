@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from .calendar import MarketCalendar
+from .calendar import MarketCalendar, coverage_through, is_coverage_row
 from .config import EVENT_TYPES, Settings
 from .store import Store
 
@@ -208,9 +208,21 @@ def parse_holidays(text: str) -> tuple[dict[date, str], list[str]]:
     for n, r in enumerate(body, start=2):
         try:
             d = parse_date(_cell(r, di))
-            if d.weekday() >= 5:
+            note = _cell(r, ni)
+            if is_coverage_row(note):
+                # not a holiday: the list is complete from this date through the one in the note
+                end = coverage_through(note)
+                if end is None or end < d:
+                    raise ValueError("a COVERAGE row needs 'COVERAGE through YYYY-MM-DD' (on or after its date) in "
+                                     "its description")
+                if d in out and not is_coverage_row(out[d]):
+                    raise ValueError(f"{d} is both a holiday and the start of a COVERAGE row: date the COVERAGE row "
+                                     "on a working day")
+            elif d in out and is_coverage_row(out[d]):
+                raise ValueError(f"{d} is both a holiday and the start of a COVERAGE row")
+            elif d.weekday() >= 5:
                 log.info("holiday %s falls on a weekend; kept for the record", d)
-            out[d] = _cell(r, ni)
+            out[d] = note
         except ValueError as e:
             errors.append(f"line {n}: {e}")
     return dict(sorted(out.items())), errors

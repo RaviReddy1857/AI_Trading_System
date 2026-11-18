@@ -34,6 +34,7 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -47,6 +48,28 @@ LEVELS = (None, NOTICE, WARNING, URGENT)
 NOT_CONFIRMED = "ICICI rule not confirmed"
 MARGIN_UNKNOWN = "margin unknown"
 PRICE_UNKNOWN = "price unknown"
+
+
+def usable_spot(spot) -> float | None:
+    """The stock's last price when it can be used: a finite number above 0 (None, NaN, infinity, 0 or a negative
+    price are unknown - PRICE_UNKNOWN, never assumed out of the money)."""
+    try:
+        return float(spot) if spot is not None and not isinstance(spot, bool) and math.isfinite(spot) and spot > 0 else None
+    except TypeError:
+        return None
+
+
+def usable_margin_base(base) -> tuple[float | None, str | None]:
+    """(base, problem): the margin base the user entered when it is a finite number at or above 0; None with the
+    problem when it is NaN, infinite, negative or not a number (MARGIN_UNKNOWN); (None, None) when not entered."""
+    if base is None:
+        return None, None
+    try:
+        if not isinstance(base, bool) and math.isfinite(base) and base >= 0:
+            return float(base), None
+    except TypeError:
+        pass
+    return None, f"the margin base entered ({base!r}) is not a finite amount at or above 0"
 
 
 @dataclass(frozen=True)
@@ -91,7 +114,8 @@ def in_the_money(leg: HeldLeg, spot: float) -> bool:
 def moneyness(leg: HeldLeg, spot: float | None, near_money_pct: float) -> dict:
     """Where the leg stands against the last price. `distance_pct`: strike against spot, % of spot;
     `itm_inr_per_share` / `itm_inr`: how far in the money (0 when it is not)."""
-    if spot is None or not spot > 0:
+    spot = usable_spot(spot)
+    if spot is None:
         return {"state": PRICE_UNKNOWN, "spot": None, "distance_pct": None, "itm_inr_per_share": None, "itm_inr": None}
     itm = in_the_money(leg, spot)
     dist = abs(leg.strike - spot) / spot * 100.0
@@ -101,14 +125,23 @@ def moneyness(leg: HeldLeg, spot: float | None, near_money_pct: float) -> dict:
             "itm_inr": round(depth * leg.shares, 2)}
 
 
-CALENDAR_COVERED = "trading days counted with the holiday calendar"
+CALENDAR_COVERED = "trading days counted with the holiday calendar (coverage verified)"
+HOLIDAY_COVERAGE_MISSING = "HOLIDAY COVERAGE MISSING"
+COVERAGE_HOW = ("Add the NSE holiday list to data/holidays.csv with a COVERAGE row for the range it covers, e.g. "
+                "',2027-01-01,,COVERAGE through 2027-12-31 NSE circular <number>'.")
 
 
 def uncovered_years(calendar, first: date, last: date) -> list[int]:
-    """The calendar years from `first` to `last` for which the holiday calendar holds no holiday at all
-    (NSE publishes a list every year, so a year without a row has not been entered). No calendar: all."""
-    have = {h.year for h in calendar.holidays} if calendar is not None else set()
-    return [y for y in range(first.year, last.year + 1) if y not in have]
+    """The calendar years from `first` to `last` whose holiday list is not VERIFIED complete for the part of the range
+    inside them (a COVERAGE row of data/holidays.csv, `MarketCalendar.covers`). Holiday rows alone never count: a year
+    with some holidays entered may still miss one. No calendar: all."""
+    covers = getattr(calendar, "covers", None)
+    out = []
+    for y in range(first.year, last.year + 1):
+        a, b = max(first, date(y, 1, 1)), min(last, date(y, 12, 31))
+        if covers is None or not covers(a, b):
+            out.append(y)
+    return out
 
 
 @dataclass(frozen=True)
@@ -147,9 +180,9 @@ def day_count(expiry: date | None, calendar=None) -> DayCount:
     if not missing:
         return DayCount(expiry, True, CALENDAR_COVERED, calendar.is_trading_day)
     why = "no holiday calendar" if calendar is None else \
-        f"holidays.csv has no holidays for {', '.join(map(str, missing))}"
-    return DayCount(expiry, False, f"{why}: trading days are counted on weekdays less one, so alerts and the deadline "
-                                   f"come one session earlier. Add the NSE holidays to data/holidays.csv.",
+        f"the holiday list is not verified complete for {', '.join(map(str, missing))} (no COVERAGE row)"
+    return DayCount(expiry, False, f"{HOLIDAY_COVERAGE_MISSING}: {why}: trading days are counted on weekdays less one, "
+                                   f"so alerts and the deadline come one session earlier. {COVERAGE_HOW}",
                     calendar.is_trading_day if calendar is not None else None)
 
 
@@ -295,7 +328,8 @@ def _delivery(pos: HeldPosition, spot: float | None, scale: float, capital: floa
     happen at the last price. Bought legs that would settle in the money too are allocated once across
     the whole position (`allocate_hedges`); each allocated portion is netted (no shares change hands,
     the difference of the two strikes is paid) and the rest of the sold quantity is delivered in full."""
-    known = spot is not None and spot > 0
+    spot = usable_spot(spot)
+    known = spot is not None
     alloc, spare = allocate_hedges(pos, spot, scale) if known else ({}, [])
     rows = []
     for n, leg in enumerate(pos.legs):
@@ -359,9 +393,13 @@ def delivery_margin(pos: HeldPosition, spot: float | None, left: int | None, sos
            "margin_inr": None, "margin_pct_of_capital": None, "schedule_pct": dict(sorted(dm.schedule_pct.items(), reverse=True))}
     if not dm.schedule_pct or dm.ctm_within_pct_of_spot is None:
         return {**out, "status": MARGIN_UNKNOWN, "colour": "red", "why": "ICICI's delivery-margin rule is not filled in"}
-    if left is None or spot is None or not spot > 0:
+    base_margin_inr, base_problem = usable_margin_base(base_margin_inr)
+    if base_problem:
+        return {**out, "status": MARGIN_UNKNOWN, "colour": "red", "invalid_input": True, "why": base_problem}
+    if left is None or usable_spot(spot) is None:
         return {**out, "status": MARGIN_UNKNOWN, "colour": "red",
-                "why": "the expiry is not known" if left is None else "no usable price of the stock"}
+                "why": "the expiry is not known" if left is None else f"{PRICE_UNKNOWN}: no usable price of the stock"}
+    spot = usable_spot(spot)
     first = max(dm.schedule_pct)
     hit = [x for x in pos.shorts if moneyness(x, spot, dm.ctm_within_pct_of_spot)["state"] != "OUT_OF_THE_MONEY"]
     if not hit or (dm.near_month_only and not near_month):
@@ -430,6 +468,12 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
                      "lots": leg.lots, "lot_size": leg.lot_size, "level": lv, "why": why,
                      **moneyness(leg, spot, st.near_money_pct)})
     level = escalate(previous_level, level)
+    estimate = delivery_estimate(pos, spot, left, sos, capital, base_margin_inr, near_month)
+    invalid = [] if usable_margin_base(base_margin_inr)[1] is None else [usable_margin_base(base_margin_inr)[1]]
+    if spot is not None and usable_spot(spot) is None:
+        invalid.append(f"{PRICE_UNKNOWN}: the last price ({spot!r}) is not a finite price above 0")
+    if invalid:
+        level = escalate(level, URGENT)          # an unusable input never makes the alert quieter
     late = overdue(pos, now, closed, sos, calendar)
     dl = cs[0] if cs else None
     due_now = dl is not None and late is None and now >= dl["at"]     # the planned exit time has come: exit now
@@ -447,7 +491,7 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
             "expiry": pos.expiry.isoformat() if pos.expiry else None, "trading_days_left": left,
             # how the days were counted; not covered = one session earlier, shown on the card in red
             "calendar": {"covered": dc.covered, "note": dc.note, "colour": None if dc.covered else "red"},
-            "legs": legs, "estimate": delivery_estimate(pos, spot, left, sos, capital, base_margin_inr, near_month),
+            "legs": legs, "estimate": estimate, "invalid_inputs": invalid,
             "deadline": dl["at"].isoformat() if dl else None, "deadline_set_by": dl["what"] if dl else None,
             "hard_limit": hard["hard_limit"].isoformat() if hard else None, "due_now": due_now,
             "cutoffs": [{**c, "at": c["at"].isoformat(), "hard_limit": c["hard_limit"].isoformat()} for c in cs],
@@ -465,8 +509,9 @@ def rules_view(sos, calendar=None, today: date | None = None) -> dict:
         missing = uncovered_years(calendar, today - timedelta(days=31), today + timedelta(days=70))
         cal = {"covered": not missing, "colour": None if not missing else "red",
                "note": CALENDAR_COVERED if not missing else
-               f"holidays.csv has no holidays for {', '.join(map(str, missing))}: for expiries there, trading days are "
-               f"counted on weekdays less one (alerts one session earlier). Add the NSE holidays to data/holidays.csv."}
+               f"{HOLIDAY_COVERAGE_MISSING}: the holiday list is not verified complete for "
+               f"{', '.join(map(str, missing))}: for expiries there, trading days are counted on weekdays less one "
+               f"(alerts one session earlier). {COVERAGE_HOW}"}
     b = sos.settlement.broker
     st = sos.settlement
 

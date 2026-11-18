@@ -43,6 +43,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | "database is locked" at 17:11: two tests read data/market_live.db and one wrote data/backtests (overwrote the reversal _latest reports) - all moved to tmp_path; the suite refuses databases and writes under data/; store WAL + 30 s busy timeout; Position.view callers reported (no change) | Fixed and tested (full suite run with data/ quiet, database unchanged) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | - | Reversal _latest reports restored from the newest real runs; 238 test-made reports moved to data/backtests/_to_delete/; other reports and the stored runs checked (clean); the suite reads tests/fixtures/data instead of data/ (one deliberate exception: the committed-files leak guard) | Done and tested (data/ access report: only that guard) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | - | Astra audit 1-2: positions, decisions and reservations read in one snapshot (TOOK race); one leg-based classification for pool and risk path, INCONSISTENT_SIGNAL before sizing | Fixed and tested | 1,259 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
+| - | Astra audit 3-6: created_at <= now < valid_until and every leg's contract still trading; settlement price and margin base must be usable (unknown escalates); verified holiday coverage via COVERAGE rows (HOLIDAY COVERAGE MISSING otherwise); kill-switch inputs must be a real bool and a non-negative whole number | Fixed and tested | 1,290 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3268,6 +3269,47 @@ stock bull call spread is LONG and stays valid - it now takes the stock-option p
 did); equal premiums, or a leg without a known premium, are refused. Invalid lot counts stay DATA_MISSING. Tests: the
 35-lot case blocked and not sized; the same spread labelled SPREAD takes the phase 9 path (history check, never more lots
 than signalled); the debit spread consistent; four other bad combinations refused.
+
+**3. MEDIUM, time validity** (`risk.engine.time_problems`). A signal is valid only for created_at <= now < valid_until
+(SIGNAL_NOT_YET_VALID before its creation, SIGNAL_EXPIRED from valid_until), and every option leg must still trade: the
+decision is blocked from the end of continuous derivatives trading on the leg's expiry day (15:30 before 3 Aug 2026,
+15:40 from then; `app/session.py`), or when a leg's expiry is not known (CONTRACT_EXPIRED). The data time is not
+checked, so a morning swing signal built on the previous session's close stays valid until its valid_until. Tests: a
+signal created after the decision time; a contract that expired before the signal's valid_until; one expiring today
+(open at 15:39, closed at 15:40); a Monday-morning swing signal on Friday's close.
+
+**4. MEDIUM, settlement inputs** (`app/options/settlement.py`). `usable_spot`: only a finite price above 0 is used
+(infinity used to pass `spot > 0`, read as infinitely far out of the money, and the alert went quiet); otherwise
+PRICE_UNKNOWN in the moneyness, the delivery estimate (never assumed out of the money) and the margin.
+`usable_margin_base`: a margin base entered as NaN, infinity, a negative number or not a number is MARGIN_UNKNOWN (no
+rupee figure; it used to give a negative or NaN margin). Unknown escalates: a price or margin base that was GIVEN but is
+not usable makes the alert URGENT whatever the days left (`invalid_inputs` on the alert). A price that is simply not
+available (None) keeps the earlier rule (2026-11-15: nothing before E-7; URGENT from E-7). Tests: spot inf, -inf, NaN,
+0, negative; margin base -1, NaN, inf, text; a valid base stays quiet.
+
+**5. MEDIUM, verified holiday coverage** (`app/calendar.py`, `app/manual_data.py`, settlement). Coverage is no longer
+inferred from "the year has some holiday rows" (a year with a few holidays entered may still miss one). It is declared
+by COVERAGE rows in data/holidays.csv - never holidays themselves - and `MarketCalendar.covers(first, last)` checks the
+countdown window (31 days to expiry; the page: the next 70 days) against them. Not covered: the conservative count
+(weekdays less one: alerts and deadline one session earlier), and the note says HOLIDAY COVERAGE MISSING in red.
+data/holidays.csv was NOT edited: **until you add a COVERAGE row, every settlement countdown is the conservative one and
+shows HOLIDAY COVERAGE MISSING.** Format (one row per verified range; the NSE paste layout is unchanged; the row's date
+is the first day covered, on a working day, and the description starts with COVERAGE and gives the last day):
+```
+Sr. No,Date,Day,Description
+,2026-01-01,,COVERAGE through 2026-12-31 NSE circular <number> of <date>
+1,2027-01-26,Tuesday,Republic Day
+...the rest of NSE's 2027 list...
+,2027-01-01,,COVERAGE through 2027-12-31 NSE circular <number> of <date>
+```
+Ranges may join up across years. A COVERAGE row without "through YYYY-MM-DD", ending before its date, or on a holiday's
+date is rejected on import. Tests: holidays without COVERAGE not covered (one session earlier, HOLIDAY COVERAGE MISSING
+on the alert and the page); COVERAGE rows are not holidays; ranges join; the file format and its errors. The existing
+settlement tests now declare coverage where they mean "covered" (`cov()` in tests/test_phase9_settlement.py).
+
+**6. MEDIUM, kill-switch inputs** (`risk.limits.kill_switch`). market_open must be a real bool and the quarantine count
+a non-negative whole number; anything else (None, "yes", 1, NaN, -1, 2.5, True, "3") is not known and turns the switch on.
+Tests: each bad value; valid inputs keep it off; the spike threshold unchanged.
 
 ## Open issues
 

@@ -158,14 +158,16 @@ def kill_switch(index_symbol: str, index_status: str | None, quarantined_recent,
     outside them. Outside them the index is expected not to be LIVE (closed, or indicative during the auction), so
     that is not given as a second reason: exit calls ignore the market-hours reason and must not see a feed fault."""
     out = []
-    if market_open is None:
-        out.append("market hours not known")
+    # market_open must be a real bool and the quarantine count a non-negative whole number: anything else (None,
+    # "yes", 1, NaN, -1, 2.5, True) is not known and turns the switch on
+    if not isinstance(market_open, bool):
+        out.append(f"market hours not known ({market_open!r})")
     elif not market_open:
         out.append("outside market hours (continuous trading; the closing auction is outside them)")
     if market_open is not False and index_status != "LIVE":
         out.append(f"{index_symbol} price is {index_status or 'not known'}, not LIVE")
-    if not known(quarantined_recent):
-        out.append("quarantined-tick count not known")
+    if isinstance(quarantined_recent, bool) or not isinstance(quarantined_recent, int) or quarantined_recent < 0:
+        out.append(f"quarantined-tick count not known ({quarantined_recent!r})")
     elif quarantined_recent >= cfg.quarantine_max_events:
         out.append(f"{int(quarantined_recent)} ticks quarantined in the last {cfg.quarantine_window_minutes} minutes "
                    f"(spike at {cfg.quarantine_max_events})")

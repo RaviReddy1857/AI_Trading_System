@@ -19,7 +19,12 @@ from app.quality import IST
 
 # A holiday calendar that covers 2026 and has no holiday near the test expiry: in the tests above the
 # calendar section, trading days are therefore the weekdays. The calendar tests below use their own.
-CAL = MarketCalendar({date(2026, 1, 26): "Republic Day"})
+def cov(*years) -> dict:
+    """COVERAGE rows (data/holidays.csv): the holiday list is verified complete for these years."""
+    return {date(y, 1, 1): f"COVERAGE through {y}-12-31 NSE circular (test)" for y in years}
+
+
+CAL = MarketCalendar({date(2026, 1, 26): "Republic Day", **cov(2026)})
 cutoffs, days_left, exit_deadline, overdue, settlement_alert = (
     partial(f, calendar=CAL) for f in (sm.cutoffs, sm.days_left, sm.exit_deadline, sm.overdue, sm.settlement_alert))
 
@@ -280,7 +285,7 @@ def test_ACCEPTANCE_no_code_path_closes_or_changes_a_position():
                 for n in ast.walk(ast.parse(src)) if isinstance(n, (ast.Import, ast.ImportFrom))
                 for a in (n.names if isinstance(n, ast.Import) else [n])}
     # session: the dated session calendar (config and time only) - the hard limit is the options' close (15:40)
-    assert imported <= {"__future__", "collections.abc", "dataclasses", "datetime", "config", "quality", "session",
+    assert imported <= {"__future__", "collections.abc", "dataclasses", "datetime", "math", "config", "quality", "session",
                         "stock_selling"}
     calls = {n.func.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert not calls & {"execute", "commit", "save", "write", "write_text", "open", "post", "send"}
@@ -305,7 +310,7 @@ def test_settlement_route_and_page_are_read_only():
 
 
 # ---------------- trading days by the holiday calendar ----------------
-XMAS = MarketCalendar({date(2026, 1, 26): "Republic Day", date(2026, 12, 25): "Christmas"})
+XMAS = MarketCalendar({date(2026, 1, 26): "Republic Day", date(2026, 12, 25): "Christmas", **cov(2026)})
 
 
 def on(d, hh=10, mm=0):
@@ -344,8 +349,10 @@ def test_ACCEPTANCE_trading_days_use_the_holiday_calendar_not_weekdays():
 
 @pytest.mark.parametrize("calendar, names", [
     (None, "no holiday calendar"),                                                    # no calendar at all
-    (MarketCalendar(), "holidays.csv has no holidays for 2026"),                      # an empty file
-    (MarketCalendar({date(2025, 12, 25): "Christmas"}), "holidays.csv has no holidays for 2026"),   # last year's list only
+    (MarketCalendar(), "not verified complete for 2026"),                             # an empty file
+    (MarketCalendar({date(2025, 12, 25): "Christmas", **cov(2025)}), "not verified complete for 2026"),  # last year only
+    # holidays of 2026 entered but no COVERAGE row: a holiday may still be missing (Astra audit item 5)
+    (MarketCalendar({date(2026, 1, 26): "Republic Day", date(2026, 11, 24): "Gurpurb"}), "not verified complete for 2026"),
 ])
 def test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_day_earlier_and_says_so(calendar, names):
     """Not covered: trading days = weekdays LESS ONE. A holiday that is not in the file (25 December here)
@@ -374,7 +381,7 @@ def test_ACCEPTANCE_a_calendar_that_does_not_cover_the_expiry_month_counts_one_d
 
 
 def test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card():
-    only_2026 = MarketCalendar({date(2026, 1, 26): "Republic Day"})
+    only_2026 = MarketCalendar({date(2026, 1, 26): "Republic Day", **cov(2026)})
     assert uncovered_years(only_2026, date(2026, 11, 28), EXP) == []
     assert uncovered_years(only_2026, date(2026, 12, 20), date(2027, 1, 20)) == [2027]
     assert uncovered_years(None, date(2026, 12, 20), date(2027, 1, 20)) == [2026, 2027]
@@ -382,8 +389,8 @@ def test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card():
     # an expiry early in January: the 31 days before it reach into the old year, so both years are needed
     jan = date(2027, 1, 5)
     assert day_count(jan, only_2026).covered is False and "2027" in day_count(jan, only_2026).note
-    assert day_count(jan, MarketCalendar({date(2027, 1, 26): "Republic Day"})).covered is False       # 2026 missing
-    both = MarketCalendar({date(2026, 1, 26): "x", date(2027, 1, 26): "y"})
+    assert day_count(jan, MarketCalendar({date(2027, 1, 26): "Republic Day", **cov(2027)})).covered is False  # 2026 missing
+    both = MarketCalendar({date(2026, 1, 26): "x", date(2027, 1, 26): "y", **cov(2026, 2027)})
     assert day_count(jan, both).covered is True
     # an unknown expiry: no count at all (the alert is URGENT "price unknown")
     assert day_count(None, both).left(EXP) is None and day_count(None, both).covered is False
@@ -536,7 +543,7 @@ def test_the_settlement_exit_call_is_warning_from_1500_and_urgent_from_1540():
     legs = (Leg("SELL", "PE", 1000.0, EXP, 2, LOT, 10.0), Leg("BUY", "PE", 980.0, EXP, 2, LOT, 4.0))
     pos = Position("p", "MANUAL", None, "STOCK_OPTION_SELLING", "STOCK_OPTIONS", "RELIANCE", "SPREAD", legs, 2, 6.0,
                    at(20))
-    cal = MarketCalendar({date(2026, 1, 26): "Republic Day"})             # covers 2026: trading days = weekdays
+    cal = MarketCalendar({date(2026, 1, 26): "Republic Day", **cov(2026)})  # covers 2026: trading days = weekdays
     assert settlement_call(pos, 1100.0, at(5, 14, 59), s, cal) is None
     assert settlement_call(pos, 1100.0, at(5, 15, 0), s, cal)["level"] == "WARNING"
     late = settlement_call(pos, 1100.0, at(5, 15, 40), s, cal)

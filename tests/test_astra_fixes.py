@@ -133,3 +133,153 @@ def test_other_inconsistent_combinations_are_refused(make, why):
     assert problems and why in problems[0]
     d = decide(sig, account(), GOOD_MARKET, settings(), FlatCosts(), low_corr, SECTORS)
     assert d.status == "NO_TRADE" and INCONSISTENT_SIGNAL in d.reason_codes
+
+
+# ================= 3. MEDIUM: created_at <= now < valid_until; every leg's contract still trading =================
+from datetime import date, datetime, time  # noqa: E402
+
+from app.quality import IST  # noqa: E402
+from app.risk.engine import CONTRACT_EXPIRED, SIGNAL_NOT_YET_VALID, time_problems  # noqa: E402
+
+
+def _codes(sig, now):
+    return {c for c, _ in time_problems(sig, now)}
+
+
+def test_a_signal_created_after_the_decision_time_is_blocked():
+    sig = cash_signal()                                         # created 10:30 IST on 16-Nov
+    assert _codes(sig, sig.created_at - timedelta(minutes=1)) == {SIGNAL_NOT_YET_VALID}
+    assert _codes(sig, sig.created_at) == set()                 # created_at itself is valid
+    d = decide(sig, account(), replace(GOOD_MARKET, now=sig.created_at - timedelta(minutes=1)), settings(), ZeroCosts(),
+               low_corr, SECTORS)
+    assert d.status == "NO_TRADE" and SIGNAL_NOT_YET_VALID in d.reason_codes
+
+
+def test_an_expired_contract_is_blocked_even_inside_the_signals_valid_until():
+    old = date(2026, 11, 13)                                    # a Friday before NOW (16-Nov)
+    sig = option_signal([leg("BUY", "CE", 24000, 100.0, expiry=old)], 100.0, 50.0, 200.0, direction="LONG",
+                        strategy="long_option")
+    assert CONTRACT_EXPIRED in _codes(sig, NOW)
+    d = decide(sig, account(), GOOD_MARKET, settings(), FlatCosts(), low_corr, SECTORS)
+    assert d.status == "NO_TRADE" and CONTRACT_EXPIRED in d.reason_codes
+    # expiring today: tradeable in the morning, not after continuous derivatives trading ends
+    today = NOW.astimezone(IST).date()
+    sig = option_signal([leg("BUY", "CE", 24000, 100.0, expiry=today)], 100.0, 50.0, 200.0, direction="LONG",
+                        strategy="long_option")
+    sig = replace(sig, valid_until=datetime.combine(today, time(23, 0), IST))
+    assert CONTRACT_EXPIRED not in _codes(sig, NOW)
+    # derivatives trade continuously to 15:40 from 3 Aug 2026 (app/session.py)
+    assert CONTRACT_EXPIRED not in _codes(sig, datetime.combine(today, time(15, 39), IST))
+    assert CONTRACT_EXPIRED in _codes(sig, datetime.combine(today, time(15, 40), IST))
+
+
+def test_a_morning_swing_signal_on_the_previous_sessions_close_stays_valid():
+    sig = cash_signal(horizon="SWING")
+    sig = replace(sig, created_at=sig.created_at - timedelta(hours=19), data_as_of=sig.data_as_of - timedelta(hours=19),
+                  valid_until=NOW + timedelta(hours=6))         # built on Friday's close, decided Monday morning
+    assert _codes(sig, NOW) == set()
+    d = decide(sig, account(), GOOD_MARKET, settings(), ZeroCosts(), low_corr, SECTORS)
+    assert not {SIGNAL_NOT_YET_VALID, "SIGNAL_EXPIRED", CONTRACT_EXPIRED} & set(d.reason_codes), d.reasons
+
+
+# ================= 4. MEDIUM: settlement inputs must be usable; unknown escalates =================
+from app.options.settlement import (MARGIN_UNKNOWN, PRICE_UNKNOWN, URGENT, delivery_estimate,  # noqa: E402
+                                    delivery_margin, moneyness, settlement_alert)
+from tests.test_phase9_settlement import CAP, SOS, at, put_spread  # noqa: E402
+
+
+@pytest.mark.parametrize("spot", [math.inf, -math.inf, math.nan, -5.0, 0.0])
+def test_a_spot_that_is_not_a_finite_positive_price_is_price_unknown_and_escalates(spot):
+    pos = put_spread()
+    assert moneyness(pos.legs[0], spot, 5.0)["state"] == PRICE_UNKNOWN
+    a = settlement_alert(pos, spot, at(7), SOS, CAP)            # E-7: an OTM leg alone would be quiet
+    assert a is not None and a["level"] == URGENT
+    assert all(x["state"] == PRICE_UNKNOWN for x in a["legs"])
+    assert a["estimate"]["position"]["legs"][0]["at_last_price"] is None     # never assumed out of the money
+    assert a["estimate"]["margin"]["status"] == MARGIN_UNKNOWN
+
+
+def test_infinite_spot_no_longer_reads_as_far_out_of_the_money():
+    """Before the fix: inf passed `spot > 0`, the distance was infinite, the leg OUT_OF_THE_MONEY and the alert quiet."""
+    a = settlement_alert(put_spread(), math.inf, at(3), SOS, CAP)
+    assert a is not None and a["level"] == URGENT and a["legs"][0]["state"] == PRICE_UNKNOWN
+
+
+@pytest.mark.parametrize("base", [-1.0, math.nan, math.inf, "100"])
+def test_a_margin_base_that_is_not_finite_and_non_negative_is_margin_unknown_and_escalates(base):
+    pos = put_spread()
+    m = delivery_margin(pos, 990.0, 2, SOS, base, CAP)
+    assert m["status"] == MARGIN_UNKNOWN and m["margin_inr"] is None and m.get("invalid_input") is True
+    est = delivery_estimate(pos, 990.0, 2, SOS, CAP, base)
+    assert est["margin"]["status"] == MARGIN_UNKNOWN
+    a = settlement_alert(pos, 1100.0, at(7), SOS, CAP, base_margin_inr=base)   # E-7 and far OTM: quiet otherwise
+    assert a is not None and a["level"] == URGENT and a["invalid_inputs"]
+    assert settlement_alert(pos, 1100.0, at(7), SOS, CAP, base_margin_inr=50000.0) is None   # valid: still quiet
+
+
+# ================= 5. MEDIUM: verified holiday coverage, kept apart from holiday rows =================
+from app.calendar import MarketCalendar  # noqa: E402
+from app.manual_data import parse_holidays  # noqa: E402
+from app.options.settlement import HOLIDAY_COVERAGE_MISSING, day_count, rules_view  # noqa: E402
+
+NSE_2026 = {date(2026, 1, 26): "Republic Day", date(2026, 11, 24): "Gurpurb", date(2026, 12, 25): "Christmas"}
+
+
+def test_holiday_rows_alone_do_not_prove_coverage_and_the_count_is_conservative():
+    exp = date(2026, 12, 29)
+    cal = MarketCalendar(NSE_2026)
+    dc = day_count(exp, cal)
+    assert dc.covered is False and HOLIDAY_COVERAGE_MISSING in dc.note and "COVERAGE through" in dc.note
+    covered = day_count(exp, MarketCalendar({**NSE_2026, date(2026, 1, 1): "COVERAGE through 2026-12-31 NSE"}))
+    assert covered.covered is True
+    today = date(2026, 12, 21)
+    assert dc.left(today) == covered.left(today) - 1             # one session earlier: never later
+    assert HOLIDAY_COVERAGE_MISSING in rules_view(SOS, cal, today)["calendar"]["note"]
+
+
+def test_a_coverage_row_is_not_a_holiday_and_ranges_join_up():
+    cal = MarketCalendar({**NSE_2026, date(2026, 1, 1): "COVERAGE through 2026-12-31 NSE circular",
+                          date(2027, 1, 1): "COVERAGE through 2027-06-30 NSE circular"})
+    assert date(2026, 1, 1) not in cal.holidays and cal.is_trading_day(date(2026, 1, 1))
+    assert date(2026, 12, 25) in cal.holidays
+    assert cal.covers(date(2026, 12, 1), date(2027, 3, 1)) is True
+    assert cal.covers(date(2027, 6, 1), date(2027, 7, 15)) is False
+
+
+def test_the_holidays_file_format_for_coverage_rows():
+    text = ("Sr. No,Date,Day,Description\n"
+            "1,2027-01-26,Tuesday,Republic Day\n"
+            ",2027-01-01,,COVERAGE through 2027-12-31 NSE circular NSE/CMO/00000 of 01-Dec-2026\n")
+    parsed, errors = parse_holidays(text)
+    assert errors == [] and MarketCalendar(parsed).covers(date(2027, 1, 1), date(2027, 12, 31))
+    assert MarketCalendar(parsed).holidays == frozenset({date(2027, 1, 26)})
+    _, errors = parse_holidays("Date,Description\n2027-01-01,COVERAGE of 2027\n")
+    assert errors and "COVERAGE through YYYY-MM-DD" in errors[0]
+    _, errors = parse_holidays("Date,Description\n2027-01-26,Republic Day\n2027-01-26,COVERAGE through 2027-12-31\n")
+    assert errors
+
+
+# ================= 6. MEDIUM: kill-switch inputs must be real =================
+from types import SimpleNamespace  # noqa: E402
+
+from app.risk.limits import kill_switch  # noqa: E402
+
+KS = SimpleNamespace(quarantine_window_minutes=5, quarantine_max_events=20)
+
+
+@pytest.mark.parametrize("market_open", [None, "yes", 1, 0, "False", math.nan])
+def test_market_open_that_is_not_a_bool_turns_the_switch_on(market_open):
+    out = kill_switch("NIFTY", "LIVE", 0, market_open, KS)
+    assert out and any("market hours not known" in x for x in out)
+
+
+@pytest.mark.parametrize("count", [None, -1, 2.5, math.nan, math.inf, True, "3"])
+def test_a_quarantine_count_that_is_not_a_non_negative_whole_number_turns_the_switch_on(count):
+    out = kill_switch("NIFTY", "LIVE", count, True, KS)
+    assert out and any("quarantined-tick count not known" in x for x in out)
+
+
+def test_valid_inputs_keep_the_switch_off():
+    assert kill_switch("NIFTY", "LIVE", 0, True, KS) == []
+    assert kill_switch("NIFTY", "LIVE", 19, True, KS) == []
+    assert kill_switch("NIFTY", "LIVE", 20, True, KS) != []

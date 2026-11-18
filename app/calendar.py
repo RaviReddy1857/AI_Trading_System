@@ -4,6 +4,7 @@ Hours per segment and date live in app/session.py (closing auction from 3 Aug 20
 are trading days and asks the session calendar for the hours of a trading day."""
 from __future__ import annotations
 
+import re
 import threading
 from datetime import date, datetime, timedelta
 
@@ -11,14 +12,65 @@ from .quality import IST, is_market_hours
 from .session import CLOSED, Hours, calendar as session_calendar
 
 
+COVERAGE = "COVERAGE"
+_THROUGH = re.compile(r"\bthrough\s+(\d{4}-\d{2}-\d{2})\b", re.I)
+
+
+def coverage_through(note: str | None) -> date | None:
+    """The end date of a COVERAGE row's note ("COVERAGE through 2027-12-31 ..."), None when it cannot be read."""
+    m = _THROUGH.search(note or "")
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def is_coverage_row(note: str | None) -> bool:
+    return (note or "").strip().upper().startswith(COVERAGE)
+
+
 class MarketCalendar:
+    """Holidays and the VERIFIED coverage of the holiday list, kept apart. A row of data/holidays.csv whose description
+    starts with COVERAGE is not a holiday: it declares that the list is complete from its date through the date in its
+    note ("COVERAGE through 2027-12-31 NSE circular ..."). Holiday rows alone never prove coverage: a year with a few
+    holidays entered may still miss one."""
+
     def __init__(self, holidays: dict[date, str] | None = None):
         self._lock = threading.Lock()
-        self._holidays: dict[date, str] = dict(holidays or {})
+        self._holidays: dict[date, str] = {}
+        self._coverage: list[tuple[date, date]] = []
+        self.set_holidays(holidays or {})
 
     def set_holidays(self, holidays: dict[date, str]) -> None:
+        real, cov = {}, []
+        for d, note in dict(holidays).items():
+            if is_coverage_row(note):
+                end = coverage_through(note)
+                if end is not None and end >= d:
+                    cov.append((d, end))
+            else:
+                real[d] = note
         with self._lock:
-            self._holidays = dict(holidays)
+            self._holidays, self._coverage = real, sorted(cov)
+
+    @property
+    def coverage(self) -> tuple[tuple[date, date], ...]:
+        with self._lock:
+            return tuple(self._coverage)
+
+    def covers(self, first: date, last: date) -> bool:
+        """Every day from `first` to `last` lies inside a declared COVERAGE range (ranges may join up)."""
+        if last < first:
+            return True
+        d = first
+        for a, b in self.coverage:
+            if a <= d <= b:
+                d = b + timedelta(days=1)
+                if d > last:
+                    return True
+        return False
 
     @property
     def holidays(self) -> frozenset[date]:

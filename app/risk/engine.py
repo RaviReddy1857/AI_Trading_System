@@ -28,14 +28,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from ..costs import MissingCostRates
 from ..models import APPROVED, NO_TRADE, RiskDecision, Signal, unhedged_short_legs
 from ..options.portfolio import Holding, portfolio_check
 from ..quality import IST, is_market_hours, TICK_REASONS
-from ..session import segment_for
+from ..session import DERIVATIVES, segment_for
+from ..session import hours as session_hours
 from .limits import (CORRELATED_LIMIT, DATA_MISSING, KILL_SWITCH, correlated_group, drawdown_state,
                      kill_switch, loss_stops, sector_check)
 from .portfolio import (CAPITAL_UNKNOWN, FITS, NEEDS_MORE_CAPITAL, PORTFOLIO_UNKNOWN, STOCK_SPREAD, TIGHT,
@@ -47,12 +48,14 @@ from .sizing import ZERO_SIZE, cash_quantity, option_lots
 DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME = "DATA_STALE", "SIGNAL_EXPIRED", "OUTSIDE_REGIME"
 MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN, UNHEDGED_SHORT = "MARGIN_UNKNOWN", "LOT_SIZE_UNKNOWN", "UNHEDGED_SHORT"
 INCONSISTENT_SIGNAL = "INCONSISTENT_SIGNAL"
+SIGNAL_NOT_YET_VALID, CONTRACT_EXPIRED = "SIGNAL_NOT_YET_VALID", "CONTRACT_EXPIRED"
 SIZE_HALVED = "SIZE_HALVED"
 
 REASON_CODES = (CAPITAL_UNKNOWN, PORTFOLIO_UNKNOWN, DATA_MISSING, DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME,
                 KILL_SWITCH, "DAILY_STOP", "MONTHLY_PAUSE", "DRAWDOWN_PAUSE", ZERO_SIZE, "RISK_BUDGET_USED",
                 "SECTOR_LIMIT", CORRELATED_LIMIT, "CORRELATION_UNKNOWN", MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN,
-                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN, INCONSISTENT_SIGNAL)
+                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN, INCONSISTENT_SIGNAL,
+                SIGNAL_NOT_YET_VALID, CONTRACT_EXPIRED)
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,29 @@ def signal_inconsistencies(signal: Signal) -> list[str]:
     return []
 
 
+def time_problems(signal: Signal, now: datetime) -> list[tuple[str, str]]:
+    """The signal is valid only for created_at <= now < valid_until, and every option leg's contract must still be
+    open for a new entry: before the end of continuous derivatives trading on its expiry day (app/session.py). The
+    data time is not checked here: a morning swing signal is built on the previous session's close (data_as_of and
+    created_at earlier than now) and stays valid until its valid_until."""
+    out = []
+    if now < signal.created_at:
+        out.append((SIGNAL_NOT_YET_VALID, f"created at {signal.created_at.isoformat()}, after the decision time "
+                                          f"{now.isoformat()}"))
+    if now >= signal.valid_until:
+        out.append((SIGNAL_EXPIRED, f"valid until {signal.valid_until.isoformat()}"))
+    for x in signal.legs or ():
+        exp = getattr(x, "expiry", None)
+        if not isinstance(exp, date):
+            out.append((CONTRACT_EXPIRED, f"{x.action} {x.right} {x.strike:g}: expiry not known"))
+            continue
+        cutoff = session_hours(DERIVATIVES, exp).continuous_end_utc
+        if now >= cutoff:
+            out.append((CONTRACT_EXPIRED, f"{x.action} {x.right} {x.strike:g} expiring {exp:%d-%b-%Y} stopped trading "
+                                          f"at {cutoff.astimezone(IST):%d-%b-%Y %H:%M} IST"))
+    return out
+
+
 def stock_capital(settings) -> float:
     """The separate stock-option capital every Phase 9 figure uses (not account.capital_inr)."""
     from ..options.stock_selling import phase9_settings
@@ -153,8 +179,9 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
         no(DATA_STALE, f"{signal.symbol} price is {market.price_status or 'not known'}, not LIVE")
     if not isinstance(market.now, datetime) or market.now.tzinfo is None:
         no(DATA_MISSING, "decision time not known")
-    elif market.now >= signal.valid_until:
-        no(SIGNAL_EXPIRED, f"valid until {signal.valid_until.isoformat()}")
+    else:
+        for code, text in time_problems(signal, market.now):
+            no(code, text)
     if allowed_regimes is not None and market.regime not in allowed_regimes:
         no(OUTSIDE_REGIME, f"regime {market.regime or 'UNKNOWN'} is not in {sorted(allowed_regimes)}")
     if costs is None:
