@@ -44,6 +44,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Reversal _latest reports restored from the newest real runs; 238 test-made reports moved to data/backtests/_to_delete/; other reports and the stored runs checked (clean); the suite reads tests/fixtures/data instead of data/ (one deliberate exception: the committed-files leak guard) | Done and tested (data/ access report: only that guard) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | - | Astra audit 1-2: positions, decisions and reservations read in one snapshot (TOOK race); one leg-based classification for pool and risk path, INCONSISTENT_SIGNAL before sizing | Fixed and tested | 1,259 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | - | Astra audit 3-6: created_at <= now < valid_until and every leg's contract still trading; settlement price and margin base must be usable (unknown escalates); verified holiday coverage via COVERAGE rows (HOLIDAY COVERAGE MISSING otherwise); kill-switch inputs must be a real bool and a non-negative whole number | Fixed and tested | 1,290 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
+| - | Astra audit 7 (user policy): stock-option pool reserve and margin above capital BLOCK the real book (RESERVE_BREACH, MARGIN_EXCEEDS_CAPITAL); paper books unchanged (still paper-traded when only these block) | Done and tested | 1,293 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3310,6 +3311,17 @@ settlement tests now declare coverage where they mean "covered" (`cov()` in test
 **6. MEDIUM, kill-switch inputs** (`risk.limits.kill_switch`). market_open must be a real bool and the quarantine count
 a non-negative whole number; anything else (None, "yes", 1, NaN, -1, 2.5, True, "3") is not known and turns the switch on.
 Tests: each bad value; valid inputs keep it off; the spike threshold unchanged.
+
+**7. POLICY (approved by the user, 18-Nov-2026): the stock-option pool's capital fit BLOCKS my real book.** It was
+advisory (a label and a warning). Now, in `risk.engine._stock_spread`, committing into the 25% uncommitted reserve of
+the stock-option capital (`risk.uncommitted_cash_pct` of `stock_option_selling.backtest.capital_inr`; label TIGHT) is
+RESERVE_BREACH, and margin above that capital (NEEDS_MORE_CAPITAL) is MARGIN_EXCEEDS_CAPITAL with the shortfall; both
+count every open stock-option position and pending approval of the pool (the snapshot of item 1). Capital values and
+the 25% are unchanged. **Paper books keep their behaviour:** a signal blocked ONLY by these (or by the same-symbol rule:
+`risk.engine.REAL_BOOK_ONLY_BLOCKS`) is still paper-traded in its own strategy's paper book at its computed size, with
+the reasons in the note (`real_book_blocked`); any other reason as well, no paper trade (as before). The phase 5 tests
+that asserted "advisory" now assert the blocks (`test_stock_spread_capital_fit_blocks_my_real_book`). Tests: reserve
+and over-capital blocks with positions held; the paper trade of a signal blocked only by them; none with another reason.
 
 ## Open issues
 

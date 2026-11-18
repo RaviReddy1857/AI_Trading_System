@@ -495,8 +495,9 @@ signals and sends nothing.
 
 Stock option spreads (phase 9) keep their own rules and their own capital: every rupee figure is a % of
 `stock_option_selling.backtest.capital_inr` (Rs 10,00,000), not `account.capital_inr` - so their risk limit is
-Rs 25,000 a position and their daily stop Rs 20,000. Capital is advisory (label FITS / TIGHT / NEEDS_MORE_CAPITAL with
-the shortfall, never a block), size within `stock_option_selling.max_risk_per_position_pct` and never more lots than
+Rs 25,000 a position and their daily stop Rs 20,000. Capital BLOCKS your real book since 18-Nov-2026 (your policy;
+advisory before): committing the 25% reserve is `RESERVE_BREACH`, margin above the capital `MARGIN_EXCEEDS_CAPITAL`
+(with the shortfall); a signal blocked only by these is still paper-traded in its strategy's paper book. Size within `stock_option_selling.max_risk_per_position_pct` and never more lots than
 the signal, the phase 9 portfolio limits; unknown data or margin, the kill switch, the loss stops and the drawdown pause
 still block them.
 

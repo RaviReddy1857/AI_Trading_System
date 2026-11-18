@@ -283,3 +283,46 @@ def test_valid_inputs_keep_the_switch_off():
     assert kill_switch("NIFTY", "LIVE", 0, True, KS) == []
     assert kill_switch("NIFTY", "LIVE", 19, True, KS) == []
     assert kill_switch("NIFTY", "LIVE", 20, True, KS) != []
+
+
+# ================= 7. POLICY (user, 18-Nov-2026): stock-option reserve and margin above capital BLOCK =================
+from app.risk.engine import MARGIN_EXCEEDS_CAPITAL, RESERVE_BREACH  # noqa: E402
+from app.risk.portfolio import OpenPosition, STOCK_SPREAD  # noqa: E402
+from tests.test_phase5_engine import stock_spread  # noqa: E402
+
+
+def _stock(stock_capital, positions=()):
+    s = settings(stock_capital=stock_capital)
+    return decide(stock_spread(), account(positions=tuple(positions)), GOOD_MARKET, s, ZeroCosts(), low_corr, SECTORS)
+
+
+def test_the_reserve_and_the_margin_above_capital_block_the_stock_option_pool():
+    held = OpenPosition("p1", "ONGC", STOCK_SPREAD, 2000.0, 400000.0, 0.0, 0.0, origin="SIGNAL")
+    # capital 10,00,000, usable 7,50,000: 4,00,000 held + 2,30,000 = 6,30,000 fits
+    assert _stock(1_000_000.0, [held]).status == "APPROVED"
+    # 6,00,000 held + 2,30,000 = 8,30,000: inside capital, above the 75% usable -> the reserve would be used
+    d = _stock(1_000_000.0, [replace(held, committed_inr=600000.0)])
+    assert d.status == "NO_TRADE" and d.reason_codes == (RESERVE_BREACH,) and d.capital_fit == "TIGHT", d.reasons
+    # 8,00,000 held + 2,30,000 = 10,30,000: above the capital
+    d = _stock(1_000_000.0, [replace(held, committed_inr=800000.0)])
+    assert d.status == "NO_TRADE" and d.reason_codes == (MARGIN_EXCEEDS_CAPITAL,) and "shortfall Rs 30,000.00" in d.reasons[0]
+
+
+def test_a_signal_blocked_only_by_the_stock_option_capital_rules_is_still_paper_traded():
+    import json as _json
+    sig = stock_spread()
+    for cap, code in ((300000.0, RESERVE_BREACH), (200000.0, MARGIN_EXCEEDS_CAPITAL)):
+        d = _stock(cap)
+        assert d.reason_codes == (code,)
+        row = PaperTrader.pending_row(sig, d)
+        assert row is not None and row["pool"] == STOCK_OPTIONS and row["quantity"] == 1
+        note = _json.loads(row["note"])
+        assert note["real_book_blocked"] == [code] and "same_symbol_blocked" not in note
+        assert row["margin_inr"] == 230000.0 and row["risk_inr"] == 2000.0
+
+
+def test_any_other_block_reason_as_well_means_no_paper_trade():
+    d = decide(stock_spread(), account(), replace(GOOD_MARKET, price_status="STALE"), settings(stock_capital=300000.0),
+               ZeroCosts(), low_corr, SECTORS)
+    assert set(d.reason_codes) == {RESERVE_BREACH, "DATA_STALE"}
+    assert PaperTrader.pending_row(stock_spread(), d) is None

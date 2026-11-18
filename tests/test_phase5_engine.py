@@ -215,17 +215,21 @@ def stock_spread(margin=230000.0):
     return bull_put("RELIANCE", (1300, 20.0), (1290, 14.0), 1, 500, margin, "STOCK_OPTION", "stock_option_selling")
 
 
-@pytest.mark.parametrize("stock_capital, fit, warning", [
-    (200000.0, "NEEDS_MORE_CAPITAL", "shortfall Rs 30,000.00"),
-    (300000.0, "TIGHT", "TIGHT_CAPITAL"),
-    (1000000.0, "FITS", None),
+@pytest.mark.parametrize("stock_capital, fit, code, text", [
+    (200000.0, "NEEDS_MORE_CAPITAL", "MARGIN_EXCEEDS_CAPITAL", "shortfall Rs 30,000.00"),
+    (300000.0, "TIGHT", "RESERVE_BREACH", "25% reserve"),
+    (1000000.0, "FITS", None, None),
 ])
-def test_stock_spread_capital_is_advisory(stock_capital, fit, warning):
-    """The stock-option capital (stock_option_selling.backtest.capital_inr) decides the label; margin 2,30,000."""
+def test_stock_spread_capital_fit_blocks_my_real_book(stock_capital, fit, code, text):
+    """The stock-option capital (stock_option_selling.backtest.capital_inr) decides the label; margin 2,30,000. Since
+    18-Nov-2026 (the user's policy) the reserve and the margin above capital BLOCK the real book (advisory before)."""
     d = run(stock_spread(), s=settings(stock_capital=stock_capital))
-    assert d.status == "APPROVED" and d.capital_fit == fit          # never hidden for capital
-    assert d.lots == 1 and d.risk_inr == 2000.0 and d.margin_inr == 230000.0
-    assert (any(warning in w for w in d.warnings) if warning else d.warnings == ())
+    assert d.capital_fit == fit and d.margin_inr == 230000.0
+    if code is None:
+        assert d.status == "APPROVED" and d.lots == 1 and d.risk_inr == 2000.0 and d.warnings == ()
+    else:
+        assert d.status == "NO_TRADE" and d.reason_codes == (code,) and text in d.reasons[0], d.reasons
+        assert d.facts["would_be"]["lots"] == 1              # sized: its paper trade can still open (paper.py)
 
 
 def test_stock_spread_reads_the_stock_option_capital_not_account_capital():
@@ -248,7 +252,8 @@ def test_stock_spread_never_more_lots_than_signalled_and_within_its_budget():
     assert run(stock_spread()).lots == 1
     # stock capital 79,999.60: budget 1,999.99 < one lot's 2,000 -> ZERO_SIZE (exactly at 80,000: 2,000 -> 1 lot)
     assert run(stock_spread(), s=settings(stock_capital=79999.6)).reason_codes[0] == "ZERO_SIZE"
-    assert run(stock_spread(), s=settings(stock_capital=80000.0)).lots == 1
+    # (at 80,000 the 2,30,000 margin is above capital: blocked since 18-Nov-2026, but the size is still 1 lot)
+    assert run(stock_spread(), s=settings(stock_capital=80000.0)).facts["sizing"]["lots"] == 1
 
 
 def test_stock_spread_blocks_on_unknown_margin_and_history():

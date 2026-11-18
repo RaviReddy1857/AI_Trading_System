@@ -88,7 +88,7 @@ hours, quarantine spike); the signal's price LIVE, not expired, regime allowed; 
 sector (2 per sector) and correlation above 0.8 (a correlated group shares one position's budget). A limit is reached at
 equality. Stock option spreads (phase 9) use the phase 9 rules instead of the pool, sector and correlation, and every
 rupee figure of their decision is a % of `stock_option_selling.backtest.capital_inr` (never `account.capital_inr`):
-capital-fit label (advisory), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
+capital fit blocking for the real book since 18-Nov-2026 (RESERVE_BREACH, MARGIN_EXCEEDS_CAPITAL; paper books keep their own rules), never more lots than signalled, `app.options.portfolio.portfolio_check`. A last guard refuses any
 approval whose risk exceeds the budget. Live inputs come from `RiskService`; since phase 6 the account state is that of
 the signal's capital pool (`app/journal.py` `pool_account`: STOCK_OPTIONS for stock option selling, capital
 `stock_option_selling.backtest.capital_inr`; CASH_INDEX for everything else, capital `account.capital_inr`), so a loss

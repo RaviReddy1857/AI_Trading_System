@@ -86,16 +86,19 @@ class PaperTrader:
         """The PENDING paper-trade row of an approved signal (None for NO_TRADE); saved with the signal in one
         transaction by `Journal.save_signal(..., paper=row)`.
 
-        A signal blocked ONLY by the same-symbol rule (SAME_SYMBOL_ALREADY_APPROVED, no other reason) is still
-        paper-traded in its own strategy's paper book, at the size the risk engine computed for it on the live book
-        (`facts.would_be`), flagged `same_symbol_blocked` in the note, so strategy versions are compared on the same
-        signals. My real book is unchanged: the signal stays NO_TRADE and reserves nothing there."""
+        A signal blocked ONLY by real-book rules a paper book does not have (`risk.engine.REAL_BOOK_ONLY_BLOCKS`: the
+        same-symbol rule, and for the stock-option pool the reserve and the margin above capital, which block my real
+        book since 18-Nov-2026) is still paper-traded in its own strategy's paper book, at the size the risk engine
+        computed for it (`facts.would_be`), with the reasons in the note (`real_book_blocked`; `same_symbol_blocked`
+        when the same-symbol rule is one), so the paper books keep their behaviour and strategy versions are compared on
+        the same signals. My real book is unchanged: the signal stays NO_TRADE and reserves nothing there."""
+        from .risk.engine import REAL_BOOK_ONLY_BLOCKS
         from .risk.portfolio import SAME_SYMBOL_ALREADY_APPROVED
-        same_symbol_only = (decision.status != "APPROVED"
-                            and tuple(decision.reason_codes) == (SAME_SYMBOL_ALREADY_APPROVED,))
-        if decision.status != "APPROVED" and not same_symbol_only:
+        codes = tuple(decision.reason_codes)
+        real_only = decision.status != "APPROVED" and bool(codes) and set(codes) <= REAL_BOOK_ONLY_BLOCKS
+        if decision.status != "APPROVED" and not real_only:
             return None
-        if same_symbol_only:
+        if real_only:
             wb = (decision.facts or {}).get("would_be") or {}
             units = wb.get("lots") if sig.legs else wb.get("quantity")
             if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
@@ -104,7 +107,7 @@ class PaperTrader:
             decision = replace(decision, risk_inr=None if risk is None else round(float(risk), 2),
                                margin_inr=None if margin is None else round(float(margin), 2))
         tt = signal_trade_type(sig)
-        if not same_symbol_only:
+        if not real_only:
             units = decision.lots if sig.legs else decision.quantity
         legs = [Leg(x.action, x.right, x.strike, x.expiry, units, x.lot_size, x.price).to_dict() for x in sig.legs] \
             if sig.legs else None
@@ -114,7 +117,9 @@ class PaperTrader:
                "target": sig.target, "risk_inr": decision.risk_inr, "margin_inr": decision.margin_inr,
                "horizon": sig.horizon, "strategy_id": sig.strategy_id,
                "note": json.dumps({"valid_until_utc": sig.valid_until.isoformat(),
-                                   **({"same_symbol_blocked": True} if same_symbol_only else {})})}
+                                   **({"real_book_blocked": list(codes)} if real_only else {}),
+                                   **({"same_symbol_blocked": True}
+                                      if real_only and SAME_SYMBOL_ALREADY_APPROVED in codes else {})})}
         return row
 
     # ---- fills ----

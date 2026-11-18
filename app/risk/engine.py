@@ -18,8 +18,9 @@ Checks (all of them are evaluated; each failing one adds its code):
 
 Stock option spreads (phase 9) follow the phase 9 specification: every rupee figure of their decision is a
 percentage of the separate stock-option capital `stock_option_selling.backtest.capital_inr` (Rs 10,00,000; the
-capital of every Phase 9 output, `stock_selling.phase9_settings`), never of account.capital_inr; capital is
-advisory (a capital-fit label and a warning, never a block), size within stock_option_selling.max_risk_per_position_pct, never
+capital of every Phase 9 output, `stock_selling.phase9_settings`), never of account.capital_inr; for my real book the
+capital fit BLOCKS since 18-Nov-2026 (the user's policy: RESERVE_BREACH when the 25% reserve would be committed,
+MARGIN_EXCEEDS_CAPITAL above the capital; paper books keep their own rules), size within stock_option_selling.max_risk_per_position_pct, never
 more lots than signalled, and the phase 9 portfolio limits (`app.options.portfolio.portfolio_check`).
 Unknown data, unknown margin, a missing hedge, the kill switch, the loss stops and the drawdown pause
 still block them: each of these only reduces risk.
@@ -49,13 +50,16 @@ DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME = "DATA_STALE", "SIGNAL_EXPIRED", "OU
 MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN, UNHEDGED_SHORT = "MARGIN_UNKNOWN", "LOT_SIZE_UNKNOWN", "UNHEDGED_SHORT"
 INCONSISTENT_SIGNAL = "INCONSISTENT_SIGNAL"
 SIGNAL_NOT_YET_VALID, CONTRACT_EXPIRED = "SIGNAL_NOT_YET_VALID", "CONTRACT_EXPIRED"
+RESERVE_BREACH, MARGIN_EXCEEDS_CAPITAL = "RESERVE_BREACH", "MARGIN_EXCEEDS_CAPITAL"
+# real-book capital and exposure blocks a paper trade does not inherit (paper books keep their own rules)
+REAL_BOOK_ONLY_BLOCKS = frozenset({"SAME_SYMBOL_ALREADY_APPROVED", RESERVE_BREACH, MARGIN_EXCEEDS_CAPITAL})
 SIZE_HALVED = "SIZE_HALVED"
 
 REASON_CODES = (CAPITAL_UNKNOWN, PORTFOLIO_UNKNOWN, DATA_MISSING, DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME,
                 KILL_SWITCH, "DAILY_STOP", "MONTHLY_PAUSE", "DRAWDOWN_PAUSE", ZERO_SIZE, "RISK_BUDGET_USED",
                 "SECTOR_LIMIT", CORRELATED_LIMIT, "CORRELATION_UNKNOWN", MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN,
                 UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN, INCONSISTENT_SIGNAL,
-                SIGNAL_NOT_YET_VALID, CONTRACT_EXPIRED)
+                SIGNAL_NOT_YET_VALID, CONTRACT_EXPIRED, RESERVE_BREACH, MARGIN_EXCEEDS_CAPITAL)
 
 
 @dataclass(frozen=True)
@@ -450,12 +454,16 @@ def _stock_spread(signal, settings, costs, cap, factor, positions, problems, cor
         out["fit"] = label
         facts["capital_fit"] = {**pf, "shortfall_inr": shortfall,
                                 "capital_source": "stock_option_selling.backtest.capital_inr"}
+        # BLOCKING for my real stock-option book (the user's policy of 18-Nov-2026; it was advisory before). Paper
+        # books keep their own rules: a signal blocked only by these is still paper-traded (`PaperTrader.pending_row`)
         if label == NEEDS_MORE_CAPITAL:
-            warnings.append(f"{NEEDS_MORE_CAPITAL}: margin Rs {out['margin']:,.2f} is above the free capital; "
-                            f"shortfall Rs {shortfall:,.2f} (capital is advisory for stock option selling)")
+            no(MARGIN_EXCEEDS_CAPITAL, f"margin Rs {out['margin']:,.2f} with Rs {pf['committed_inr']:,.2f} already "
+                                       f"committed is above the stock-option capital Rs {pf['capital_inr']:,.2f}; "
+                                       f"shortfall Rs {shortfall:,.2f}")
         elif label == TIGHT:
-            warnings.append("TIGHT_CAPITAL: the margin fits but breaks the uncommitted-cash rule "
-                            f"({settings.risk.uncommitted_cash_pct:g}% kept free); advisory only")
+            no(RESERVE_BREACH, f"capital committed would be Rs {pf['after_inr']:,.2f}, above Rs {pf['usable_inr']:,.2f}: "
+                               f"the {settings.risk.uncommitted_cash_pct:g}% reserve of the stock-option capital must "
+                               "stay uncommitted")
     holdings = [Holding(p.symbol, float(p.risk_inr)) for p in positions if p.kind == STOCK_SPREAD]
     code, text, pf = portfolio_check(signal.symbol, float(pay.max_loss_inr), holdings, sectors,
                                      corr if corr is not None else (lambda a, b: None),
