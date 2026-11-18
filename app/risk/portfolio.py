@@ -17,6 +17,7 @@ from decimal import Decimal
 
 PORTFOLIO_UNKNOWN = "PORTFOLIO_UNKNOWN"
 RISK_BUDGET_USED = "RISK_BUDGET_USED"
+SAME_SYMBOL_ALREADY_APPROVED = "SAME_SYMBOL_ALREADY_APPROVED"
 CAPITAL_UNKNOWN = "CAPITAL_UNKNOWN"
 FITS, TIGHT, NEEDS_MORE_CAPITAL = "FITS", "TIGHT", "NEEDS_MORE_CAPITAL"
 
@@ -48,6 +49,10 @@ class OpenPosition:
     open_pnl_today_inr: float | None    # change of the open P&L since the previous close (since entry if opened today)
     open_pnl_month_inr: float | None    # change of the open P&L since the month began (since entry if opened this month)
     origin: str = "PAPER"               # PAPER | MANUAL
+    # the same-symbol rule (`same_symbol_check`): the signal's direction and the IST session it was opened or issued
+    # in. None = not recorded (the rule then does not count it); the real book (`journal.pool_account`) sets both.
+    direction: str | None = None
+    session: date | None = None
 
     @property
     def selling_spread(self) -> bool:
@@ -122,6 +127,20 @@ def pool_check(capital: float, positions, new_inr, uncommitted_pct: float) -> tu
     return (RISK_BUDGET_USED, f"capital committed would be Rs {facts['after_inr']:,.2f}, above Rs "
                               f"{facts['usable_inr']:,.2f} ({100 - uncommitted_pct:g}% of capital; "
                               f"{uncommitted_pct:g}% stays uncommitted)", facts)
+
+
+def same_symbol_check(symbol: str, direction: str, positions, session) -> tuple[str | None, str]:
+    """One approval per symbol, direction and session: a signal on a symbol that already has an approved signal
+    awaiting my decision or an open position, same direction, opened or issued in the same IST session, is blocked
+    (SAME_SYMBOL_ALREADY_APPROVED), whatever strategy or version issued either. `positions` is the live book at
+    the moment of the check."""
+    hits = [p for p in positions if p.symbol == symbol and p.direction == direction and p.session is not None
+            and p.session == session]
+    if not hits:
+        return None, f"no approved or open {direction} {symbol} in this session"
+    ids = ", ".join(p.position_id for p in hits[:3])
+    return (SAME_SYMBOL_ALREADY_APPROVED, f"{symbol} {direction} already has an approved signal or open position this "
+                                          f"session ({ids}); one per symbol, direction and session")
 
 
 def selling_spread_check(positions, is_selling: bool, max_open: int) -> tuple[str | None, str]:

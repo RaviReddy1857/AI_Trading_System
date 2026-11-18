@@ -1001,7 +1001,9 @@ class Journal:
                 continue
             d = r["decision"] or {}
             out.append({"signal_id": r["signal_id"], "symbol": r["symbol"], "trade_type": r["trade_type"],
-                        "risk_inr": d.get("risk_inr"), "margin_inr": d.get("margin_inr")})
+                        "risk_inr": d.get("risk_inr"), "margin_inr": d.get("margin_inr"),
+                        "strategy_id": r["strategy_id"], "strategy_version": r["strategy_version"],
+                        "direction": (r["signal"] or {}).get("direction"), "created_utc": r["created_utc"]})
         return out
 
     # ---- the paper book (simulated; its own capital and limits) ----
@@ -1106,7 +1108,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
         rows.append(OpenPosition(p.position_id, p.symbol, position_kind(p), None if risk is None else float(risk),
                                  None if committed is None else float(committed),
                                  None if today_pnl is None else float(today_pnl),
-                                 None if month_pnl is None else float(month_pnl), origin=p.origin))
+                                 None if month_pnl is None else float(month_pnl), origin=p.origin,
+                                 direction=p.direction, session=ist_day(p.entry_utc)))
     # approved signals awaiting my decision reserve their approved risk and margin (no P&L yet): sector,
     # correlated-group, capital-pool and selling-spread limits count them until I take or skip them, or they expire
     pending = journal.pending_reservations(pool, now)
@@ -1117,7 +1120,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
         if margin is None:
             unknown.append(f"pending {t['signal_id']} ({t['symbol']}): approved margin not known")
         rows.append(OpenPosition(f"pending:{t['signal_id']}", t["symbol"], kind_of_trade_type(t["trade_type"]), risk,
-                                 margin, 0.0, 0.0, origin="PENDING"))
+                                 margin, 0.0, 0.0, origin="PENDING", direction=t["direction"],
+                                 session=ist_day(datetime.fromisoformat(t["created_utc"]))))
     r_today = journal.realised(pool, since=today)
     r_month = journal.realised(pool, since=month_start)
     r_all = journal.realised(pool)

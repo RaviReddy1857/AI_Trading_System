@@ -475,6 +475,15 @@ or **NO_TRADE** with every reason code that applies. All numbers are computed by
 A limit is reached when the value equals it (exactly 2% lost today = stopped). Correlation needs to be strictly above
 0.8. Change `account.capital_inr` and every rupee limit and size rescales.
 
+**Checked on the live book, one approval per symbol (18-Nov-2026).** Every decision reads the real book again at that
+moment: open positions plus every approved signal still awaiting your decision, from every strategy and version. The
+"commitment" on a card is a snapshot taken when that signal was issued (informational only, never used for a later
+approval). A signal on a symbol that already has an approved signal awaiting your decision or an open position, same
+direction, issued or opened in the same session, is NO_TRADE with `SAME_SYMBOL_ALREADY_APPROVED`. This is the default
+(`risk.block_same_symbol_same_session`, true when not in config.yaml); you can switch it off by adding
+`block_same_symbol_same_session: false` under `risk:`. Note: a signal blocked this way gets no paper trade either
+(paper trades follow approved signals, as before).
+
 **Unknown is never assumed.** Unknown capital, open positions, P&L, equity history, margin, lot size, cost rates,
 sector, correlation or kill-switch input gives NO_TRADE with a code (`CAPITAL_UNKNOWN`, `PORTFOLIO_UNKNOWN`,
 `MARGIN_UNKNOWN`, `LOT_SIZE_UNKNOWN`, `DATA_MISSING`, `CORRELATION_UNKNOWN`, `KILL_SWITCH`, ...).

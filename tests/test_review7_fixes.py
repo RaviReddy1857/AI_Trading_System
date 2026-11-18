@@ -48,7 +48,10 @@ class _Paper:
 
 # ---------------- 1. pending paper trades reserve capacity ----------------
 def test_1_three_reliance_signals_before_any_fill_only_those_within_limits_are_approved():
-    s = settings()                       # capital Rs 2,00,000: 1% risk = 2,000; position cap 25% = 50,000; 2 per sector
+    # capital Rs 2,00,000: 1% risk = 2,000; position cap 25% = 50,000; 2 per sector. The same-symbol rule (18-Nov-2026,
+    # SAME_SYMBOL_ALREADY_APPROVED) is switched off here so the reservation and sector limits are tested on their own;
+    # with it on (the default) the second RELIANCE signal is already blocked (asserted at the end).
+    s = settings(block_same_symbol_same_session=False)
     j, _ = journal_with_start(s)
     paper = _Paper(s, j)
     out = []
@@ -67,6 +70,10 @@ def test_1_three_reliance_signals_before_any_fill_only_those_within_limits_are_a
     acct, f = pool_account(j, s, CASH_INDEX, NOW, FakeMarks(), ZeroCosts())
     assert f["pending_reserved"] == 2 and len(acct.positions) == 2
     assert all(p.origin == "PENDING" and p.open_pnl_today_inr == 0.0 for p in acct.positions)
+    on = settings()
+    d = decide(replace(cash_signal(entry=1000.0, stop=990.0, target=1030.0), signal_id="rel-9"), acct, GOOD_MARKET, on,
+               ZeroCosts(), no_corr, SECTORS)
+    assert d.status == "NO_TRADE" and "SAME_SYMBOL_ALREADY_APPROVED" in d.reason_codes
 
 
 def test_1_a_pending_trade_stops_reserving_once_expired_filled_or_taken():

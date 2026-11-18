@@ -38,6 +38,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Closing auction session from 3 Aug 2026: dated session calendar per segment; auction ticks never a signal, fill, exit trigger or quality event (AUCTION on the dashboard); option exits to 15:40; cash intraday cutoff 15:00 (unconfirmed); chain capture 14:50-15:15 with per-chain times; official close awaited (5-minute close APPROXIMATE); backtests never trade an auction bar - stored results unchanged (A/B proof) | Built and tested; not yet seen on a live day | 1,205 passing (whole suite) | 2026-11-17 |
 | - | Closing auction follow-up (your decisions): shortlist as its own Telegram message (on completion or at 17:30); stock option forced exit due by 15:00 on E-5, 15:40 the hard limit for the red/URGENT alert; 15:00 intraday cutoff kept unconfirmed; orb_v2 310 vs 322 explained (the 15-Nov import's RBI_POLICY row on 05-Aug makes that day EVENT) | Built and tested | 1,211 passing (whole suite) | 2026-11-17 |
 | - | Review fixes (Codex review of b012f3f..b7b1bf7, 4 findings): option backtest decides at the options' close (15:40) with a look-ahead guard - no stored result changes; chain stop re-checked right before each call; last after-close retry at 17:30 itself; dated intraday cutoff (15:15 before 3 Aug, 15:00 after); per-test time limit and the Node page harness no longer hangs | Fixed and tested | 1,222 passing (whole suite; slowest test 38 s) | 2026-11-17 |
+| - | Live risk check: approvals on the live real book (open positions + every pending reservation, all strategy versions); one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED, default on); card capital snapshot informational only | Fixed and tested | 1,231 passing (whole suite, run 15:46 IST) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3085,6 +3086,36 @@ signing prompt would wait forever): now 60 s with stdin closed. And every test n
 every thread are printed and the test fails with TestTimeout; one stuck inside a C call ends the run 60 s later with
 the stacks printed. `pytest-timeout` is not installed (no new package), so this is in conftest
 (`tests/test_hang_guard.py` proves a hung test fails).
+
+## Live risk check: one approval per symbol on the live book (2026-11-18)
+
+Found in a preview review: AXISBANK range_reversion_v2 (margin Rs 49,897.20) and range_reversion v1 both at 13:15 IST;
+a card showed Rs 0.00 committed. Not in the live database (its last signal today is 11:25 IST), so reproduced on
+fixtures.
+
+**Root cause.** `risk.engine.decide` already received a fresh `journal.pool_account` for every signal (open positions
+plus approved signals awaiting a decision, all strategies and versions), so capital was summed live. But (1) nothing
+stopped a second approval on the same symbol: a second Rs 50,000 cash signal fits the Rs 1,50,000 pool and the sector
+limit of 2, so both were approved; (2) each card's "commitment" is the snapshot of its own issue time - the signal
+decided first in the bar shows Rs 0.00 for ever, which reads as if the second never saw the first.
+
+**Changed.** `app/risk/portfolio.py`: `same_symbol_check` (SAME_SYMBOL_ALREADY_APPROVED); `OpenPosition` carries
+`direction` and `session` (IST day opened or issued). `app/journal.py`: `pending_reservations` returns direction,
+strategy and version, created time; `pool_account` fills `direction`/`session` for open positions and pending
+reservations. `app/risk/engine.py`: the rule runs on the live positions passed in, for every asset class.
+`app/config.py`: `risk.block_same_symbol_same_session` (default true; config.yaml not changed). `app/cards.py`: the
+commitment says it is the issue-time snapshot (`as_of`, informational). Paper books unchanged (paper trades are never
+in the real book, so never count for the rule).
+
+**Tested** (`tests/test_live_risk_check.py`, 9 tests): second same-symbol signal blocked; an open position blocks; other
+direction, other symbol, a skipped signal and a reservation from an earlier session do not; switch off; committed
+capital includes a pending reservation from another strategy version; a stale snapshot would approve what the live
+check blocks (RISK_BUDGET_USED, and the AXISBANK case); paper book unchanged. `tests/test_review7_fixes.py` test 1 now
+runs with the rule off (it tests the reservation and sector limits) and asserts the rule blocks with it on.
+
+**Not tested / open.** Not seen on the live app (not restarted, by instruction). A blocked signal gets no paper trade
+(paper trades follow approvals, unchanged), so a paper-only strategy whose signal comes second on a symbol is not
+forward-tested that time. "I took this trade" is not re-checked (a real trade must always be recordable).
 
 ## Open issues
 

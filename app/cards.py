@@ -87,12 +87,15 @@ ORIGIN_TEXT = {"PENDING": "approved signal awaiting your decision", "MANUAL": "y
 
 def commitment(decision) -> dict | None:
     """What the capital-pool check counted (decision facts["pool"]): my real book only - my open positions and the
-    approved signals awaiting my decision. Paper trades run in their own simulated book and are never in it."""
+    approved signals awaiting my decision. Paper trades run in their own simulated book and are never in it.
+    A snapshot taken when the signal was issued: informational only. Every new approval is checked on the live
+    book at that moment (`journal.pool_account`), never on this."""
     pf = (decision.facts or {}).get("pool") if hasattr(decision, "facts") else None
     if not pf:
         return None
     return {"book": "REAL: your open positions and approved signals awaiting your decision (paper trades are a "
                     "separate simulated book and are not counted)",
+            "as_of": "when this signal was issued (informational; a later signal is checked on the live book)",
             "committed_inr": pf.get("committed_inr"), "new_inr": pf.get("new_inr"), "after_inr": pf.get("after_inr"),
             "usable_inr": pf.get("usable_inr"), "capital_inr": pf.get("capital_inr"), "fit": pf.get("capital_fit"),
             "items": [{"what": ORIGIN_TEXT.get(x.get("origin"), str(x.get("origin")).lower()), "symbol": x.get("symbol"),
