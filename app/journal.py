@@ -1000,10 +1000,12 @@ class Journal:
             if r["pool"] != pool or r["status"] != "APPROVED" or r["signal_id"] in decided:
                 continue
             d = r["decision"] or {}
+            sig = r["signal"] or {}
             out.append({"signal_id": r["signal_id"], "symbol": r["symbol"], "trade_type": r["trade_type"],
                         "risk_inr": d.get("risk_inr"), "margin_inr": d.get("margin_inr"),
                         "strategy_id": r["strategy_id"], "strategy_version": r["strategy_version"],
-                        "direction": (r["signal"] or {}).get("direction"), "created_utc": r["created_utc"]})
+                        "direction": sig.get("direction"), "legs": sig.get("legs"),
+                        "created_utc": r["created_utc"], "session": decision_session(r)})
         return out
 
     # ---- the paper book (simulated; its own capital and limits) ----
@@ -1024,6 +1026,24 @@ class Journal:
                 if vu is None or now < vu:
                     out.append(t)
         return out
+
+
+def decision_session(row: dict) -> date | None:
+    """The IST session a stored signal was APPROVED in (not its data time: a morning swing signal is built on the
+    previous session's close). The risk decision's `facts.decision_session` (stored from 18-Nov-2026); a signal stored
+    before that has none and falls back to its `stored_utc`, the time it was saved, which the live engine does right
+    after the decision (`LiveEngine._handle`). None when neither can be read (the caller then counts it in the current
+    session: unknown never lets a second approval through)."""
+    facts = (row.get("decision") or {}).get("facts") or {}
+    try:
+        if facts.get("decision_session"):
+            return date.fromisoformat(facts["decision_session"])
+    except (TypeError, ValueError):
+        pass
+    try:
+        return ist_day(datetime.fromisoformat(row["stored_utc"]))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def invalidation_of(sig: dict) -> dict | None:
@@ -1073,7 +1093,7 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     to date + open P&L now; earlier closes from `equity_history`. Approved paper trades not filled yet are passed
     as positions with their approved risk and margin and no P&L (`Journal.pending_reservations`). This is my REAL
     book only: paper trades (open, pending or closed) are never counted here; they run in `paper_book`."""
-    from .risk.portfolio import AccountState, OpenPosition
+    from .risk.portfolio import AccountState, OpenPosition, exposure_of
     cap = pool_capital(settings, pool)
     today = ist_day(now)
     month_start = today.replace(day=1)
@@ -1109,7 +1129,7 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
                                  None if committed is None else float(committed),
                                  None if today_pnl is None else float(today_pnl),
                                  None if month_pnl is None else float(month_pnl), origin=p.origin,
-                                 direction=p.direction, session=ist_day(p.entry_utc)))
+                                 exposure=exposure_of(p.direction, p.legs), session=ist_day(p.entry_utc)))
     # approved signals awaiting my decision reserve their approved risk and margin (no P&L yet): sector,
     # correlated-group, capital-pool and selling-spread limits count them until I take or skip them, or they expire
     pending = journal.pending_reservations(pool, now)
@@ -1120,8 +1140,8 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
         if margin is None:
             unknown.append(f"pending {t['signal_id']} ({t['symbol']}): approved margin not known")
         rows.append(OpenPosition(f"pending:{t['signal_id']}", t["symbol"], kind_of_trade_type(t["trade_type"]), risk,
-                                 margin, 0.0, 0.0, origin="PENDING", direction=t["direction"],
-                                 session=ist_day(datetime.fromisoformat(t["created_utc"]))))
+                                 margin, 0.0, 0.0, origin="PENDING", exposure=exposure_of(t["direction"], t["legs"]),
+                                 session=t["session"] or today))
     r_today = journal.realised(pool, since=today)
     r_month = journal.realised(pool, since=month_start)
     r_all = journal.realised(pool)

@@ -11,7 +11,8 @@ Checks (all of them are evaluated; each failing one adds its code):
 - kill switch (KILL_SWITCH): index price not LIVE, outside market hours, quarantined-tick spike;
 - the signal's own price LIVE (DATA_STALE), not expired (SIGNAL_EXPIRED), regime allowed (OUTSIDE_REGIME);
 - loss stops on realised + open P&L (DAILY_STOP, MONTHLY_PAUSE); drawdown (sizes halved; DRAWDOWN_PAUSE);
-- one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED; risk.block_same_symbol_same_session);
+- one approval per underlying, exposure (BULLISH/BEARISH/NEUTRAL) and session (SAME_SYMBOL_ALREADY_APPROVED,
+  EXPOSURE_UNKNOWN; risk.block_same_symbol_same_session);
 - sizing (ZERO_SIZE); capital pool and selling-spread count (RISK_BUDGET_USED); sector (SECTOR_LIMIT);
   correlation above risk.correlation_threshold = one position (CORRELATED_LIMIT, CORRELATION_UNKNOWN).
 
@@ -38,8 +39,9 @@ from ..session import segment_for
 from .limits import (CORRELATED_LIMIT, DATA_MISSING, KILL_SWITCH, correlated_group, drawdown_state,
                      kill_switch, loss_stops, sector_check)
 from .portfolio import (CAPITAL_UNKNOWN, FITS, NEEDS_MORE_CAPITAL, PORTFOLIO_UNKNOWN, STOCK_SPREAD, TIGHT,
-                        SAME_SYMBOL_ALREADY_APPROVED, AccountState, capital_fit, committed_inr, known, paise,
-                        pool_check, position_problems, same_symbol_check, selling_spread_check)
+                        EXPOSURE_UNKNOWN, SAME_SYMBOL_ALREADY_APPROVED, AccountState, capital_fit, committed_inr,
+                        exposure_of, known, paise, pool_check, position_problems, same_symbol_check,
+                        selling_spread_check)
 from .sizing import ZERO_SIZE, cash_quantity, option_lots
 
 DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME = "DATA_STALE", "SIGNAL_EXPIRED", "OUTSIDE_REGIME"
@@ -49,7 +51,7 @@ SIZE_HALVED = "SIZE_HALVED"
 REASON_CODES = (CAPITAL_UNKNOWN, PORTFOLIO_UNKNOWN, DATA_MISSING, DATA_STALE, SIGNAL_EXPIRED, OUTSIDE_REGIME,
                 KILL_SWITCH, "DAILY_STOP", "MONTHLY_PAUSE", "DRAWDOWN_PAUSE", ZERO_SIZE, "RISK_BUDGET_USED",
                 "SECTOR_LIMIT", CORRELATED_LIMIT, "CORRELATION_UNKNOWN", MARGIN_UNKNOWN, LOT_SIZE_UNKNOWN,
-                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED)
+                UNHEDGED_SHORT, SAME_SYMBOL_ALREADY_APPROVED, EXPOSURE_UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -120,12 +122,18 @@ def decide(signal: Signal, account: AccountState, market: MarketState, settings,
     for text in problems[:3]:
         no(PORTFOLIO_UNKNOWN, text)
     positions = list(account.positions) if not problems else []
-    # one approval per symbol, direction and session, on the live book passed in (never a stored snapshot)
-    if (r.block_same_symbol_same_session and not problems and isinstance(market.now, datetime)
-            and market.now.tzinfo is not None):
-        code, text = same_symbol_check(signal.symbol, signal.direction, positions, market.now.astimezone(IST).date())
-        if code:
-            no(code, text)
+    # one approval per underlying, exposure and session, on the live book passed in (never a stored snapshot). The
+    # session is the decision's own (IST day of market.now), stored in the facts; never the signal's data time (a
+    # morning swing signal is built on the previous session's close)
+    exposure = exposure_of(signal.direction, signal.legs)
+    facts["exposure"] = exposure
+    if isinstance(market.now, datetime) and market.now.tzinfo is not None:
+        session = market.now.astimezone(IST).date()
+        facts["decision_session"] = session.isoformat()
+        if r.block_same_symbol_same_session and not problems:
+            code, text = same_symbol_check(signal.symbol, exposure, positions, session)
+            if code:
+                no(code, text)
 
     if cap_ok and not problems:
         stops, f = loss_stops(cap, account.realised_today_inr, account.realised_month_inr, account.positions,

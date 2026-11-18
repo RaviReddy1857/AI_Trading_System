@@ -478,11 +478,14 @@ A limit is reached when the value equals it (exactly 2% lost today = stopped). C
 **Checked on the live book, one approval per symbol (18-Nov-2026).** Every decision reads the real book again at that
 moment: open positions plus every approved signal still awaiting your decision, from every strategy and version. The
 "commitment" on a card is a snapshot taken when that signal was issued (informational only, never used for a later
-approval). A signal on a symbol that already has an approved signal awaiting your decision or an open position, same
-direction, issued or opened in the same session, is NO_TRADE with `SAME_SYMBOL_ALREADY_APPROVED`. This is the default
-(`risk.block_same_symbol_same_session`, true when not in config.yaml); you can switch it off by adding
-`block_same_symbol_same_session: false` under `risk:`. Note: a signal blocked this way gets no paper trade either
-(paper trades follow approved signals, as before).
+approval). A signal whose underlying already has an approved signal awaiting your decision or an open position with
+the same exposure - BULLISH (cash long, bought call, bull put or bull call spread), BEARISH (cash short, bought put,
+bear call or bear put spread) or NEUTRAL (iron condor, strangle) - approved or opened in the same session (the IST day
+of the approval, not of the signal's data: a morning swing signal is built on yesterday's close), is NO_TRADE with
+`SAME_SYMBOL_ALREADY_APPROVED`; an exposure that cannot be classified is `EXPOSURE_UNKNOWN` (unknown never passes). The
+default is on: `risk.block_same_symbol_same_session: true` in config.yaml; set it to false in config.local.yaml to
+switch it off. A signal blocked ONLY by this rule is still paper-traded in its own strategy's paper book (flagged
+`same_symbol_blocked`), so strategy versions are compared on the same signals; it reserves nothing in your real book.
 
 **Unknown is never assumed.** Unknown capital, open positions, P&L, equity history, margin, lot size, cost rates,
 sector, correlation or kill-switch input gives NO_TRADE with a code (`CAPITAL_UNKNOWN`, `PORTFOLIO_UNKNOWN`,

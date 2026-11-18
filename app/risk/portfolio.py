@@ -18,6 +18,8 @@ from decimal import Decimal
 PORTFOLIO_UNKNOWN = "PORTFOLIO_UNKNOWN"
 RISK_BUDGET_USED = "RISK_BUDGET_USED"
 SAME_SYMBOL_ALREADY_APPROVED = "SAME_SYMBOL_ALREADY_APPROVED"
+EXPOSURE_UNKNOWN = "EXPOSURE_UNKNOWN"
+BULLISH, BEARISH, NEUTRAL = "BULLISH", "BEARISH", "NEUTRAL"
 CAPITAL_UNKNOWN = "CAPITAL_UNKNOWN"
 FITS, TIGHT, NEEDS_MORE_CAPITAL = "FITS", "TIGHT", "NEEDS_MORE_CAPITAL"
 
@@ -49,9 +51,10 @@ class OpenPosition:
     open_pnl_today_inr: float | None    # change of the open P&L since the previous close (since entry if opened today)
     open_pnl_month_inr: float | None    # change of the open P&L since the month began (since entry if opened this month)
     origin: str = "PAPER"               # PAPER | MANUAL
-    # the same-symbol rule (`same_symbol_check`): the signal's direction and the IST session it was opened or issued
-    # in. None = not recorded (the rule then does not count it); the real book (`journal.pool_account`) sets both.
-    direction: str | None = None
+    # the same-exposure rule (`same_symbol_check`): the exposure to the underlying (`exposure_of`: BULLISH, BEARISH,
+    # NEUTRAL; None = could not be classified) and the IST session it was approved or opened in. session None = not
+    # recorded: the rule does not count it (fixtures); the real book (`journal.pool_account`) always sets it.
+    exposure: str | None = None
     session: date | None = None
 
     @property
@@ -129,18 +132,78 @@ def pool_check(capital: float, positions, new_inr, uncommitted_pct: float) -> tu
                               f"{uncommitted_pct:g}% stays uncommitted)", facts)
 
 
-def same_symbol_check(symbol: str, direction: str, positions, session) -> tuple[str | None, str]:
-    """One approval per symbol, direction and session: a signal on a symbol that already has an approved signal
-    awaiting my decision or an open position, same direction, opened or issued in the same IST session, is blocked
-    (SAME_SYMBOL_ALREADY_APPROVED), whatever strategy or version issued either. `positions` is the live book at
-    the moment of the check."""
-    hits = [p for p in positions if p.symbol == symbol and p.direction == direction and p.session is not None
-            and p.session == session]
+def _leg(x):
+    """(action, right, strike, lots) of a leg object or a stored leg dict; None when any is missing or invalid."""
+    get = x.get if isinstance(x, dict) else (lambda k: getattr(x, k, None))
+    a, r, k, n = get("action"), get("right"), get("strike"), get("lots")
+    if a not in ("BUY", "SELL") or r not in ("CE", "PE") or not (known(k) and k > 0):
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return None
+    return a, r, Decimal(str(k)), n
+
+
+def exposure_of(direction: str | None, legs) -> str | None:
+    """What the trade needs the underlying to do: BULLISH, BEARISH or NEUTRAL; None = cannot be classified.
+
+    Cash: LONG = BULLISH, SHORT = BEARISH. Options: from the expiry payoff of the legs (premiums left out: they shift
+    every point equally). First the open tails beyond the strikes: gaining on one side only (bought call, sold put)
+    sets the side; exposed on both sides (strangles, straddles) is NEUTRAL. With both tails flat (spreads): a payoff
+    peak or trough strictly inside the strikes (condors, butterflies, whatever their wing widths) is NEUTRAL; else the
+    higher end sets it (bull put and bull call spreads BULLISH; bear call and bear put spreads BEARISH).
+    `Position.view` starts from the sold legs, which calls a bull call (debit) spread BEARISH; this does not."""
+    if not legs:
+        return {"LONG": BULLISH, "SHORT": BEARISH}.get(direction)
+    parsed = [_leg(x) for x in legs]
+    if any(p is None for p in parsed):
+        return None
+    strikes = sorted({k for _, _, k, _ in parsed})
+    lo, hi = strikes[0], strikes[-1]
+    d = (hi - lo) or lo / 10
+
+    def payoff(s: Decimal) -> Decimal:
+        total = Decimal(0)
+        for a, r, k, n in parsed:
+            v = max(Decimal(0), s - k) if r == "CE" else max(Decimal(0), k - s)
+            total += v * n if a == "BUY" else -v * n
+        return total
+
+    def sign(x: Decimal) -> int:
+        return (x > 0) - (x < 0)
+
+    gain_up = sign(payoff(hi + 2 * d) - payoff(hi + d))         # rising beyond every strike
+    gain_down = sign(payoff(lo - 2 * d) - payoff(lo - d))       # falling beyond every strike
+    if gain_up or gain_down:
+        if gain_up == gain_down:
+            return NEUTRAL                                      # gains (or loses) both ways
+        score = gain_up - gain_down
+        return BULLISH if score > 0 else BEARISH if score < 0 else NEUTRAL
+    ends = (payoff(lo - d), payoff(hi + d))
+    inside = [payoff(k) for k in strikes]
+    if max(inside) > max(ends) or min(inside) < min(ends):
+        return NEUTRAL                                          # a range bet: condor, butterfly
+    return BULLISH if ends[1] > ends[0] else BEARISH if ends[1] < ends[0] else NEUTRAL
+
+
+def same_symbol_check(symbol: str, exposure: str | None, positions, session) -> tuple[str | None, str]:
+    """One approval per underlying, exposure and session: a signal whose underlying already has an approved signal
+    awaiting my decision or an open position with the same exposure (`exposure_of`), approved or opened in the same
+    IST session, is blocked (SAME_SYMBOL_ALREADY_APPROVED), whatever strategy or version issued either. Unknown never
+    passes: a proposed exposure that cannot be classified, or a same-session holding on the underlying whose exposure
+    is not known, blocks with EXPOSURE_UNKNOWN. `positions` is the live book at the moment of the check."""
+    if exposure is None:
+        return EXPOSURE_UNKNOWN, f"exposure of the {symbol} signal to its underlying cannot be classified"
+    same = [p for p in positions if p.symbol == symbol and p.session is not None and p.session == session]
+    unknown = [p for p in same if p.exposure not in (BULLISH, BEARISH, NEUTRAL)]
+    if unknown:
+        return (EXPOSURE_UNKNOWN, f"{symbol}: exposure of {', '.join(p.position_id for p in unknown[:3])} (this session) "
+                                  "cannot be classified")
+    hits = [p for p in same if p.exposure == exposure]
     if not hits:
-        return None, f"no approved or open {direction} {symbol} in this session"
+        return None, f"no approved or open {exposure} {symbol} in this session"
     ids = ", ".join(p.position_id for p in hits[:3])
-    return (SAME_SYMBOL_ALREADY_APPROVED, f"{symbol} {direction} already has an approved signal or open position this "
-                                          f"session ({ids}); one per symbol, direction and session")
+    return (SAME_SYMBOL_ALREADY_APPROVED, f"{symbol} {exposure} already has an approved signal or open position this "
+                                          f"session ({ids}); one per underlying, exposure and session")
 
 
 def selling_spread_check(positions, is_selling: bool, max_open: int) -> tuple[str | None, str]:

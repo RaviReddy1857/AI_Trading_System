@@ -48,7 +48,7 @@ class Risk(StrictModel):
     correlation_window: int = Field(60, ge=20, le=252)           # sessions of daily returns, completed sessions only
     correlation_threshold: float = Field(0.8, gt=0, lt=1)        # ABOVE this = one position (risk counted together)
     correlation_min_overlap: int = Field(50, ge=10, le=252)      # common returns needed, else CORRELATION_UNKNOWN
-    # one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED); false = off
+    # one approval per underlying, exposure and session (SAME_SYMBOL_ALREADY_APPROVED); false = off (config.yaml)
     block_same_symbol_same_session: bool = True
     kill_switch: KillSwitch = KillSwitch()
 

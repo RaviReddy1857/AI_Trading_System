@@ -39,6 +39,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Closing auction follow-up (your decisions): shortlist as its own Telegram message (on completion or at 17:30); stock option forced exit due by 15:00 on E-5, 15:40 the hard limit for the red/URGENT alert; 15:00 intraday cutoff kept unconfirmed; orb_v2 310 vs 322 explained (the 15-Nov import's RBI_POLICY row on 05-Aug makes that day EVENT) | Built and tested | 1,211 passing (whole suite) | 2026-11-17 |
 | - | Review fixes (Codex review of b012f3f..b7b1bf7, 4 findings): option backtest decides at the options' close (15:40) with a look-ahead guard - no stored result changes; chain stop re-checked right before each call; last after-close retry at 17:30 itself; dated intraday cutoff (15:15 before 3 Aug, 15:00 after); per-test time limit and the Node page harness no longer hangs | Fixed and tested | 1,222 passing (whole suite; slowest test 38 s) | 2026-11-17 |
 | - | Live risk check: approvals on the live real book (open positions + every pending reservation, all strategy versions); one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED, default on); card capital snapshot informational only | Fixed and tested | 1,231 passing (whole suite, run 15:46 IST) | 2026-11-18 |
+| - | Review fixes (Codex review of 6dfdd7c, 5 items): session = the approval's IST day (stored; legacy rows fall back to their save time, then today); exposure to the underlying (BULLISH/BEARISH/NEUTRAL; unknown = EXPOSURE_UNKNOWN); switch in config.yaml (local override); signals blocked only by the rule still paper-traded (flagged); lifecycle-test stall investigated | Fixed and tested | 1,245 passing (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3116,6 +3117,52 @@ runs with the rule off (it tests the reservation and sector limits) and asserts 
 **Not tested / open.** Not seen on the live app (not restarted, by instruction). A blocked signal gets no paper trade
 (paper trades follow approvals, unchanged), so a paper-only strategy whose signal comes second on a symbol is not
 forward-tested that time. "I took this trade" is not re-checked (a real trade must always be recordable).
+(Superseded the same day: see the next section - such signals are now paper-traded.)
+
+## Review fixes: Codex review of 6dfdd7c (five items), 2026-11-18
+
+1. **Session = the approval's, not the data's.** A morning swing signal carries the previous session's close as its
+   `created_at`, so the reservation looked like yesterday's and did not count. `decide` now stores
+   `facts.decision_session` (IST day of the decision time) in the stored decision; `journal.decision_session(row)`
+   reads it. **Stored signals without it** (saved before this fix) fall back to `stored_utc`, the time the signal was
+   saved, which the live engine does right after deciding; when neither can be read the reservation is counted in the
+   current session (unknown never lets a second approval through). Open positions keep their entry day.
+2. **Exposure to the underlying, not the raw direction** (`risk.portfolio.exposure_of`). Cash LONG/SHORT =
+   BULLISH/BEARISH. Options from the expiry payoff of the legs: open tails first (gaining one way only: bought call
+   BULLISH, bought put BEARISH, sold put BULLISH, sold call BEARISH; exposed both ways: strangle, straddle NEUTRAL);
+   with both tails flat, a peak or trough inside the strikes is NEUTRAL (iron condor, butterfly, whatever the wing
+   widths), else the higher end sets it (bull put and bull call spreads BULLISH; bear call and bear put spreads
+   BEARISH). Block on same underlying + same exposure + same session. A proposed exposure that cannot be classified,
+   or a same-session holding on the underlying whose exposure is not known, blocks with `EXPOSURE_UNKNOWN`.
+   **Not changed: `Position.view`** (used for scoring and the position view) starts from the sold legs and calls a
+   bull call debit spread BEARISH and a bear put debit spread BULLISH; `exposure_of` does not use it. Left for a
+   decision (changing it changes option signal scores).
+3. **Config:** `risk.block_same_symbol_same_session: true` is in config.yaml, so config.local.yaml can override it
+   (test: a local `false` switches the rule off; a misspelt local key is still refused).
+4. **Paper trades** (`PaperTrader.pending_row`, the admission path only): a signal whose ONLY reason is
+   SAME_SYMBOL_ALREADY_APPROVED gets a PENDING paper trade in its own strategy's paper book at the size the engine
+   computed on the live book (`facts.would_be`), note `same_symbol_blocked: true`; it stays NO_TRADE and reserves
+   nothing in the real book. Any other reason as well: no paper trade, as before. Limit: that size is computed on the
+   live book, where the first signal's risk already sits in the same symbol's correlated group, so the second may be
+   sized smaller than alone, and when the first used the whole budget the second also gets CORRELATED_LIMIT and so no
+   paper trade. Sizing it as if alone needs a second risk decision in the engine (beyond the paper path): not done.
+5. **Lifecycle-test stall: not reproduced here; most likely the environment.** The app-lifecycle tests
+   (`test_step1`, `test_phase2_api`, `test_phase5_api`, `test_phase6_recovery`, `test_local_config`,
+   `test_review7_fixes`, `test_data_import`, `test_sos_page`; 83 tests) ran 10 times in a row: 83 passed every time,
+   38-62 s a run, slowest test 6 s. The 20th test in the step1 -> phase2_api order is in `test_phase2_api.py`, whose
+   three ~5 s tests seed sim history on start (CPU only, `background=False`, no threads, no network). A real hang
+   would fail at the per-test limit (300 s) with every thread's stack printed; a stall without that output means the
+   run was stopped before 300 s, or the sandbox stops the guard from interrupting. One real observation:
+   `create_app`'s lifespan sets `stop` on shutdown but does not join its background threads, so in
+   `test_step1::test_api_endpoints` the `engine` and `options` threads finish their current iteration after the
+   test (gone by the next test). Not a hang; not changed. Codex's log (test name, last output) is needed to go further.
+
+**Tested** (`tests/test_live_risk_check.py`, now 23 tests): swing on previous-session data approved today, then a
+second same-symbol signal today -> blocked; legacy rows (no decision_session -> stored time -> today); exposure of every
+structure; bought call vs bought put not blocked, bull put vs bought call blocked, condor vs condor blocked, condor vs
+bought call not blocked, unknown blocked, other session or other underlying not blocked; engine end-to-end on NIFTY
+options; config.yaml switch, local override false, misspelt local key refused; paper trade for a signal blocked only by
+the rule (flagged, own strategy book, real book unchanged), none with another reason.
 
 ## Open issues
 

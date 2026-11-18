@@ -17,6 +17,8 @@ risk:
   correlation_window: 60             # sessions of daily returns
   correlation_threshold: 0.8         # correlation ABOVE this: the symbols count as one position (risk together)
   correlation_min_overlap: 50        # fewer common returns: CORRELATION_UNKNOWN (blocks)
+  # one approval per underlying, exposure (bullish/bearish/neutral) and session: SAME_SYMBOL_ALREADY_APPROVED; false = off
+  block_same_symbol_same_session: true
   kill_switch:                       # all signals stop: index feed not LIVE, outside market hours, or a quarantine spike
     quarantine_window_minutes: 5
     quarantine_max_events: 20        # this many or more quarantined ticks within the window

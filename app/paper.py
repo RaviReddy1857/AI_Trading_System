@@ -84,11 +84,28 @@ class PaperTrader:
     @staticmethod
     def pending_row(sig, decision) -> dict | None:
         """The PENDING paper-trade row of an approved signal (None for NO_TRADE); saved with the signal in one
-        transaction by `Journal.save_signal(..., paper=row)`."""
-        if decision.status != "APPROVED":
+        transaction by `Journal.save_signal(..., paper=row)`.
+
+        A signal blocked ONLY by the same-symbol rule (SAME_SYMBOL_ALREADY_APPROVED, no other reason) is still
+        paper-traded in its own strategy's paper book, at the size the risk engine computed for it on the live book
+        (`facts.would_be`), flagged `same_symbol_blocked` in the note, so strategy versions are compared on the same
+        signals. My real book is unchanged: the signal stays NO_TRADE and reserves nothing there."""
+        from .risk.portfolio import SAME_SYMBOL_ALREADY_APPROVED
+        same_symbol_only = (decision.status != "APPROVED"
+                            and tuple(decision.reason_codes) == (SAME_SYMBOL_ALREADY_APPROVED,))
+        if decision.status != "APPROVED" and not same_symbol_only:
             return None
+        if same_symbol_only:
+            wb = (decision.facts or {}).get("would_be") or {}
+            units = wb.get("lots") if sig.legs else wb.get("quantity")
+            if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
+                return None                                  # not sized: nothing to paper-trade
+            risk, margin = wb.get("risk"), wb.get("margin")
+            decision = replace(decision, risk_inr=None if risk is None else round(float(risk), 2),
+                               margin_inr=None if margin is None else round(float(margin), 2))
         tt = signal_trade_type(sig)
-        units = decision.lots if sig.legs else decision.quantity
+        if not same_symbol_only:
+            units = decision.lots if sig.legs else decision.quantity
         legs = [Leg(x.action, x.right, x.strike, x.expiry, units, x.lot_size, x.price).to_dict() for x in sig.legs] \
             if sig.legs else None
         row = {"signal_id": sig.signal_id, "trade_type": tt, "pool": pool_of_trade_type(tt), "symbol": sig.symbol,
@@ -96,7 +113,8 @@ class PaperTrader:
                "status": "PENDING", "planned_fill_utc": sig.created_at.isoformat(), "stop": sig.stop,
                "target": sig.target, "risk_inr": decision.risk_inr, "margin_inr": decision.margin_inr,
                "horizon": sig.horizon, "strategy_id": sig.strategy_id,
-               "note": json.dumps({"valid_until_utc": sig.valid_until.isoformat()})}
+               "note": json.dumps({"valid_until_utc": sig.valid_until.isoformat(),
+                                   **({"same_symbol_blocked": True} if same_symbol_only else {})})}
         return row
 
     # ---- fills ----
