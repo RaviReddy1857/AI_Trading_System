@@ -44,6 +44,38 @@ class RealDataAccess(RuntimeError):
     pass
 
 
+# Test data: every relative "data/..." path resolved through Settings.path (calendar CSVs, data/external overlays, the
+# download progress file, nifty50.csv, report folders) points at a per-run temporary copy of tests/fixtures/data, so
+# importing your own data never changes a test result and a test can never write into data/. Not in the opt-in audits
+# of the real files (TRADING_AUDIT_REAL_DATA=1), which must read data/ itself.
+FIXTURE_DATA = Path(__file__).resolve().parent / "fixtures" / "data"
+TEST_DATA: Path | None = None
+
+
+def _install_test_data() -> None:
+    global TEST_DATA
+    import atexit
+    import shutil
+    import tempfile
+    from app.config import Settings
+    TEST_DATA = Path(tempfile.mkdtemp(prefix="trading_test_data_")) / "data"
+    shutil.copytree(FIXTURE_DATA, TEST_DATA, ignore=shutil.ignore_patterns("README.md"))
+    atexit.register(shutil.rmtree, TEST_DATA.parent, True)
+    real_path = Settings.path
+
+    def test_path(self, rel: str) -> Path:
+        p = Path(rel)
+        if not p.is_absolute() and p.parts and p.parts[0] == "data":
+            return TEST_DATA.joinpath(*p.parts[1:])
+        return real_path(self, rel)
+
+    Settings.path = test_path
+
+
+if os.environ.get(AUDIT_REAL_DATA_ENV) != "1":
+    _install_test_data()
+
+
 def _under_real_data(target) -> Path | None:
     try:
         s = os.fsdecode(target)

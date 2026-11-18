@@ -1,0 +1,9 @@
+# Event calendar. One row per event. Lines starting with # are ignored.
+# type: EXPIRY, RBI_POLICY, BUDGET, RESULTS, MARKET_EVENT
+# symbol: leave blank for market-wide events; fill it for one stock (e.g. RESULTS for INFY).
+# Market-wide events of the types in config.yaml regime.event_types force the EVENT regime.
+# Fill in real dates from NSE / RBI / company announcements.
+# Example rows showing the format only; the dates are NOT real:
+# 2099-01-01,RBI_POLICY,RBI monetary policy decision,
+# 2099-01-02,RESULTS,Quarterly results,INFY
+date,type,note,symbol

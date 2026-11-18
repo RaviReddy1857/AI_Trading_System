@@ -630,6 +630,8 @@ loss is shown as not known for a call, strike-based for a put). The six alert sw
 
 - Test time limit: every test fails after `TEST_TIMEOUT_SECONDS` (default 300) instead of hanging the
   suite (`tests/conftest.py`; a test may set `@pytest.mark.timeout(n)`).
+- The suite never reads your `data/`: every `data/...` path points at a temporary copy of `tests/fixtures/data/`
+  (frozen calendar CSVs, header-only external overlays), so your imports never change a test result.
 - The suite never opens a database under `data/` (a test that tries fails with RealDataAccess), so running it cannot
   lock `data/market_live.db` while the app or a download writes. The audits of the real files are opt-in: run them only
   when nothing writes, with `TRADING_AUDIT_REAL_DATA=1` (PowerShell: `$env:TRADING_AUDIT_REAL_DATA="1"; python -m

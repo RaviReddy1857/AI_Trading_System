@@ -1,0 +1,21 @@
+# NSE trading holidays. Paste the year's list from the NSE website.,,,
+# Dates as YYYY-MM-DD or DD-Mon-YYYY. Lines starting with # are ignored.,,,
+# Example row (remove the #):,,,
+# 2026-12-25,Christmas,,
+Sr. No,Date,Day,Description
+1,2026-01-15,Thursday,Municipal Corporation Election - Maharashtra
+2,2026-01-26,Monday,Republic Day
+3,2026-03-03,Tuesday,Holi
+4,2026-03-26,Thursday,Shri Ram Navami
+5,2026-03-31,Tuesday,Shri Mahavir Jayanti
+6,2026-04-03,Friday,Good Friday
+7,2026-04-14,Tuesday,Dr. Baba Saheb Ambedkar Jayanti
+8,2026-05-01,Friday,Maharashtra Day
+9,2026-05-28,Thursday,Bakri Id
+10,2026-06-26,Friday,Muharram
+11,2026-09-14,Monday,Ganesh Chaturthi
+12,2026-10-02,Friday,Mahatma Gandhi Jayanti
+13,2026-10-20,Tuesday,Dussehra
+14,2026-11-10,Tuesday,Diwali-Balipratipada
+15,2026-11-24,Tuesday,Prakash Gurpurb Sri Guru Nanak Dev
+16,2026-12-25,Friday,Christmas

@@ -41,6 +41,7 @@ Claude updates this file at the end of every phase. It is the memory between ses
 | - | Live risk check: approvals on the live real book (open positions + every pending reservation, all strategy versions); one approval per symbol, direction and session (SAME_SYMBOL_ALREADY_APPROVED, default on); card capital snapshot informational only | Fixed and tested | 1,231 passing (whole suite, run 15:46 IST) | 2026-11-18 |
 | - | Review fixes (Codex review of 6dfdd7c, 5 items): session = the approval's IST day (stored; legacy rows fall back to their save time, then today); exposure to the underlying (BULLISH/BEARISH/NEUTRAL; unknown = EXPOSURE_UNKNOWN); switch in config.yaml (local override); signals blocked only by the rule still paper-traded (flagged); lifecycle-test stall investigated | Fixed and tested | 1,245 passing (whole suite) | 2026-11-18 |
 | - | "database is locked" at 17:11: two tests read data/market_live.db and one wrote data/backtests (overwrote the reversal _latest reports) - all moved to tmp_path; the suite refuses databases and writes under data/; store WAL + 30 s busy timeout; Position.view callers reported (no change) | Fixed and tested (full suite run with data/ quiet, database unchanged) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
+| - | Reversal _latest reports restored from the newest real runs; 238 test-made reports moved to data/backtests/_to_delete/; other reports and the stored runs checked (clean); the suite reads tests/fixtures/data instead of data/ (one deliberate exception: the committed-files leak guard) | Done and tested (data/ access report: only that guard) | 1,250 passing, 2 opt-in skipped (whole suite) | 2026-11-18 |
 | 7 | Journal and weekly scorecard | Not started | | |
 | 8 | LLM layer and go-live gate | Not started | | |
 | 9 | Stock option selling: CORE built early (2026-11-14, before phases 5 and 6, by the user's instruction) | Core built and tested: rules, shortlist, exits and rolls, campaigns, falling-stock block, campaign limit, profile, scenario history, alerts, reversal detector, backtest with baseline. Option history partly downloaded (9 stocks, Jan-Jun 2026): results so far are LOW SAMPLE. Signal cards, Telegram alerts, manual position form, risk hooks and paper tracking wait for phase 6 | 526 passing (whole suite) | 2026-11-14 |
@@ -3200,6 +3201,28 @@ user's data):** the two `_latest.json` files still hold fixture output; the newe
 their file time (the suite under --fake-clock, e.g. `-20261124T0537*` written 17-Nov 11:18), are test output. Every other access the report lists is a read of
 data/events.csv, holidays.csv, fii_dii.csv, nifty50.csv, data/external/*.csv or option_download_status.json by tests
 that build the app with the committed calendar paths (reads only; no database).
+
+**Repaired and isolated (18-Nov, 21:00).**
+- Restored: `reversal_bull_call_spread_latest.json` <- `reversal_bull_call_spread-20261118T130258Z-5ee451.json` and
+  `reversal_put_spread_latest.json` <- `reversal_put_spread-20261118T130250Z-9e4bc6.json` (byte-identical copies of the
+  newest real runs, data_source breeze).
+- Moved, not deleted: 238 test-made reports (fingerprint: data_source sim, 1 symbol, period 2025-06-02..2025-09-30 - the
+  reversal acceptance test's fixture world; 119 bull call, 119 put spread) to `data/backtests/_to_delete/`, listed in
+  `_to_delete/MOVED.txt`. Left in place: 8 sim-mode runs of 12-13 Nov (50 symbols or full periods; not test fixtures):
+  credit_spread-20261113T155739Z, iron_condor-20261113T155741Z, long_option-20261113T155736Z, orb-20261112T093900Z,
+  range_reversion-20261112T093918Z, swing_breakout-20261112T093925Z, swing_pullback-20261112T093923Z,
+  vwap_pullback-20261112T093915Z.
+- Every other `*_latest.json` (13) is byte-identical to its strategy's newest real run: not overwritten. The labels and
+  track records the app shows (app/track.py: newest run per strategy in the database's backtest_runs, 138 runs) hold no
+  test run: none has the fixture fingerprint and the newest run of all 15 strategies is breeze data. data/diagnostics
+  (last written 15-Nov 22:57 by CLI runs) is not read for labels.
+- Test data: the suite no longer reads data/ at all. `tests/conftest.py` points every "data/..." path resolved through
+  `Settings.path` at a per-run temporary copy of `tests/fixtures/data/` (frozen copies of the committed events.csv,
+  holidays.csv, fii_dii.csv, nifty50.csv of 18-Nov; header-only data/external overlays - the external repo's rows are
+  never committed; an empty download-progress record). Importing your data can no longer change a test result. One
+  deliberate exception: `test_ACCEPTANCE_tracked_docs_carry_no_repo_price_pattern` reads every COMMITTED file (the
+  tracked data CSVs included) because it guards against publishing external rows; it changes only if a commit would
+  publish them.
 
 **2. Position.view callers (report only, nothing changed).** `view` starts from the sold legs, so it is right for
 cash, single bought options, credit spreads and condors, and wrong for debit spreads (bull call spread BEARISH, bear put
