@@ -592,6 +592,7 @@ def kinds(calls):
 
 
 def test_ACCEPTANCE_profit_target_stop_threat_and_forced_exit_calls_fire(s):
+    COV26 = MarketCalendar({date(2026, 1, 1): "COVERAGE through 2026-12-31 test list"})   # a verified calendar: the forced exit on E-5 itself
     p = s.stock_option_selling
     assert exit_levels(4.0, p) == (2.0, 8.0)                        # keep 50% of the credit; stop at 2x the credit
     today = date(2026, 11, 20)
@@ -605,14 +606,14 @@ def test_ACCEPTANCE_profit_target_stop_threat_and_forced_exit_calls_fire(s):
     assert kinds(exit_calls(POS, p, today, 3.0, 1100.0, "DOWN")) == ["TREND_FLIP"]
     assert kinds(exit_calls(POS, p, today, 3.0, 1100.0, None)) == []            # no clear trend is not a flip
     # time exit at 10 calendar days; forced exit inside the last 5 trading days (expiry Tuesday 8 December)
-    assert kinds(exit_calls(POS, p, date(2026, 11, 27), 3.0, 1100.0, "UP")) == []           # 11 days
-    assert kinds(exit_calls(POS, p, date(2026, 11, 28), 3.0, 1100.0, "UP")) == ["TIME_EXIT"]   # 10 days
-    assert kinds(exit_calls(POS, p, date(2026, 11, 30), 3.0, 1100.0, "UP")) == ["TIME_EXIT"]   # 6 trading days left
-    forced = exit_calls(POS, p, date(2026, 12, 1), 3.0, 1100.0, "UP")           # 5 trading days left
+    assert kinds(exit_calls(POS, p, date(2026, 11, 27), 3.0, 1100.0, "UP", calendar=COV26)) == []           # 11 days
+    assert kinds(exit_calls(POS, p, date(2026, 11, 28), 3.0, 1100.0, "UP", calendar=COV26)) == ["TIME_EXIT"]   # 10 days
+    assert kinds(exit_calls(POS, p, date(2026, 11, 30), 3.0, 1100.0, "UP", calendar=COV26)) == ["TIME_EXIT"]   # 6 trading days left
+    forced = exit_calls(POS, p, date(2026, 12, 1), 3.0, 1100.0, "UP", calendar=COV26)           # 5 trading days left
     assert kinds(forced) == ["FORCED_EXPIRY_EXIT"] and forced[0]["action"] == "Exit now: physical settlement"
     # the same state gives the same call every time it is asked: it repeats until the position is closed
-    assert exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN") == exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN")
-    assert kinds(exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN")) == ["FORCED_EXPIRY_EXIT", "STOP",
+    assert exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN", calendar=COV26) == exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN", calendar=COV26)
+    assert kinds(exit_calls(POS, p, date(2026, 12, 3), 9.0, 1050.0, "DOWN", calendar=COV26)) == ["FORCED_EXPIRY_EXIT", "STOP",
                                                                                "STRIKE_BREACHED", "TREND_FLIP"]
     # an unknown price is reported, never read as "no exit"
     assert kinds(exit_calls(POS, p, today, None, 1100.0, "UP")) == ["DATA_MISSING"]

@@ -181,7 +181,7 @@ def evaluate(pos: Position, x: ExitInputs, settings, calendar, costs=None) -> tu
         p9_target, p9_stop = exit_levels(pos.entry_price, settings.stock_option_selling)
         leg_px = None if x.prices is None else (x.prices[pos.legs.index(sold)], x.prices[pos.legs.index(bought)])
         for c in p9_calls(sp, settings.stock_option_selling, ist_day(x.now), px, x.stock_close, x.stock_trend,
-                          costs, leg_px):
+                          costs, leg_px, calendar=calendar):
             if c["kind"] == "DATA_MISSING":
                 continue                                    # a stale price pauses the price rules (shown on the position)
             kind = {"TIME_EXIT": TIME}.get(c["kind"], c["kind"])
@@ -351,8 +351,12 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
         reason += "; " + "; ".join(a["not_confirmed"])
     # no level of its own: URGENT once overdue (the hard limit), WARNING while only the planned exit time has come
     level = a["level"] or ("URGENT" if a["overdue"] or not a.get("due_now") else "WARNING")
+    # the closing auction: no current tradable spot. The alert escalates like a missing price, but that escalation is
+    # never kept: not in the position's settlement level, and the call is resolved once a price is known again
+    transient = getattr(spot_quote, "status", None) == "AUCTION"
     return {"kind": SETTLEMENT, "action": a["action"], "reason": reason, "level": level,
-            "overdue": bool(a["overdue"]), "values": {"alert": a}}
+            "overdue": bool(a["overdue"]), "transient": transient,
+            "values": {"alert": a, "transient": transient}}
 
 
 # ---------------- the call book: activation, repeats, resolution ----------------
@@ -435,6 +439,8 @@ class ExitCallBook:
                         resolve = f"stop confirmed at {fmt(pos.stop)}"
                 elif kind == PARTIAL and pos.plan.get("partial_booked"):
                     resolve = "partial profit recorded"
+                elif kind == SETTLEMENT and (old["values"] or {}).get("transient"):
+                    resolve = "raised in the closing auction only (no tradable spot then); not kept"
                 if resolve:
                     self._db.execute("UPDATE exit_calls SET active=0, resolved_utc=?, resolved_why=? WHERE position_id=? AND kind=?",
                                      (now.isoformat(), resolve, pos.position_id, kind))
@@ -488,8 +494,9 @@ def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: dat
         s = settlement_call(pos, x.spot, now, settings, calendar, x.spot_quote)
         if s is not None:
             calls.append(s)
-            from .options.settlement import escalate
-            plan["settlement_level"] = escalate(plan.get("settlement_level"), s["level"])
+            if not s.get("transient"):                  # an escalation caused by the closing auction is never kept
+                from .options.settlement import escalate
+                plan["settlement_level"] = escalate(plan.get("settlement_level"), s["level"])
         if plan != pos.plan:
             journal.update_plan(pos.position_id, plan)
             pos = replace(pos, plan=plan)

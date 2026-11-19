@@ -535,13 +535,15 @@ def strike_breached(right: str, short_strike: float, stock_close: float) -> bool
 
 def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, close_cost: float | None,
                stock_close: float | None, trend: str | None, costs=None,
-               leg_px: tuple[float | None, float | None] | None = None) -> list[dict]:
+               leg_px: tuple[float | None, float | None] | None = None, calendar=None) -> list[dict]:
     """Every exit or adjustment call that applies to an open spread right now, most urgent first.
     `close_cost` = cost per share to buy the spread back (sold leg's price minus bought leg's price);
     None = unknown, which is itself reported, never treated as "no exit". With `costs` and `leg_px`
     (the sold and bought legs' premiums) a stop or target also shows the closing charges, each leg on
     its own premium, and the P&L after them. The caller repeats the calls until the position is closed
-    (phase 6)."""
+    (phase 6). FORCED_EXPIRY_EXIT uses the settlement alert's own forced-exit cutoff
+    (`settlement.forced_exit_cutoff`, with `calendar`): the same exit date, and the same "deadline unverified" warning
+    when the holiday list does not cover the expiry month."""
     out = []
     target, stop = exit_levels(pos.credit, p)
     days = (pos.expiry - today).days
@@ -552,12 +554,16 @@ def exit_calls(pos: SpreadPosition, p: StockOptionSellingParams, today: date, cl
         return {"pnl_before_costs_inr": before, "closing_charges_inr": None if charges is None else round(charges, 2),
                 "pnl_after_closing_charges_inr": None if charges is None else round(before - charges, 2)}
 
-    left = trading_days_to(today, pos.expiry)
-    if left <= p.forced_exit_trading_days_before_expiry:
-        out.append({"kind": "FORCED_EXPIRY_EXIT", "action": "Exit now: physical settlement",
-                    "reason": f"{left} trading day(s) to expiry, inside the forced-exit window; stock options settle "
-                              f"physically; exit by {getattr(getattr(p, 'settlement', None), 'forced_exit_by', '15:00')} "
-                              f"while the stock trades continuously"})
+    from .settlement import DEADLINE_UNVERIFIED, forced_exit_cutoff
+    fc = forced_exit_cutoff(pos.expiry, p, calendar)
+    if today >= fc["day"]:
+        left = fc["days"].left(today)
+        warn = "" if fc["verified"] else f" ({DEADLINE_UNVERIFIED})"
+        out.append({"kind": "FORCED_EXPIRY_EXIT", "action": "Exit now: physical settlement" + warn,
+                    "reason": f"{left} trading day(s) to expiry, inside the {fc['forced']}-trading-day forced-exit "
+                              f"window; stock options settle physically; exit by {fc['by']} on {fc['day']:%d-%b-%Y} "
+                              f"while the stock trades continuously" + warn,
+                    "deadline": fc["at"].isoformat(), "deadline_verified": fc["verified"]})
     elif days <= p.time_exit_dte:
         out.append({"kind": "TIME_EXIT", "action": "Exit: time exit",
                     "reason": f"{days} day(s) to expiry, at or inside the {p.time_exit_dte}-day time exit"})

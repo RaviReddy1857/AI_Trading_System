@@ -554,7 +554,8 @@ def test_the_settlement_exit_call_is_warning_from_1500_and_urgent_from_1540():
 def test_the_forced_exit_call_fires_from_the_open_of_e5_and_names_1500():
     from app.options.stock_selling import SpreadPosition, exit_calls
     sp = SpreadPosition("RELIANCE", "PE", 1000.0, 980.0, EXP, 6.0, LOT, 2)
-    calls = exit_calls(sp, SOS, day(5), 3.0, 1100.0, "UP")
+    calls = exit_calls(sp, SOS, day(5), 3.0, 1100.0, "UP", calendar=CAL)
     fx = [c for c in calls if c["kind"] == "FORCED_EXPIRY_EXIT"]
-    assert fx and "exit by 15:00 while the stock trades continuously" in fx[0]["reason"]
-    assert not [c for c in exit_calls(sp, SOS, day(6), 3.0, 1100.0, "UP") if c["kind"] == "FORCED_EXPIRY_EXIT"]
+    assert fx and f"exit by 15:00 on {day(5):%d-%b-%Y} while the stock trades continuously" in fx[0]["reason"]
+    assert not [c for c in exit_calls(sp, SOS, day(6), 3.0, 1100.0, "UP", calendar=CAL)
+                if c["kind"] == "FORCED_EXPIRY_EXIT"]

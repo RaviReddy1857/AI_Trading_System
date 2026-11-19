@@ -220,24 +220,39 @@ def _at(d: date, t: time) -> datetime:
     return datetime.combine(d, t, IST)
 
 
+def forced_exit_cutoff(expiry: date | None, sos, calendar=None) -> dict | None:
+    """The system's forced exit for an expiry, counted with the holiday calendar exactly as the settlement alert counts
+    it (`day_count`; not covered: one session earlier): the session `forced_exit_trading_days_before_expiry` trading
+    days before expiry (`day`), exit by `settlement.forced_exit_by` that day (`at`) while the stock trades continuously,
+    the options' close as the hard limit, and `verified` False when the holiday list does not cover the expiry month
+    (DEADLINE_UNVERIFIED). One source for the SETTLEMENT and FORCED_EXPIRY_EXIT calls. None when the expiry is not
+    known."""
+    if expiry is None:
+        return None
+    from ..session import DERIVATIVES, hours as session_hours
+    dc = day_count(expiry, calendar)
+    forced = sos.forced_exit_trading_days_before_expiry
+    by = getattr(getattr(sos, "settlement", None), "forced_exit_by", "15:00")
+    fday = dc.session(forced)
+    # exit by forced_exit_by (15:00), while the stock trades continuously; hard limit: the options' close that day
+    # (15:30 before 3 Aug 2026, 15:40 after)
+    return {"day": fday, "at": _at(fday, hhmm(by)), "hard_limit": _at(fday, session_hours(DERIVATIVES, fday).close),
+            "by": by, "forced": forced, "verified": dc.covered, "days": dc}
+
+
 def cutoffs(pos: HeldPosition, sos, calendar=None) -> list[dict]:
     """Every moment by which the position should be out, earliest first: the system's forced exit and
     ICICI's own times, each with what set it and whether ICICI's rule is confirmed. `sos`:
     stock_option_selling. Empty when the expiry is not known."""
     if pos.expiry is None:
         return []
-    dc = day_count(pos.expiry, calendar)
+    fc = forced_exit_cutoff(pos.expiry, sos, calendar)
+    dc = fc["days"]
     b = sos.settlement.broker
-    forced = sos.forced_exit_trading_days_before_expiry
-    from ..session import DERIVATIVES, hours as session_hours
-    fday = dc.session(forced)
-    # exit by forced_exit_by (15:00), while the stock trades continuously; hard limit: the options' close that day
-    # (15:30 before 3 Aug 2026, 15:40 after)
-    out = [{"at": _at(fday, hhmm(sos.settlement.forced_exit_by)),
-            "hard_limit": _at(fday, session_hours(DERIVATIVES, fday).close), "broker": False,
-            "confirmed": True, "rule": "forced exit",
+    forced = fc["forced"]
+    out = [{"at": fc["at"], "hard_limit": fc["hard_limit"], "broker": False, "confirmed": True, "rule": "forced exit",
             "what": f"forced exit: no position inside the last {forced} trading days (by "
-                    f"{sos.settlement.forced_exit_by} on E-{forced}, while the stock trades continuously)"}]
+                    f"{fc['by']} on E-{forced}, while the stock trades continuously)"}]
     dm = b.delivery_margin
     if dm.schedule_pct and pos.shorts:
         first = max(dm.schedule_pct)

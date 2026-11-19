@@ -393,9 +393,12 @@ margin estimate, and a red alert when the position is not marked closed by its e
 with `data/holidays.csv`; unless a COVERAGE row (`COVERAGE through YYYY-MM-DD`, optionally followed by its source)
 verifies the holiday list for the expiry month, the count is made one session earlier, the card says so in red, and
 the deadline is marked "deadline unverified: holiday calendar missing; confirm before relying on it" on the alert, the
-API and the Telegram text (one session earlier is not enough if two holidays are missing). A stock quote that arrives
-but is rejected (crossed, or a last price that is not a finite number above 0) makes the alert URGENT at any distance
-to expiry; no quote at all stays silent before E-7. In the delivery
+API and the Telegram text (one session earlier is not enough if two holidays are missing). The FORCED_EXPIRY_EXIT
+call uses the same forced-exit day and warning. A stock tick rejected by the quality gate (crossed, non-finite,
+quarantined) with no valid tick since makes the price STALE for the settlement alert, and URGENT at any distance to
+expiry once no valid tick has come for `stock_option_selling.settlement.rejected_quote_grace_minutes` (5); no quote
+at all, a stale one or the closing auction stays silent before E-7, and an escalation raised only in the closing
+auction is never kept. In the delivery
 estimate each bought share nets one sold share at most (the most exposed sold legs first); sold quantity without a
 bought share in the money is shown as fully deliverable. They are alerts and
 estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or

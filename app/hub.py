@@ -49,6 +49,9 @@ class MarketHub:
         self._first: dict[str, OrderedDict] = {}
         self._segment = {i.symbol: segment_of(i.kind, getattr(i, "fno", True)) for i in settings.watchlist}
         self._auction: dict[str, Tick] = {}       # the latest closing-auction tick per symbol (never a trade)
+        # symbol -> (first rejection since the last valid tick, latest rejection, its reasons): ticks the quality gate
+        # rejected (crossed, non-finite, quarantined). Never a price, a bar or a fill; cleared by a newer valid tick
+        self._rejected: dict[str, tuple[datetime, datetime, str]] = {}
         self._auction_count = 0
 
     def segment(self, symbol: str) -> str:
@@ -72,11 +75,15 @@ class MarketHub:
                                  self.settings.feed.max_jump_pct)
             if reasons:
                 self._bad_count += 1
+                prev = self._rejected.get(tick.symbol)
+                self._rejected[tick.symbol] = (prev[0] if prev else tick.received_at, tick.received_at,
+                                               ", ".join(reasons))
                 for r in reasons:
                     self.store.save_quality_event(tick.received_at, tick.symbol, r,
                                                   tick.last, tick.bid, tick.ask, tick.source)
                 return
             self._good_count += 1
+            self._rejected.pop(tick.symbol, None)          # a newer valid tick ends the rejection
             if self._first_tick_at is None:
                 self._first_tick_at = tick.received_at
             self._last_good[tick.symbol] = tick
@@ -165,9 +172,13 @@ class MarketHub:
         with self._lock:
             t = self._last_good.get(symbol)
             status = self._status(t, now, symbol)
+            rej = self._rejected.get(symbol)
+            # the latest rejected tick since the last valid one (never its price): for the settlement alert
+            rejected = {"rejected_since": rej[0], "rejected_at": rej[1], "rejected_why": rej[2]} if rej else \
+                {"rejected_since": None, "rejected_at": None, "rejected_why": None}
             if t is None:
-                return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
-            return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
+                return {"status": status, "bid": None, "ask": None, "last": None, "at": None, **rejected}
+            return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at, **rejected}
 
     def first_quote(self, symbol: str, after: datetime) -> dict | None:
         """The first good tick received at or after `after` (a bar close: a minute boundary), with its status as it

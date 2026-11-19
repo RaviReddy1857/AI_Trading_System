@@ -3385,6 +3385,50 @@ settlement tests that pinned the calendar block's keys now include the two new f
 **Not tested here:** the live Breeze feed's real crossed or malformed ticks reaching `spot_reading` (the hub is stubbed);
 the opt-in `test_real_live_db_holds_no_sim_rows` (it reads data/, not run).
 
+## Codex Astra review of 4e9fb4d: fixes (2026-11-19)
+
+Tests: `tests/test_astra_rereview2.py`. Nothing in data/, capital values, strategy logic or alert settings was changed;
+the live app was not stopped or restarted. **The running app reads config.yaml at start: the new
+`rejected_quote_grace_minutes` key and this code take effect at its next restart (your call when).**
+
+**1. HIGH, rejected ticks kept for settlement** (`app/hub.py`, `app/pricing.py`, config). `MarketHub.on_tick` dropped a
+tick the quality gate rejected, so settlement saw a missing quote, or the last good price as LIVE. The hub now keeps,
+per symbol, the first rejection since the last valid tick, the latest one and its reasons (CROSSED_QUOTE, BAD_PRICE,
+PRICE_JUMP, ...), cleared by a newer valid tick, and `MarketHub.quote` returns them (`rejected_since`, `rejected_at`,
+`rejected_why`). Rejected ticks are still never a price, a bar, a first quote or a fill. `Marker.spot_reading`: with a
+rejection pending today and the stock in continuous trading, the spot is never LIVE (even when the last good tick is
+fresh): STALE while the last valid tick of today (with none, the first rejection) is younger than
+`stock_option_selling.settlement.rejected_quote_grace_minutes` (new, config.yaml 5, validated 0 < x <= 60), then
+REJECTED, which makes the settlement alert URGENT at any distance to expiry (your policy). Not changed: strategies,
+the dashboard, paper fills and marks still use the last good tick (`live_quote`, `snapshot`, `Marker.cash`); a
+rejection of an earlier day, or while CLOSED or in the auction, is not counted. Tests through `on_tick`: a crossed
+tick with no prior good tick (STALE until 5 minutes, then URGENT at E-8); after a good tick (the old price hidden from
+settlement but kept for strategies; URGENT at 5 minutes); a rejection then a valid tick within 5 minutes (never
+URGENT); a price jump and a NaN tick are rejections; rejected ticks are no first quote; an earlier day's rejection and
+a closed market do not escalate.
+
+**2. MEDIUM, the closing auction is absent** (`app/pricing.py`, `app/positions.py`). AUCTION status (from 15:15 for
+F&O stocks) means no tradable spot: it is now an absent quote, never a rejected one - silent at E-8; from E-7 the same
+URGENT "price unknown" alert as a missing quote. That escalation is never kept: the settlement call is marked
+`transient`, the position's `settlement_level` is not raised, and the call is resolved at the next evaluation that
+does not raise it ("raised in the closing auction only"). Tests with a 15:10 continuous tick: at 15:25 at E-8
+silent; at E-7 URGENT with the same reason as a missing quote, not kept on the position (the missing one is), and
+resolved by the next evaluation with a usable price.
+
+**3. MEDIUM, one forced-exit cutoff** (`app/options/settlement.py` `forced_exit_cutoff`,
+`app/options/stock_selling.py` `exit_calls(calendar=...)`, `app/positions.py`). FORCED_EXPIRY_EXIT counted plain
+weekdays; the settlement alert counted with the holiday calendar (one session earlier when not covered). Both now come
+from `forced_exit_cutoff`: the same day, the 15:00 time, and the same "deadline unverified: holiday calendar missing;
+confirm before relying on it" warning (in FORCED_EXPIRY_EXIT's action and reason, with `deadline` and
+`deadline_verified` in its values). The call fires from the start of that day. Without a calendar `exit_calls` is
+conservative (one session earlier, unverified); the live engine always passes the app calendar. Two phase 9 tests
+now pass a covered calendar or expect the date in the reason. Tests: 25 Dec as a holiday with coverage before a
+29 Dec expiry (both calls on Monday 21 Dec, verified; not on 18 Dec); no coverage (both on Friday 18 Dec, both
+carry the warning).
+
+**Not tested here:** real Breeze ticks through the gate (ticks are built in the tests); the live app has not loaded
+this code or the new config key.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |

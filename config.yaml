@@ -414,6 +414,8 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
     near_money_pct: 5           # near the money: strike within 5% of spot (set by you 2026-11-15)
     forced_exit_by: "15:00"     # forced exit day (E-5): exit by 15:00, while the stock trades continuously (you,
                                 # 2026-11-17); the options' close (15:40) stays the hard limit for the red/URGENT alert
+    rejected_quote_grace_minutes: 5  # a rejected stock tick (crossed, non-finite, quarantined) and no valid tick for
+                                # 5 minutes: URGENT settlement alert; before that the quote is STALE (you, 2026-11-19)
     broker:                     # ICICI Direct's physical-settlement rules (entered by you 2026-11-15; sources in docs/STATUS.md)
       delivery_margin:
         confirmed: true

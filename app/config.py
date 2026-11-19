@@ -894,6 +894,10 @@ class Settlement(StrictModel):
     # the forced exit (close of E-n): exit by this time that day, while the stock trades continuously (user,
     # 2026-11-17); the options' close (15:40 from 3 Aug 2026) stays the hard limit for the red/URGENT escalation
     forced_exit_by: CLOCK = "15:00"
+    # a stock tick rejected by the quality gate (crossed, non-finite, quarantined) with no valid tick since: STALE for
+    # this many minutes after the last valid tick (or the first rejection, when there was none today), then URGENT on
+    # the settlement alert (user policy, 2026-11-19)
+    rejected_quote_grace_minutes: float = Field(5.0, gt=0, le=60)
     broker: BrokerSettlement = BrokerSettlement()
 
     @model_validator(mode="after")
