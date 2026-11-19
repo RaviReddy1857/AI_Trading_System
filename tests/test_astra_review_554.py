@@ -135,3 +135,32 @@ def test_an_unknown_config_key_is_an_error_and_the_shipped_config_loads():
     with pytest.raises(ValidationError):
         Feed(stale_after_seconds=30, max_jump_pct=5, rejected_quote_grace_minutes=5)
     assert load_settings().feed.held_price_notice.min_ticks == 10
+
+
+# ================= final review of 73bd671: expiry is checked at each send, not at the batch start =================
+def test_a_slow_earlier_send_never_lets_a_later_alert_go_out_after_its_expiry():
+    from app.alerts import NOT_DELIVERED, SENT, AlertBook
+    from app.store import Store
+    from tests.phase6_fixtures import settings
+    s = settings()
+    raw = s.model_dump()
+    raw["alerts"]["telegram_enabled"] = True
+    s = type(s).model_validate(raw)
+    book = AlertBook(Store(":memory:"), s)
+    t0 = ist(15, 14, 50)
+    book.enqueue("first", "EXIT_CALL", "slow one", t0 - timedelta(seconds=2), t0 + timedelta(minutes=30))
+    book.enqueue("price:RELIANCE:2026-11-16", "PRICE_UNAVAILABLE", "notice", t0 - timedelta(seconds=1), ist(15, 15))
+    clock = {"now": t0}
+    sent = []
+
+    class SlowSender:
+        def send(self, text):
+            sent.append(text)
+            clock["now"] += timedelta(seconds=12)                         # the first send takes 12 s: past 15:15
+
+    out = book.dispatch(t0, SlowSender(), clock=lambda: clock["now"])
+    assert len(sent) == 1 and sent[0].startswith("slow one")              # the notice never went out
+    assert book.get("first")["status"] == SENT
+    late = book.get("price:RELIANCE:2026-11-16")
+    assert late["status"] == NOT_DELIVERED and "expired before delivery" in late["error"] and late["attempts"] == 0
+    assert out["sent"] == 1 and out["expired"] == 1

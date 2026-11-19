@@ -107,12 +107,20 @@ class AlertBook:
             return self._db.execute("SELECT COUNT(*) FROM alert_log WHERE kind=? AND created_utc>=?",
                                     (kind, start.isoformat())).fetchone()[0]
 
-    def dispatch(self, now: datetime, sender) -> dict:
-        """Send every pending alert that is due. Never raises: a failure is recorded and retried later."""
+    def dispatch(self, now: datetime, sender, clock=None) -> dict:
+        """Send every pending alert that is due. Never raises: a failure is recorded and retried later.
+        Each alert's expiry is checked against the clock immediately before its own send attempt (`clock()`; by
+        default `now` plus the real time elapsed since the batch began), so a slow earlier send never lets an expired
+        alert go out."""
+        import time as _time
+        start = _time.monotonic()
+        if clock is None:
+            def clock():
+                return now + timedelta(seconds=_time.monotonic() - start)
         out = {"sent": 0, "failed": 0, "expired": 0}
         due = self.rows("status=? AND next_attempt_utc<=?", (PENDING, now.isoformat()), 500)
         for a in sorted(due, key=lambda r: r["created_utc"]):
-            if now >= datetime.fromisoformat(a["expires_utc"]):
+            if clock() >= datetime.fromisoformat(a["expires_utc"]):     # the clock at this attempt, not the batch start
                 self._set(a["key"], status=NOT_DELIVERED,
                           error=(a["error"] + "; " if a["error"] else "") + "expired before delivery")
                 out["expired"] += 1

@@ -3537,6 +3537,12 @@ local timestamp).
 boolean for each threshold; an unknown key (`min_tick`, the removed `rejected_quote_grace_minutes`); the shipped
 config loads.
 
+**Final review of 73bd671, alert expiry** (`AlertBook.dispatch`). Expiry was checked against the batch-start time, so
+an alert could start sending seconds after it expired. Each alert's expiry is now checked against the clock right
+before its own send attempt (default: the batch time plus the real time elapsed; recorded times and retry schedules
+unchanged); an expired one is NOT_DELIVERED and never sent. Test: a 12-second first send carries the clock past a
+15:15 price notice, which is then not sent.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
