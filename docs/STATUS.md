@@ -3491,6 +3491,52 @@ margin base still URGENT; the grace key gone and the notice thresholds validated
 
 **Not tested here:** real Breeze ticks; the notice's Telegram delivery (it is enqueued like the other alerts).
 
+## Codex Astra review of 554c2d8/b365e67: fixes (2026-11-19)
+
+Tests: `tests/test_astra_review_554.py` (and `tests/test_settlement_last_price.py`, now with a real notifier). Nothing
+in data/ was written; the live app was not stopped or restarted (it picks this up at its next restart).
+
+**1. HIGH, the snapshot is authoritative** (`app/positions.py`, `app/engine.py`). `evaluate_positions` fell back to
+`x.spot` (the LIVE spot) whenever the snapshot gave no price, so a pre-open tick at the open could make an E-6 position
+look far out of the money and silence it. Now `ExitInputs.settlement` ({price, at, auction}) is used as given, an
+explicit None included (no valid price: the near-the-money assumption); `x.spot` stays for the other exit rules and is
+used for settlement only by callers that pass no snapshot at all (tests, tools). `evaluate_exits` reads ONE snapshot
+per symbol per evaluation, so every position on an underlying sees the same price and time. Tests: a 09:14:59
+pre-open tick, evaluated at 09:15:10 at E-6 -> NOTICE (no valid price), although the LIVE spot is 1400; two
+positions on RELIANCE -> one snapshot read, the same price and time on both alerts.
+
+**2. HIGH, legacy levels.** Read-only check of data/market_live.db (19-Nov-2026, opened `mode=ro`): **0 open
+positions** (so 0 open stock-option positions), 0 positions with a stored `settlement_level`, 0 SETTLEMENT exit calls
+(active or ever). So no migration. Added a start-up check (`SignalEngine.check_settlement_levels`, run by `restore`;
+`positions.unsupported_settlement_levels`): each open position whose stored settlement level is above what the current
+rules give now is logged as a warning and listed in the engine's problems and in `restore()['settlement_level_flags']`;
+the stored level is never changed. Tests: a stored URGENT at E-9 far out of the money is flagged and kept; a WARNING
+the current rules support is not flagged.
+
+**3. HIGH, overdue escalates first** (`app/options/settlement.py`). An overdue exit now raises the computed level to
+URGENT inside `settlement_alert`, before the call is built and the plan saved (before: a position already at WARNING
+stayed WARNING when overdue). Test: far out of the money on the forced-exit day: 15:00 WARNING (the planned exit time),
+15:40 URGENT and overdue, URGENT kept on the position. The phase 9 acceptance test that expected an overdue far
+out-of-the-money alert to have no level (only the red colour) now expects URGENT.
+
+**4. MEDIUM, the price notice** (`app/alerts.py` `Notifier.price_notices`, `app/engine.py` `send_price_notices`).
+It expires at the end of the symbol's continuous session (15:15 for F&O stocks), so it is never delivered in the
+auction or after the close (a notice whose session already ended is not recorded); it is recorded once per durable
+key `price:<symbol>:<date>` (an existing key, e.g. after a restart, is never recorded again); the engine's in-memory
+"done today" flag is set only after the notice is recorded (a failed enqueue is retried on the next bar). The
+`price_notices` argument of `Notifier.on_bar` is gone. Tests: the expiry is 15:15; a restarted engine on the same
+database records nothing new; a failing enqueue leaves the flag unset, the next bar records it once; an ended
+session records nothing.
+
+**5. MEDIUM, not fixed (by your instruction):** open issue 110 below (replayed or delayed Breeze quotes get a fresh
+local timestamp).
+
+**6. LOW, config** (`app/config.py`). Every config section now forbids unknown keys (`extra="forbid"` on
+`StrictModel`), so a typo or a removed setting is an error. config.yaml and config.local.yaml both load with it:
+**no offending keys**. The four `feed.held_price_notice` thresholds are strict: true/false are rejected. Tests: a
+boolean for each threshold; an unknown key (`min_tick`, the removed `rejected_quote_grace_minutes`); the shipped
+config loads.
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
@@ -3604,6 +3650,7 @@ margin base still URGENT; the grace key gone and the notice thresholds validated
 | 108 | data | `python -m app.options.stock_backtest` runs the Phase 4 option reports (long_option, credit_spread, iron_condor) at the stock-option capital Rs 10,00,000, not account.capital_inr | Closed 2026-11-16: `run_index_reports` uses account.capital_inr (review 7 fixes) |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
 | 109 | Astra re-review | The research shortlist's `actionable_check` (`app/options/actionable.py`) still requires `details.margin_inr` for every spread, so a debit spread (the reversal bull call) shows MARGIN_UNKNOWN there although the risk engine now commits its net debit plus costs | Open: left as is by your decision of 19-Nov-2026 (the check is never actionable while positions are not passed to it) |
+| 110 | Astra review 554c2d8 | `app/feeds/breeze_feed.py` stamps every quote with the local receive time, so a replayed or delayed quote (after a reconnect, or a late batch) looks fresh: freshness, the settlement price's time and the held-price notice can treat an old price as current. Fix later: carry Breeze's own quote timestamp and judge freshness on it | Open (not fixed, by your instruction of 19-Nov-2026) |
 
 ## Decisions log
 

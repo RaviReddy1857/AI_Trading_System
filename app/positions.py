@@ -83,11 +83,10 @@ class ExitInputs:
     prices: list[float] | None           # closing prices of the position's legs (app.pricing.Marker.marks)
     price_why: str = ""                  # why prices are None
     spot: float | None = None            # the underlying's LIVE last price (cash: the share)
-    # the settlement alert's price: the last valid continuous-session price and its time (any status: a stale price
-    # still counts, an auction, rejected or quarantined tick never replaces it); None = use `spot`
-    last_price: float | None = None
-    last_price_at: datetime | None = None
-    auction: bool = False                # the stock is in its closing auction now
+    # the settlement alert's price from the engine's hub snapshot: {"price", "at", "auction"}. AUTHORITATIVE when
+    # given, an explicit None price included (no valid price: the near-the-money assumption); `spot` is never used
+    # for settlement then. None = no snapshot at all (callers without a hub: tests, tools): `spot` is the price.
+    settlement: dict | None = None
     regime: str | None = None
     kill_reasons: tuple[str, ...] = ()   # kill-switch reasons other than "outside market hours"
     stock_trend: str | None = None       # phase 9 trend of the stock (UP / DOWN / None)
@@ -359,6 +358,29 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
             "overdue": bool(a["overdue"]), "values": {"alert": a}}
 
 
+def unsupported_settlement_levels(journal, settings, calendar, now: datetime, settlement_for) -> list[dict]:
+    """Open positions whose STORED settlement level is above what the current rules give now (a level kept from an
+    earlier design, or one no current settlement reason supports). Read-only: it logs and flags, it never changes a
+    position. `settlement_for(pos)` -> the ExitInputs.settlement dict for the position (or None: no price)."""
+    from .options.settlement import LEVELS
+    out = []
+    for pos in journal.positions("OPEN"):
+        stored = (pos.plan or {}).get("settlement_level")
+        if not stored:
+            continue
+        snap = settlement_for(pos) or {}
+        fresh = replace(pos, plan={k: v for k, v in (pos.plan or {}).items() if k != "settlement_level"})
+        c = settlement_call(fresh, snap.get("price"), now, settings, calendar, snap.get("at"), bool(snap.get("auction")))
+        current = c["level"] if c else None
+        known = stored in LEVELS
+        if not known or LEVELS.index(stored) > LEVELS.index(current):
+            out.append({"position_id": pos.position_id, "symbol": pos.symbol, "stored_level": stored,
+                        "current_level": current,
+                        "current_reason": c["reason"] if c else "no settlement alert applies now",
+                        "note": "flagged only: the stored level is unchanged; check the position and the alert"})
+    return out
+
+
 # ---------------- the call book: activation, repeats, resolution ----------------
 class ExitCallBook:
     def __init__(self, store, settings):
@@ -489,9 +511,11 @@ def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: dat
     for pos in journal.positions("OPEN"):
         x = inputs_for(pos)
         calls, plan = evaluate(pos, x, settings, calendar, costs)
-        last = x.last_price if x.last_price is not None else x.spot
-        s = settlement_call(pos, last, now, settings, calendar, x.last_price_at if x.last_price is not None else None,
-                            x.auction)
+        if x.settlement is not None:                    # the snapshot decides, None included: never `spot`
+            sp, sat, auc = x.settlement.get("price"), x.settlement.get("at"), bool(x.settlement.get("auction"))
+        else:
+            sp, sat, auc = x.spot, None, False
+        s = settlement_call(pos, sp, now, settings, calendar, sat, auc)
         if s is not None:
             calls.append(s)
             from .options.settlement import escalate

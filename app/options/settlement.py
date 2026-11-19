@@ -529,6 +529,8 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
     if invalid:
         level = escalate(level, URGENT)          # an unusable input never makes the alert quieter
     late = overdue(pos, now, closed, sos, calendar)
+    if late:
+        level = escalate(level, URGENT)          # overdue: URGENT whatever the schedule gave, before the plan is saved
     dl = cs[0] if cs else None
     due_now = dl is not None and late is None and now >= dl["at"]     # the planned exit time has come: exit now
     if level is None and late is None and not due_now:

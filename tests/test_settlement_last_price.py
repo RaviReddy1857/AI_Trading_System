@@ -15,7 +15,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
-from app.alerts import exit_text
+from app.alerts import AlertBook, Notifier, exit_text
 from app.calendar import MarketCalendar
 from app.engine import SignalEngine
 from app.hub import MarketHub
@@ -61,18 +61,24 @@ class World:
     """A held RELIANCE put spread (sold 1300 PE, bought 1260 PE) at E-`left` on Monday 16 Nov, a real hub fed tick by
     tick, and the engine evaluating my positions on it."""
 
-    def __init__(self, left: int, calendar=COVERED):
-        self.hub = MarketHub(S, Store(":memory:"), "breeze", MarketCalendar())
-        self.j, store = new_journal(S)
+    def __init__(self, left: int, calendar=COVERED, store=None, journal=None, hub=None):
+        self.hub = hub or MarketHub(S, Store(":memory:"), "breeze", MarketCalendar())
+        if journal is None:
+            self.j, store = new_journal(S)
+        else:
+            self.j = journal
+        self.store = store
         exp = expiry_at(left)
-        self.pos = self.j.add_manual_position({
+        self.pos = self.j.positions("OPEN")[0] if journal is not None else self.j.add_manual_position({
             "symbol": "RELIANCE", "kind": "stock", "entry_date": "2026-11-16", "margin_inr": 90000,
             "legs": [{"action": "SELL", "right": "PE", "strike": 1300, "expiry": exp.isoformat(), "lots": 1,
                       "lot_size": 500, "price": 12.0},
                      {"action": "BUY", "right": "PE", "strike": 1260, "expiry": exp.isoformat(), "lots": 1,
                       "lot_size": 500, "price": 4.0}]}, ist(9, 30))
         self.book = ExitCallBook(store, S)
-        self.eng = SignalEngine(settings=S, store=store, hub=self.hub, journal=self.j,
+        self.alerts = AlertBook(store, S)
+        self.notifier = Notifier(S, self.alerts, self.j, _Risk(), None, calendar)
+        self.eng = SignalEngine(settings=S, store=store, hub=self.hub, journal=self.j, notifier=self.notifier,
                                 marker=Marker(S, store, self.hub, "breeze"), risk=_Risk(), regime=None,
                                 calendar=calendar, desk=None, source="breeze", costs=ZeroCosts(), execbook=None,
                                 paper=None, exits=self.book, now_fn=lambda: None, strategies=[])
@@ -89,7 +95,7 @@ class World:
         """One evaluation: (settlement calls due, price notices due)."""
         due = [c for c in self.eng.evaluate_exits(now, "TRENDING_UP", five={}, daily={"RELIANCE": []})
                if c["kind"] == "SETTLEMENT"]
-        return due, self.eng.price_notices(now)
+        return due, self.eng.send_price_notices(now)
 
     def call(self):
         return next((c for c in self.book.calls(self.pos.position_id) if c["kind"] == "SETTLEMENT"), None)

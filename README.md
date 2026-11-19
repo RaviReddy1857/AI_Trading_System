@@ -401,8 +401,10 @@ themselves. With no valid price at all the sold leg is assumed near the money (N
 and the alert says so. During the closing auction (15:15-15:35) nothing new is sent and the text reads "auction in
 progress, last price as of HH:MM". A dead or noisy feed for a held position's stock (no valid tick for 5 minutes in
 continuous trading, or more than half of at least 10 ticks rejected in 5 minutes: `feed.held_price_notice`) sends ONE
-"PRICE UNAVAILABLE ... since HH:MM, check in ICICI Direct" message per stock per day; it never changes a settlement
-alert. In the delivery
+"PRICE UNAVAILABLE ... since HH:MM, check in ICICI Direct" message per stock per day, which expires at the end of
+the stock's continuous session; it never changes a settlement alert. An overdue exit is always URGENT. At start the
+app logs (and lists as a problem, never changes) any open position whose stored settlement level the current rules no
+longer support. Every config section rejects unknown keys. In the delivery
 estimate each bought share nets one sold share at most (the most exposed sold legs first); sold quantity without a
 bought share in the money is shown as fully deliverable. They are alerts and
 estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or

@@ -136,8 +136,13 @@ class SignalEngine:
                 r = self.j.signal(row["signal_id"])
                 if r:
                     self.signals[row["signal_id"]] = signal_from_dict(r["signal"])
+        try:
+            flags = self.check_settlement_levels(now)
+        except Exception:
+            log.exception("settlement level check failed")
+            flags = None
         return {"unexpired_signals": n, "paper_trades_recreated": recreated, "open_positions": len(self.j.positions("OPEN")),
-                "pending_paper": len(self.j.paper_trades(status="PENDING"))}
+                "pending_paper": len(self.j.paper_trades(status="PENDING")), "settlement_level_flags": flags}
 
     # ---- the loop ----
     def step(self, now: datetime | None = None) -> dict | None:
@@ -262,7 +267,7 @@ class SignalEngine:
         closed = self.paper.manage(now, b - FIVE)
         due = self.evaluate_exits(now, regime, five, daily)
         try:
-            notices = self.price_notices(now)
+            notices = self.send_price_notices(now)
         except Exception:
             log.exception("held-price notices not checked")
             notices = []
@@ -272,7 +277,7 @@ class SignalEngine:
         self.j.set_state("last_bar_utc", b.isoformat(), now)
         if self.notifier is not None:
             try:
-                self.notifier.on_bar(rank(approved), due, now, self.kill_reasons(now), price_notices=notices)
+                self.notifier.on_bar(rank(approved), due, now, self.kill_reasons(now))
             except Exception:
                 log.exception("alerts failed (signals and paper trading carry on)")
         self.last_summary = {"bar_utc": b.isoformat(), "regime": regime, "signals": len(stored),
@@ -430,6 +435,15 @@ class SignalEngine:
         kill = self.kill_reasons(now)
         p9 = self.s.stock_option_selling
 
+        snaps: dict[str, dict] = {}                 # ONE hub snapshot per symbol per evaluation
+
+        def settlement_for(sym: str) -> dict:
+            if sym not in snaps:
+                snap = self.hub.settlement_snapshot(sym, now)
+                px, at = self.settlement_price(snap, now)
+                snaps[sym] = {"price": px, "at": at, "auction": snap["phase"] == "AUCTION"}
+            return snaps[sym]
+
         def inputs_for(pos):
             prices, why = self.m.marks(pos, now)
             trend = close = None
@@ -438,12 +452,10 @@ class SignalEngine:
                 trend = trend_of(d, p9.sma_short, p9.sma_mid, p9.atr_days)[0] if d else None
                 f = (five or {}).get(pos.symbol)
                 close = f[-1].close if f else None
-            # the settlement price from ONE hub snapshot: the last valid continuous-session price and its time
-            snap = self.hub.settlement_snapshot(pos.symbol, now)
-            px, at = self.settlement_price(snap, now)
+            # the settlement price: the symbol's snapshot of this evaluation, authoritative (None included)
             return ExitInputs(now=now, prices=prices, price_why=why, spot=self.m.spot(pos.symbol, now), regime=regime,
-                              kill_reasons=kill, stock_trend=trend, stock_close=close, last_price=px,
-                              last_price_at=at, auction=snap["phase"] == "AUCTION")
+                              kill_reasons=kill, stock_trend=trend, stock_close=close,
+                              settlement=settlement_for(pos.symbol))
         return evaluate_positions(self.j, self.exits, self.s, self.cal, now, inputs_for, self.costs)
 
     def settlement_price(self, snap: dict, now: datetime) -> tuple[float | None, datetime | None]:
@@ -461,8 +473,10 @@ class SignalEngine:
         """The held-price notices due now (`feed.held_price_notice`): for each underlying of my open positions in
         continuous trading, no valid tick for `no_valid_tick_minutes` (since its last valid tick today, or the open)
         or more than `rejection_share_pct` of at least `min_ticks` ticks rejected in the last
-        `rejection_window_minutes`. ONE per symbol per trading date (kept in memory only, reset each date); it never
-        changes a settlement alert and nothing is written to a position."""
+        `rejection_window_minutes`. ONE per symbol per trading date: the durable alert key `price:<symbol>:<date>`, and an
+        in-memory flag set only once the notice is recorded (`send_price_notices`); it expires at the end of the
+        symbol's continuous session (never delivered in the auction or after the close). It never changes a settlement
+        alert and nothing is written to a position."""
         cfg = self.s.feed.held_price_notice
         day = ist_day(now)
         if self._noticed_day != day:
@@ -485,12 +499,41 @@ class SignalEngine:
                        f"{cfg.rejection_window_minutes:g} minutes")
             if why is None:
                 continue
-            self._noticed.add(sym)
             px, at = self.settlement_price(snap, now)
             last = (f"; settlement alerts use the last valid price {px:g} as of "
                     f"{at.astimezone(IST):%d-%b %H:%M}" if px is not None else
                     "; no valid price yet: settlement alerts assume the sold legs near the money")
             out.append({"symbol": sym, "day": day.isoformat(), "since": since, "why": why,
+                        "key": f"price:{sym}:{day.isoformat()}",
+                        "expires": self.cal.hours(self.hub.segment(sym), day).continuous_end_utc,
                         "text": f"PRICE UNAVAILABLE - {sym}: price unavailable since {since.astimezone(IST):%H:%M} "
                                 f"({why}), check in ICICI Direct{last}. Notice only: no settlement level changes."})
         return out
+
+    def send_price_notices(self, now: datetime) -> list[dict]:
+        """Record the held-price notices due now with the notifier; a symbol is marked done for the day only when its
+        notice is recorded (new, or already there under its durable key). Returns the notices newly recorded."""
+        notices = self.price_notices(now)
+        if not notices or self.notifier is None:
+            return []
+        res = self.notifier.price_notices(notices, now)
+        self._noticed.update(res["done"])
+        return [n for n in notices if n["symbol"] in res["new"]]
+
+    def check_settlement_levels(self, now: datetime) -> list[dict]:
+        """At start: open positions whose stored settlement level no current settlement reason supports. Logged and
+        shown as a problem; never changed."""
+        from .positions import unsupported_settlement_levels
+
+        def settlement_for(pos):
+            snap = self.hub.settlement_snapshot(pos.symbol, now)
+            px, at = self.settlement_price(snap, now)
+            return {"price": px, "at": at, "auction": snap["phase"] == "AUCTION"}
+        flags = unsupported_settlement_levels(self.j, self.s, self.cal, now, settlement_for)
+        for f in flags:
+            msg = (f"settlement level check: {f['position_id']} ({f['symbol']}) is stored at {f['stored_level']} but "
+                   f"the current rules give {f['current_level'] or 'no alert'} ({f['current_reason']}); unchanged - "
+                   f"check it")
+            log.warning(msg)
+            self.problems.append(msg)
+        return flags

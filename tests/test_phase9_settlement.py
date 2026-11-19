@@ -244,7 +244,8 @@ def test_ACCEPTANCE_a_position_not_closed_by_its_deadline_gets_a_red_alert_until
     assert overdue(pos, at(1), True, SOS) is None                         # marked closed: it stops
     # whatever the moneyness: a far out-of-the-money spread left open past the deadline is still alerted, in red
     a = settlement_alert(pos, 1100.0, at(3), SOS, CAP)
-    assert a is not None and a["level"] is None and a["colour"] == "red" and a["overdue"]["kind"] == "EXIT_OVERDUE"
+    # overdue is URGENT whatever the moneyness (Astra review of 554c2d8, 19-Nov-2026; it had no level before)
+    assert a is not None and a["level"] == URGENT and a["colour"] == "red" and a["overdue"]["kind"] == "EXIT_OVERDUE"
     assert settlement_alert(pos, 1100.0, at(3), SOS, CAP, closed=True) is None
     assert settlement_alert(pos, 980.0, at(3), SOS, CAP)["level"] == URGENT
 

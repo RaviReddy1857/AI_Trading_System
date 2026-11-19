@@ -17,8 +17,9 @@ NO_LOCAL_ENV = "TRADING_NO_LOCAL_CONFIG"
 
 class StrictModel(BaseModel):
     """Base for every config section: NaN and +/-infinity are rejected in all numeric
-    fields, so no limit can silently become infinite or unknown."""
-    model_config = ConfigDict(allow_inf_nan=False)
+    fields, so no limit can silently become infinite or unknown; an unknown key (a typo, or a setting that no longer
+    exists) is an error, never silently ignored."""
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
 
 
 class Account(StrictModel):
@@ -66,10 +67,10 @@ class HeldPriceNotice(StrictModel):
     tick for `no_valid_tick_minutes` during continuous trading, or more than `rejection_share_pct` of at least
     `min_ticks` ticks rejected by the quality gate in the last `rejection_window_minutes`. A notice only: it never
     changes a settlement alert and is never kept on a position."""
-    no_valid_tick_minutes: float = Field(5.0, gt=0, le=120)
-    rejection_window_minutes: float = Field(5.0, gt=0, le=120)
-    rejection_share_pct: float = Field(50.0, gt=0, lt=100)
-    min_ticks: int = Field(10, ge=1, le=10000)
+    no_valid_tick_minutes: float = Field(5.0, gt=0, le=120, strict=True)      # strict: true/false are not numbers
+    rejection_window_minutes: float = Field(5.0, gt=0, le=120, strict=True)
+    rejection_share_pct: float = Field(50.0, gt=0, lt=100, strict=True)
+    min_ticks: int = Field(10, ge=1, le=10000, strict=True)
 
 
 class Feed(StrictModel):
