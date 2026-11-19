@@ -388,17 +388,20 @@ has no holidays for use the NIFTY sessions instead (add the NSE holiday lists fo
 `GET /api/stock-option-selling/settlement`): ICICI's physical-settlement rules as you entered them in `config.yaml`
 (`stock_option_selling.settlement.broker`), each marked confirmed or "ICICI rule not confirmed". The rules behind it
 (`app/options/settlement.py`) give, for every open position with a sold stock option leg: NOTICE / WARNING from 7
-trading days before expiry and URGENT from 5 (or when the price is unknown), the delivery obligation and expiry-week
+trading days before expiry and URGENT from 5, the delivery obligation and expiry-week
 margin estimate, and a red alert when the position is not marked closed by its exit deadline. Trading days are counted
 with `data/holidays.csv`; unless a COVERAGE row (`COVERAGE through YYYY-MM-DD`, optionally followed by its source)
 verifies the holiday list for the expiry month, the count is made one session earlier, the card says so in red, and
 the deadline is marked "deadline unverified: holiday calendar missing; confirm before relying on it" on the alert, the
 API and the Telegram text (one session earlier is not enough if two holidays are missing). The FORCED_EXPIRY_EXIT
-call uses the same forced-exit day and warning. A stock tick rejected by the quality gate (crossed, non-finite,
-quarantined) with no valid tick since makes the price STALE for the settlement alert, and URGENT at any distance to
-expiry once no valid tick has come for `stock_option_selling.settlement.rejected_quote_grace_minutes` (5); no quote
-at all, a stale one or the closing auction stays silent before E-7, and an escalation raised only in the closing
-auction is never kept. In the delivery
+call uses the same forced-exit day and warning. The price is the stock's last valid continuous-session price, shown
+with its time; auction, rejected, quarantined or stale ticks never replace it and never change the alert's level by
+themselves. With no valid price at all the sold leg is assumed near the money (NOTICE on E-7 and E-6, URGENT from E-5)
+and the alert says so. During the closing auction (15:15-15:35) nothing new is sent and the text reads "auction in
+progress, last price as of HH:MM". A dead or noisy feed for a held position's stock (no valid tick for 5 minutes in
+continuous trading, or more than half of at least 10 ticks rejected in 5 minutes: `feed.held_price_notice`) sends ONE
+"PRICE UNAVAILABLE ... since HH:MM, check in ICICI Direct" message per stock per day; it never changes a settlement
+alert. In the delivery
 estimate each bought share nets one sold share at most (the most exposed sold legs first); sold quantity without a
 bought share in the money is shown as fully deliverable. They are alerts and
 estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or

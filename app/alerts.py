@@ -191,7 +191,8 @@ class Notifier:
         self.store, self.regime = store, regime
         self._kill_on = False
 
-    def on_bar(self, approved: list[dict], due_calls: list[dict], now: datetime, kill_reasons=()) -> dict:
+    def on_bar(self, approved: list[dict], due_calls: list[dict], now: datetime, kill_reasons=(),
+               price_notices=()) -> dict:
         a = self.s.alerts
         sent_signals = 0
         room = a.daily_signal_cap - self.book.count_today("SIGNAL", now)
@@ -207,8 +208,10 @@ class Notifier:
             minutes = (self.s.alerts.settlement_repeat_minutes.URGENT if c["kind"] == "SETTLEMENT"
                        else a.exit_call_repeat_minutes)
             self.book.enqueue(c["key"], "EXIT_CALL", exit_text(c), now, now + timedelta(minutes=minutes))
+        for n in price_notices:                         # once per symbol per trading date (the key)
+            self.book.enqueue(f"price:{n['symbol']}:{n['day']}", "PRICE_UNAVAILABLE", n["text"], now)
         self.system(now, kill_reasons)
-        return {"signal_alerts": sent_signals, "exit_alerts": len(due_calls)}
+        return {"signal_alerts": sent_signals, "exit_alerts": len(due_calls), "price_notices": len(price_notices)}
 
     def system(self, now: datetime, kill_reasons=()) -> None:
         """Kill switch (once per episode) and each pool's daily stop (once a day)."""

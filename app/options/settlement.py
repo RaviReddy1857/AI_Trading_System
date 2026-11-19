@@ -13,7 +13,12 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
    - NOTICE: near the money (strike within `near_money_pct` of spot, not in the money), E-7 and E-6;
    - WARNING: in the money, E-7 and E-6;
    - URGENT: in the money or near the money from `urgent_from_trading_days` (E-5) on, or past an ICICI
-     cut-off; and whenever the spot price or the expiry is not known ("price unknown": never silence).
+     cut-off; and whenever the expiry is not known.
+   The price is the last valid continuous-session price, with its time (`spot_as_of`): auction, rejected,
+   quarantined and stale ticks never replace it and never by themselves change the level (user design,
+   2026-11-19). With no valid price at all, a sold leg is assumed NEAR the money (conservative: NOTICE on E-7 and
+   E-6, URGENT from E-5) and the alert says so. A dead or noisy feed is a separate notice
+   (`feed.held_price_notice`, app/engine.py), never a settlement level.
    A position's level only goes up while it is open (`escalate`).
 2. Delivery and margin estimate (`delivery_estimate`): what settling at the last price would mean, for the
    whole position and for one lot. Bought legs that would settle in the money too are allocated ONCE across
@@ -49,6 +54,7 @@ LEVELS = (None, NOTICE, WARNING, URGENT)
 NOT_CONFIRMED = "ICICI rule not confirmed"
 MARGIN_UNKNOWN = "margin unknown"
 PRICE_UNKNOWN = "price unknown"
+NO_VALID_PRICE = "no valid price of the stock, so the sold leg is assumed near the money (conservative)"
 
 
 def usable_spot(spot) -> float | None:
@@ -204,7 +210,11 @@ def leg_level(leg: HeldLeg, spot: float | None, left: int | None, cfg, past_cuto
         return None, f"{left} trading days to expiry: alerts start at E-{cfg.alert_from_trading_days}"
     m = moneyness(leg, spot, cfg.near_money_pct)
     if m["state"] == PRICE_UNKNOWN:
-        return URGENT, f"{PRICE_UNKNOWN}: no usable price of the stock, {max(left, 0)} trading day(s) to expiry"
+        # no valid price at all: the conservative assumption, near the money (the schedule then decides the level)
+        lv = URGENT if left <= cfg.urgent_from_trading_days or past_cutoff else NOTICE
+        return lv, (f"{PRICE_UNKNOWN}: {NO_VALID_PRICE}; E-{max(left, 0)}"
+                    + (", at or inside E-%d" % cfg.urgent_from_trading_days if left <= cfg.urgent_from_trading_days
+                       else ", past an ICICI cut-off" if past_cutoff else ""))
     if m["state"] == "OUT_OF_THE_MONEY":
         return None, f"out of the money by {m['distance_pct']:.2f}% of spot (more than {cfg.near_money_pct:g}%)"
     where = "in the money" if m["state"] == "IN_THE_MONEY" else f"within {cfg.near_money_pct:g}% of spot"
@@ -466,18 +476,37 @@ def not_confirmed(pos: HeldPosition, sos, used_cutoffs: Sequence[dict]) -> list[
     return [f"{NOT_CONFIRMED}: {n}" for n in dict.fromkeys(names)]
 
 
+def price_note(spot, spot_as_of: datetime | None, now: datetime, auction: bool = False) -> dict:
+    """What price the alert used, and when: the last valid continuous-session price with its time (the date too when
+    it is not today's), the closing auction, or the conservative assumption when there is no valid price."""
+    px = usable_spot(spot)
+    when = None
+    if px is not None and spot_as_of is not None:
+        t = spot_as_of.astimezone(IST)
+        when = f"{t:%H:%M}" if t.date() == now.astimezone(IST).date() else f"{t:%d-%b %H:%M}"
+    if px is None:
+        note = ("auction in progress; " if auction else "") + NO_VALID_PRICE
+    elif auction:
+        note = f"auction in progress, last price as of {when or 'an earlier time'}"
+    else:
+        note = f"last price {px:g}" + (f" as of {when}" if when else "")
+    return {"spot": px, "as_of": spot_as_of.isoformat() if px is not None and spot_as_of else None,
+            "auction": bool(auction), "assumed_near_money": px is None, "note": note}
+
+
 def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, capital: float,
                      previous_level: str | None = None, closed: bool = False, calendar=None,
                      base_margin_inr: float | None = None, near_month: bool = True,
-                     spot_rejected: str | None = None) -> dict | None:
+                     spot_as_of: datetime | None = None, auction: bool = False) -> dict | None:
     """The settlement-readiness alert of one open position at `now`, or None when the position is
     closed, has no sold leg, or nothing applies yet (no level and not overdue). `previous_level`: the
     level of its last alert (the level never drops while the position is open). The result states the
     level, each sold leg (strike, spot, moneyness in % and rupees, days left), the estimate, the
     deadline, the action and every unconfirmed ICICI rule used. It is advice: nothing is changed.
-    `spot_rejected`: why the live reader rejected the stock's quote (status: reason), when it received one it could
-    not use; None when the quote was usable or simply absent. A rejected quote is an unusable input: URGENT at any
-    distance to expiry (an absent one is silent before E-7 and URGENT "price unknown" from E-7)."""
+    `spot`: the last valid continuous-session price, received at `spot_as_of`; `auction`: the stock is in its closing
+    auction now (the text says "auction in progress, last price as of HH:MM"; nothing else changes). Without a valid
+    price the sold legs are assumed near the money (`leg_level`). The level comes only from the schedule, the
+    moneyness, an invalid margin base and an overdue exit."""
     if closed or not pos.shorts:
         return None
     st = sos.settlement
@@ -496,10 +525,7 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
     level = escalate(previous_level, level)
     estimate = delivery_estimate(pos, spot, left, sos, capital, base_margin_inr, near_month)
     invalid = [] if usable_margin_base(base_margin_inr)[1] is None else [usable_margin_base(base_margin_inr)[1]]
-    if spot is not None and usable_spot(spot) is None:
-        invalid.append(f"{PRICE_UNKNOWN}: the last price ({spot!r}) is not a finite price above 0")
-    if spot_rejected:
-        invalid.append(f"{PRICE_UNKNOWN}: the stock's quote was received but rejected ({spot_rejected})")
+    price = price_note(spot, spot_as_of, now, auction)
     if invalid:
         level = escalate(level, URGENT)          # an unusable input never makes the alert quieter
     late = overdue(pos, now, closed, sos, calendar)
@@ -522,7 +548,7 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
             "expiry": pos.expiry.isoformat() if pos.expiry else None, "trading_days_left": left,
             # how the days were counted; not covered = one session earlier, shown on the card in red
             "calendar": {"covered": dc.covered, "note": dc.note, "colour": None if dc.covered else "red"},
-            "legs": legs, "estimate": estimate, "invalid_inputs": invalid,
+            "legs": legs, "estimate": estimate, "invalid_inputs": invalid, "price": price,
             "deadline": dl["at"].isoformat() if dl else None, "deadline_set_by": dl["what"] if dl else None,
             "deadline_verified": verified, "deadline_note": None if verified else DEADLINE_UNVERIFIED,
             "hard_limit": hard["hard_limit"].isoformat() if hard else None, "due_now": due_now,

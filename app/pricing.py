@@ -11,8 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from .quality import IST
-
 LIVE, STALE, MISSING, CROSSED = "LIVE", "STALE", "MISSING", "CROSSED"
 # the note of a planned-fill quote that is not the first quote (its capture was lost): excluded from slippage
 FIRST_QUOTE_UNAVAILABLE = "first quote unavailable"
@@ -65,27 +63,6 @@ class LegQuote:
         return {"status": self.status, "bid": self.bid, "ask": self.ask, "last": self.last,
                 "quote_time_utc": self.quote_time.isoformat() if self.quote_time else None, "source": self.source,
                 "depth": self.depth, "note": self.note, "substitute": self.substitute}
-
-
-# no current quote at all (silent before the settlement alerts start), against a quote received and rejected
-INVALID = "INVALID"
-REJECTED = "REJECTED"               # the quality gate rejected the stock's ticks and no valid one came within the grace
-AUCTION = "AUCTION"                 # the closing auction: no current tradable spot (absent, never rejected)
-ABSENT = frozenset({MISSING, STALE, "NO_DATA", "CLOSED", AUCTION})
-
-
-@dataclass(frozen=True)
-class SpotReading:
-    """The underlying's last price as the live reader saw it: `price` (None unless LIVE and usable), the quote's
-    `status` (LIVE, MISSING, STALE, CLOSED, NO_DATA, CROSSED, INVALID) and `why` it was not used."""
-    price: float | None
-    status: str
-    why: str = ""
-
-    @property
-    def rejected(self) -> bool:
-        """A quote was there but could not be used (crossed, malformed): never silent, unlike an absent one."""
-        return self.price is None and self.status not in ABSENT
 
 
 class Marker:
@@ -154,41 +131,8 @@ class Marker:
                 for _ in legs]
 
     def spot(self, symbol: str, now: datetime) -> float | None:
-        return self.spot_reading(symbol, now).price
-
-    def spot_reading(self, symbol: str, now: datetime) -> "SpotReading":
-        """The underlying's LIVE last price, or None WITH the quote's status and why it was not used: an absent quote
-        (no tick, stale, market closed, the closing auction) is told apart from a quote that was received and rejected
-        (crossed, a last price that is not a finite number above 0).
-
-        A tick the hub's quality gate rejected today (crossed, non-finite, quarantined) with no valid tick since makes
-        the quote not LIVE, even when the last good tick is recent: STALE while the last valid tick (or, with none
-        today, the first rejection) is younger than `stock_option_selling.settlement.rejected_quote_grace_minutes`,
-        then REJECTED (the settlement alert's URGENT). Outside continuous trading (CLOSED, AUCTION) it is absent."""
         q = self.cash(symbol, now)
-        raw = self.hub.quote(symbol, now)
-        rej_at = raw.get("rejected_at") if isinstance(raw, dict) else None
-        if rej_at is not None and q.status not in ("CLOSED", AUCTION) \
-                and rej_at.astimezone(IST).date() == now.astimezone(IST).date():
-            valid_at = raw.get("at")
-            if valid_at is None or valid_at.astimezone(IST).date() != now.astimezone(IST).date():
-                valid_at = None
-            ref = valid_at or raw.get("rejected_since") or rej_at
-            waited = (now - ref).total_seconds() / 60.0
-            grace = self.s.stock_option_selling.settlement.rejected_quote_grace_minutes
-            what = (f"tick rejected by the quality gate ({raw.get('rejected_why') or 'reason not recorded'}) at "
-                    f"{rej_at.astimezone(IST):%H:%M:%S} IST; no valid tick "
-                    + (f"since {valid_at.astimezone(IST):%H:%M:%S} IST" if valid_at else "today"))
-            if waited < grace:
-                return SpotReading(None, STALE, f"{what}: STALE within the {grace:g}-minute grace")
-            return SpotReading(None, REJECTED, f"{what}: {waited:.0f} minute(s), at or past the {grace:g}-minute grace")
-        if q.usable and _pos(q.last):
-            return SpotReading(q.last, LIVE, "")
-        if q.status in ABSENT:
-            return SpotReading(None, q.status, q.note or f"quote {q.status}")
-        if q.status == LIVE:
-            return SpotReading(None, INVALID, f"last price {q.last!r} is not a finite price above 0")
-        return SpotReading(None, q.status, q.note or f"quote {q.status}")
+        return q.last if q.usable and _pos(q.last) else None
 
     def option(self, underlying: str, expiry: date, strike: float, right: str, now: datetime) -> LegQuote:
         from .options.chain import stored_quotes

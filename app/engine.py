@@ -108,6 +108,7 @@ class SignalEngine:
         self._corr = None
         self._corr_day = None
         self.last_summary: dict = {}
+        self._noticed_day, self._noticed = None, set()      # held-price notices sent this trading date (memory only)
 
     # ---- restart ----
     def restore(self, now: datetime) -> dict:
@@ -260,18 +261,24 @@ class SignalEngine:
         # paper exits on this bar, exit calls for my positions, marks for the pools
         closed = self.paper.manage(now, b - FIVE)
         due = self.evaluate_exits(now, regime, five, daily)
+        try:
+            notices = self.price_notices(now)
+        except Exception:
+            log.exception("held-price notices not checked")
+            notices = []
         for pool in POOLS:
             record_marks(self.j, pool, now, self.m.marks, self.costs)
         self.last_bar = b
         self.j.set_state("last_bar_utc", b.isoformat(), now)
         if self.notifier is not None:
             try:
-                self.notifier.on_bar(rank(approved), due, now, self.kill_reasons(now))
+                self.notifier.on_bar(rank(approved), due, now, self.kill_reasons(now), price_notices=notices)
             except Exception:
                 log.exception("alerts failed (signals and paper trading carry on)")
         self.last_summary = {"bar_utc": b.isoformat(), "regime": regime, "signals": len(stored),
-                             "approved": len(approved), "paper_closed": len(closed), "exit_calls_due": len(due)}
-        return {**self.last_summary, "stored": stored, "due": due}
+                             "approved": len(approved), "paper_closed": len(closed), "exit_calls_due": len(due),
+                             "price_notices": len(notices)}
+        return {**self.last_summary, "stored": stored, "due": due, "notices": notices}
 
     # ---- helpers ----
     def _coverage(self, sig, now):
@@ -431,7 +438,46 @@ class SignalEngine:
                 trend = trend_of(d, p9.sma_short, p9.sma_mid, p9.atr_days)[0] if d else None
                 f = (five or {}).get(pos.symbol)
                 close = f[-1].close if f else None
-            sq = self.m.spot_reading(pos.symbol, now)        # the price WITH its status: a rejected quote is not silent
-            return ExitInputs(now=now, prices=prices, price_why=why, spot=sq.price, spot_quote=sq, regime=regime,
-                              kill_reasons=kill, stock_trend=trend, stock_close=close)
+            # the settlement price from ONE hub snapshot: the last valid continuous-session price and its time
+            snap = self.hub.settlement_snapshot(pos.symbol, now)
+            return ExitInputs(now=now, prices=prices, price_why=why, spot=self.m.spot(pos.symbol, now), regime=regime,
+                              kill_reasons=kill, stock_trend=trend, stock_close=close, last_price=snap["price"],
+                              last_price_at=snap["at"], auction=snap["phase"] == "AUCTION")
         return evaluate_positions(self.j, self.exits, self.s, self.cal, now, inputs_for, self.costs)
+
+    def price_notices(self, now: datetime) -> list[dict]:
+        """The held-price notices due now (`feed.held_price_notice`): for each underlying of my open positions in
+        continuous trading, no valid tick for `no_valid_tick_minutes` (since its last valid tick today, or the open)
+        or more than `rejection_share_pct` of at least `min_ticks` ticks rejected in the last
+        `rejection_window_minutes`. ONE per symbol per trading date (kept in memory only, reset each date); it never
+        changes a settlement alert and nothing is written to a position."""
+        cfg = self.s.feed.held_price_notice
+        day = ist_day(now)
+        if self._noticed_day != day:
+            self._noticed_day, self._noticed = day, set()
+        out = []
+        for sym in sorted({p.symbol for p in self.j.positions("OPEN")}):
+            if sym in self._noticed:
+                continue
+            snap = self.hub.settlement_snapshot(sym, now, cfg.rejection_window_minutes)
+            if snap["phase"] != "OPEN":
+                continue                                   # only in continuous trading: never in the auction or closed
+            opened = self.cal.hours(self.hub.segment(sym), day).open_utc
+            since = snap["valid_today_at"] or opened
+            why = None
+            if now - since >= timedelta(minutes=cfg.no_valid_tick_minutes) and now - opened >= timedelta(
+                    minutes=cfg.no_valid_tick_minutes):
+                why = f"no valid tick for {(now - since).total_seconds() / 60:.0f} minutes"
+            elif snap["ticks"] >= cfg.min_ticks and snap["rejected"] * 100.0 > cfg.rejection_share_pct * snap["ticks"]:
+                why = (f"{snap['rejected']} of the last {snap['ticks']} ticks rejected by the quality gate in "
+                       f"{cfg.rejection_window_minutes:g} minutes")
+            if why is None:
+                continue
+            self._noticed.add(sym)
+            last = (f"; settlement alerts use the last valid price {snap['price']:g} as of "
+                    f"{snap['at'].astimezone(IST):%H:%M}" if snap["price"] is not None else
+                    "; no valid price yet: settlement alerts assume the sold legs near the money")
+            out.append({"symbol": sym, "day": day.isoformat(), "since": since, "why": why,
+                        "text": f"PRICE UNAVAILABLE - {sym}: price unavailable since {since.astimezone(IST):%H:%M} "
+                                f"({why}), check in ICICI Direct{last}. Notice only: no settlement level changes."})
+        return out

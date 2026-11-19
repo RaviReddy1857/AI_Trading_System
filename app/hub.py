@@ -15,7 +15,7 @@ not usable. Live (non-sim) feeds only, like the market-hours rule."""
 from __future__ import annotations
 
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import logging
 from datetime import datetime, timedelta
 
@@ -24,7 +24,7 @@ from .calendar import MarketCalendar
 from .config import Settings
 from .models import Tick, utcnow
 from .quality import IST, is_finite, check_tick, freshness
-from .session import AUCTION, calendar as session_calendar, segment_of
+from .session import AUCTION, OPEN, calendar as session_calendar, segment_of
 from .store import Store
 
 log = logging.getLogger("hub")
@@ -49,9 +49,11 @@ class MarketHub:
         self._first: dict[str, OrderedDict] = {}
         self._segment = {i.symbol: segment_of(i.kind, getattr(i, "fno", True)) for i in settings.watchlist}
         self._auction: dict[str, Tick] = {}       # the latest closing-auction tick per symbol (never a trade)
-        # symbol -> (first rejection since the last valid tick, latest rejection, its reasons): ticks the quality gate
-        # rejected (crossed, non-finite, quarantined). Never a price, a bar or a fill; cleared by a newer valid tick
-        self._rejected: dict[str, tuple[datetime, datetime, str]] = {}
+        # the last valid tick received in continuous trading, per symbol: the settlement alert's price (never an
+        # auction indication, a rejected tick or a pre-open tick)
+        self._last_continuous: dict[str, Tick] = {}
+        # trade ticks of the current IST date per symbol, (received_at, valid): the held-price notice's rejection share
+        self._ticklog: dict[str, deque] = {}
         self._auction_count = 0
 
     def segment(self, symbol: str) -> str:
@@ -73,17 +75,17 @@ class MarketHub:
                 return
             reasons = check_tick(tick, self._last_good.get(tick.symbol),
                                  self.settings.feed.max_jump_pct)
+            self._log_tick(tick.symbol, tick.received_at, not reasons)
             if reasons:
                 self._bad_count += 1
-                prev = self._rejected.get(tick.symbol)
-                self._rejected[tick.symbol] = (prev[0] if prev else tick.received_at, tick.received_at,
-                                               ", ".join(reasons))
                 for r in reasons:
                     self.store.save_quality_event(tick.received_at, tick.symbol, r,
                                                   tick.last, tick.bid, tick.ask, tick.source)
                 return
             self._good_count += 1
-            self._rejected.pop(tick.symbol, None)          # a newer valid tick ends the rejection
+            if not self.enforce_hours or session_calendar().phase(self.segment(tick.symbol), tick.received_at,
+                                                                  self.calendar.holidays) == OPEN:
+                self._last_continuous[tick.symbol] = tick
             if self._first_tick_at is None:
                 self._first_tick_at = tick.received_at
             self._last_good[tick.symbol] = tick
@@ -172,13 +174,41 @@ class MarketHub:
         with self._lock:
             t = self._last_good.get(symbol)
             status = self._status(t, now, symbol)
-            rej = self._rejected.get(symbol)
-            # the latest rejected tick since the last valid one (never its price): for the settlement alert
-            rejected = {"rejected_since": rej[0], "rejected_at": rej[1], "rejected_why": rej[2]} if rej else \
-                {"rejected_since": None, "rejected_at": None, "rejected_why": None}
             if t is None:
-                return {"status": status, "bid": None, "ask": None, "last": None, "at": None, **rejected}
-            return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at, **rejected}
+                return {"status": status, "bid": None, "ask": None, "last": None, "at": None}
+            return {"status": status, "bid": t.bid, "ask": t.ask, "last": t.last, "at": t.received_at}
+
+    _TICKLOG_KEEP = timedelta(hours=2)
+
+    def _log_tick(self, symbol: str, at: datetime, valid: bool) -> None:
+        """Under the lock: one trade tick of the current IST date (an earlier date's log is dropped: nothing carries
+        into the next session)."""
+        log_ = self._ticklog.setdefault(symbol, deque())
+        if log_ and log_[-1][0].astimezone(IST).date() != at.astimezone(IST).date():
+            log_.clear()
+        log_.append((at, valid))
+        while log_ and at - log_[0][0] > self._TICKLOG_KEEP:
+            log_.popleft()
+
+    def settlement_snapshot(self, symbol: str, now: datetime, window_minutes: float = 5.0) -> dict:
+        """ONE consistent read for a held position's underlying: the last valid continuous-session price and its time
+        (`price`, `at`; None when there has been none since the app started), the symbol's status now (LIVE, STALE,
+        AUCTION, CLOSED, NO_DATA), the phase of its segment (OPEN = continuous trading, AUCTION, CLOSED), the time of
+        today's last valid tick (`valid_today_at`), and today's trade ticks in the last `window_minutes` (`ticks`,
+        `rejected`). Auction, rejected, quarantined and stale ticks never replace the price."""
+        day = now.astimezone(IST).date()
+        with self._lock:
+            t = self._last_continuous.get(symbol)
+            good = self._last_good.get(symbol)
+            status = self._status(good, now, symbol)
+            phase = (session_calendar().phase(self.segment(symbol), now, self.calendar.holidays)
+                     if self.enforce_hours else OPEN)
+            since = now - timedelta(minutes=window_minutes)
+            recent = [v for a, v in self._ticklog.get(symbol, ()) if a.astimezone(IST).date() == day and since < a <= now]
+        valid_today = good.received_at if good is not None and good.received_at.astimezone(IST).date() == day else None
+        return {"symbol": symbol, "price": t.last if t else None, "at": t.received_at if t else None,
+                "status": status, "phase": phase, "valid_today_at": valid_today,
+                "ticks": len(recent), "rejected": sum(1 for v in recent if not v)}
 
     def first_quote(self, symbol: str, after: datetime) -> dict | None:
         """The first good tick received at or after `after` (a bar close: a minute boundary), with its status as it

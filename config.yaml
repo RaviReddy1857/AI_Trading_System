@@ -29,6 +29,11 @@ feed:
   stale_after_seconds: 30      # no tick for this long during market hours => STALE
   max_jump_pct: 5.0            # tick-to-tick move above this is quarantined
   subscribe_pause_seconds: 0.25  # breeze: pause between the ~53 symbol subscriptions at start
+  held_price_notice:           # ONE "price unavailable since HH:MM, check in ICICI Direct" per held symbol per session
+    no_valid_tick_minutes: 5   # no valid tick this long in continuous trading, or ...
+    rejection_window_minutes: 5  # ... in the last 5 minutes ...
+    rejection_share_pct: 50    # ... more than 50% of the ticks rejected by the quality gate ...
+    min_ticks: 10              # ... out of at least 10. A notice only: settlement alerts never change for it
 
 # breeze_code is ICICI's own short code, not the NSE symbol.
 # Check any code with:  python scripts/lookup_code.py RELIANCE
@@ -414,8 +419,6 @@ stock_option_selling:          # names follow section 2 of the Phase 9 specifica
     near_money_pct: 5           # near the money: strike within 5% of spot (set by you 2026-11-15)
     forced_exit_by: "15:00"     # forced exit day (E-5): exit by 15:00, while the stock trades continuously (you,
                                 # 2026-11-17); the options' close (15:40) stays the hard limit for the red/URGENT alert
-    rejected_quote_grace_minutes: 5  # a rejected stock tick (crossed, non-finite, quarantined) and no valid tick for
-                                # 5 minutes: URGENT settlement alert; before that the quote is STALE (you, 2026-11-19)
     broker:                     # ICICI Direct's physical-settlement rules (entered by you 2026-11-15; sources in docs/STATUS.md)
       delivery_margin:
         confirmed: true

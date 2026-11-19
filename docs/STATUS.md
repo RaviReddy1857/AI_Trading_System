@@ -3429,6 +3429,66 @@ carry the warning).
 **Not tested here:** real Breeze ticks through the gate (ticks are built in the tests); the live app has not loaded
 this code or the new config key.
 
+## Settlement price: the last valid price, and a separate feed notice (2026-11-19, your design)
+
+Tests: `tests/test_settlement_last_price.py`. Replaces the quote-status escalation of 4e9fb4d (item 3) and 1b9b9b9
+(items 1 and 2), whose sections above are kept as history: Astra found it kept producing edge cases (auction paging,
+alternating good/bad ticks defeating the grace timer, a persisted false URGENT, two hub reads). Nothing in data/,
+capital values or strategy logic was changed; the live app was not stopped or restarted. **The running app reads
+config.yaml and this code at start: they take effect at its next restart.**
+
+**1. The price.** `MarketHub.settlement_snapshot(symbol, now)` is ONE locked read: the last valid tick received in
+continuous trading (`price`, `at`; kept per symbol in `_last_continuous`: never an auction indication, a rejected,
+quarantined or pre-open tick), the status, the segment's phase (OPEN, AUCTION, CLOSED), today's last valid tick and
+today's trade ticks in the last few minutes (valid / rejected). The engine's exit evaluation passes the price, its time
+and "auction now" in `ExitInputs.last_price`, `last_price_at`, `auction`. A stale price still counts: its time is
+shown (with the date when it is not today's).
+
+**2. The level.** Comes only from the schedule (alerts from E-7, URGENT from E-5), the moneyness at that price, an
+invalid margin base and an overdue exit; that is also all that is kept on the position (`settlement_level`). No
+quote status, auction or rejection changes it. **Changed rule:** with no valid price at all (none since the app
+started, or the value is not a finite price above 0), the sold leg is assumed NEAR the money: NOTICE on E-7 and E-6,
+URGENT from E-5, never before E-7, and the leg's reason and `price.note` say "no valid price of the stock, so the sold
+leg is assumed near the money (conservative)". Before: "price unknown" was URGENT from E-7 (phase 9, 2026-11-15) and
+an unusable spot was URGENT at any distance (Astra audit item 4, 18-Nov). Those tests (tests/test_phase9_settlement.py,
+tests/test_astra_fixes.py) now assert the new rule. My reading of "no valid price at all for the session": the hub's
+last valid continuous price counts even when it is from an earlier session (the alert shows its date), so the open
+of a new day never flips a position to the assumption before its first tick; the assumption applies when the hub has
+no valid price at all.
+
+**3. Feed degradation notice** (`SignalEngine.price_notices`, `Notifier.on_bar(price_notices=...)`, new config
+`feed.held_price_notice`: `no_valid_tick_minutes` 5, `rejection_window_minutes` 5, `rejection_share_pct` 50,
+`min_ticks` 10, validated). For each underlying of my open positions, only in continuous trading: no valid tick for 5
+minutes (since today's last valid tick, or the open), or more than 50% of at least 10 ticks rejected in the last 5
+minutes -> ONE message "PRICE UNAVAILABLE - X: price unavailable since HH:MM (why), check in ICICI Direct; settlement
+alerts use the last valid price ... Notice only" (alert kind PRICE_UNAVAILABLE, key `price:<symbol>:<date>`). The
+engine remembers what it sent for the trading date in memory only (reset each date); nothing is written to a position
+and no settlement level changes. The hub's tick log is per IST date, so a rejection never carries into the next session.
+
+**4. The closing auction** (15:15-15:35 for F&O stocks): the price stays the last continuous one, so the level does
+not move and no call is resent for it; the settlement call's reason starts "auction in progress, last price as of
+HH:MM". No notice in the auction or after the close.
+
+**5. Removed** (dead with the new design): `stock_option_selling.settlement.rejected_quote_grace_minutes` (config.yaml
+and app/config.py), `Marker.spot_reading`, `SpotReading` and the INVALID / REJECTED / AUCTION / ABSENT statuses
+(app/pricing.py is back to its 4ea35e0 form), the hub's per-symbol rejection state and the `rejected_*` fields of
+`MarketHub.quote`, `ExitInputs.spot_quote`, `settlement_alert(spot_rejected=)`, the "transient" settlement call and
+its resolution. Their tests are gone (tests/test_astra_rereview.py section 3; tests/test_astra_rereview2.py items 1-2;
+the forced-exit tests of item 3 stay). The forced-exit cutoff shared by FORCED_EXPIRY_EXIT and SETTLEMENT (1b9b9b9
+item 3) is unchanged.
+
+Tests, all through the real hub's `on_tick` and status and the engine's exit evaluation: 15:15 -> 15:40 -> the next
+open with a far out-of-the-money spread (auction indications deep in the money never become the price; nothing raised
+or kept) and with one in the money (WARNING sent once, not resent in the auction, the auction text, kept WARNING, the
+normal 60-minute repeat next morning); alternating good/bad ticks (1:1 = 50%, no notice; 1:2, one notice for the whole
+session; settlement untouched); only rejected ticks all session at E-6 (NOTICE on the assumption, said so, one notice
+"since 09:15", none after); the notice only in continuous trading and not before 5 minutes after the open; an
+overnight rejection not carried into Tuesday, while Tuesday's own outage gets its one notice; E-5 in the money URGENT,
+kept, resent after 15 minutes, never dropping when the price moves away, then overdue on every evaluation; an invalid
+margin base still URGENT; the grace key gone and the notice thresholds validated.
+
+**Not tested here:** real Breeze ticks; the notice's Telegram delivery (it is enqueued like the other alerts).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |

@@ -94,14 +94,15 @@ def test_days_left_are_trading_days_and_moneyness_by_hand():
     (7, 1060.0, None),           # far out of the money: never
     (5, 1060.0, None),
     (0, 1060.0, None),
-    (7, None, URGENT),           # price unknown: URGENT, never silence
+    (7, None, NOTICE),           # no valid price: assumed near the money (user design, 19-Nov-2026), never silence
+    (8, None, None),             # ... and like any leg, nothing before E-7
     (2, None, URGENT),
     (None, 1040.0, URGENT),      # expiry unknown
 ])
 def test_ACCEPTANCE_each_alert_level_fires_from_seven_trading_days_and_never_for_a_far_otm_leg(left, spot, want):
     level, why = leg_level(SOLD, spot, left, ST)
     assert level == want and why
-    if want == URGENT and (spot is None or left is None):
+    if want is not None and (spot is None or left is None):
         assert PRICE_UNKNOWN in why
 
 
@@ -135,8 +136,9 @@ def test_ACCEPTANCE_the_level_only_rises_while_open_and_an_unknown_price_is_urge
         level = a["level"]
         seen.append(level)
     assert seen == [WARNING, WARNING, URGENT, URGENT]                    # never back down
-    a = settlement_alert(pos, None, at(7), SOS, CAP)
-    assert a["level"] == URGENT and PRICE_UNKNOWN in a["legs"][0]["why"] and a["legs"][0]["spot"] is None
+    a = settlement_alert(pos, None, at(7), SOS, CAP)            # no valid price: assumed near the money at E-7
+    assert a["level"] == NOTICE and PRICE_UNKNOWN in a["legs"][0]["why"] and a["legs"][0]["spot"] is None
+    assert "assumed near the money" in a["legs"][0]["why"] and a["price"]["assumed_near_money"] is True
     unknown_expiry = dataclasses.replace(pos, expiry=None)
     a = settlement_alert(unknown_expiry, 1100.0, at(7), SOS, CAP)
     assert a["level"] == URGENT and a["deadline"] is None and a["overdue"]["colour"] == "red"

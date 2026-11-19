@@ -2,7 +2,6 @@
 Item 1 (close records in the same snapshot): tests/test_astra_rereview_snapshot.py."""
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -11,16 +10,11 @@ import pytest
 from app.alerts import exit_text
 from app.calendar import MarketCalendar, coverage_through
 from app.config import load_settings
-from app.engine import SignalEngine
 from app.options.reversal import build_reversal_strategies
-from app.options.settlement import (DEADLINE_UNVERIFIED, PRICE_UNKNOWN, URGENT, HeldLeg, HeldPosition, days_left,
-                                    rules_view, settlement_alert)
-from app.positions import ExitCallBook
-from app.pricing import INVALID, Marker
+from app.options.settlement import DEADLINE_UNVERIFIED, HeldLeg, HeldPosition, rules_view, settlement_alert
 from app.quality import IST
 from app.risk.engine import MARGIN_UNKNOWN, decide
 from tests.phase5_fixtures import GOOD_MARKET, SECTORS, account
-from tests.phase6_fixtures import ZeroCosts, new_journal
 from tests.phase6_fixtures import settings as p6_settings
 from tests.test_phase9_core import settings as p9_settings
 from tests.test_phase9_reversal import reversal_ctx
@@ -71,113 +65,9 @@ def test_a_credit_spread_without_a_verified_margin_entry_is_still_margin_unknown
     assert d.status == "NO_TRADE" and MARGIN_UNKNOWN in d.reason_codes   # never assumed for a credit spread
 
 
-# ================= 3. MEDIUM: the live reader carries the quote's status to the settlement alert =================
-E_NOW = datetime(2026, 11, 16, 5, 1, tzinfo=timezone.utc)          # Monday 10:31 IST
-COVERED = MarketCalendar({date(2026, 1, 1): "COVERAGE through 2026-12-31 test list"})
-
-
-class _Hub:
-    """The hub's quote for the stock as the test sets it (the quality gate's last good tick and its status)."""
-
-    def __init__(self, q):
-        self.q = q
-
-    def quote(self, symbol, now):
-        return self.q
-
-
-class _Risk:
-    def market_state(self, index, now):
-        return replace(GOOD_MARKET, now=now)
-
-
-def _expiry_at(n: int, cal) -> date:
-    today = E_NOW.astimezone(IST).date()
-    d = today
-    while days_left(today, d, cal) != n:
-        d += timedelta(days=1)
-    return d
-
-
-def _exit_calls_with(quote, left: int = 8):
-    """The engine's exit evaluation (reader -> ExitInputs -> settlement alert -> calls due) for a held stock put
-    spread at E-`left` (default 8) with the sold 1300 put far out of the money, the stock's quote being `quote`."""
-    s = p6_settings()
-    j, store = new_journal(s)
-    exp = _expiry_at(left, COVERED)
-    j.add_manual_position({"symbol": "RELIANCE", "kind": "stock", "entry_date": "2026-11-16", "margin_inr": 90000,
-                           "legs": [{"action": "SELL", "right": "PE", "strike": 1300, "expiry": exp.isoformat(),
-                                     "lots": 1, "lot_size": 500, "price": 12.0},
-                                    {"action": "BUY", "right": "PE", "strike": 1260, "expiry": exp.isoformat(),
-                                     "lots": 1, "lot_size": 500, "price": 4.0}]}, E_NOW)
-    hub = _Hub(quote)
-    eng = SignalEngine(settings=s, store=store, hub=hub, journal=j, marker=Marker(s, store, hub, "sim"), risk=_Risk(),
-                       regime=None, calendar=COVERED, desk=None, source="sim", costs=ZeroCosts(), execbook=None,
-                       paper=None, exits=ExitCallBook(store, s), now_fn=lambda: E_NOW, strategies=[])
-    return eng.evaluate_exits(E_NOW, "TRENDING_UP", five={}, daily={"RELIANCE": []})
-
-
-def _settlement(due):
-    return [c for c in due if c["kind"] == "SETTLEMENT"]
-
-
-def test_at_e8_an_absent_quote_is_silent():
-    due = _exit_calls_with({"status": "NO_DATA", "bid": None, "ask": None, "last": None, "at": None})
-    assert _settlement(due) == []
-
-
-STALE_Q = {"status": "STALE", "bid": 1400.0, "ask": 1401.0, "last": 1400.5, "at": E_NOW - timedelta(minutes=30)}
-MISSING_Q = {"status": "NO_DATA", "bid": None, "ask": None, "last": None, "at": None}
-
-
-def test_at_e8_a_stale_quote_is_silent_like_a_missing_one():
-    assert _settlement(_exit_calls_with(STALE_Q)) == []          # your decision of 19-Nov-2026: STALE is absent
-
-
-@pytest.mark.parametrize("left", [7, 6, 5, 3, 1])
-def test_from_e7_inside_a_stale_quote_escalates_exactly_like_a_missing_one(left):
-    stale, missing = _settlement(_exit_calls_with(STALE_Q, left)), _settlement(_exit_calls_with(MISSING_Q, left))
-    assert len(stale) == len(missing) == 1
-    s, m = stale[0], missing[0]
-    assert s["level"] == m["level"] == URGENT and s["reason"] == m["reason"] and s["action"] == m["action"]
-    assert PRICE_UNKNOWN in s["reason"] and "rejected" not in s["reason"]
-    sa, ma = s["values"]["alert"], m["values"]["alert"]
-    assert sa["trading_days_left"] == ma["trading_days_left"] == left
-    assert sa["invalid_inputs"] == ma["invalid_inputs"] == [] and sa["legs"] == ma["legs"]
-
-
-@pytest.mark.parametrize("quote, why", [
-    ({"status": "LIVE", "bid": 1410.0, "ask": 1400.0, "last": 1405.0, "at": E_NOW}, "CROSSED"),     # bid above ask
-    ({"status": "LIVE", "bid": None, "ask": None, "last": math.nan, "at": E_NOW}, INVALID),         # no finite last
-])
-def test_at_e8_a_malformed_quote_is_urgent(quote, why):
-    due = _settlement(_exit_calls_with(quote))
-    assert len(due) == 1 and due[0]["level"] == URGENT
-    a = due[0]["values"]["alert"]
-    assert a["trading_days_left"] == 8 and a["legs"][0]["level"] is None          # E-8: quiet by the day count alone
-    assert any(PRICE_UNKNOWN in x and "rejected" in x and why in x for x in a["invalid_inputs"])
-    text = exit_text({**due[0], "repeat_no": 1})
-    assert "rejected" in due[0]["reason"] and "rejected" in text                  # the Telegram text says why
-
-
-def test_the_reader_tells_absent_from_rejected():
-    s = p6_settings()
-    _, store = new_journal(s)
-
-    def read(q):
-        return Marker(s, store, _Hub(q), "sim").spot_reading("RELIANCE", E_NOW)
-
-    ok = read({"status": "LIVE", "bid": 1400.0, "ask": 1401.0, "last": 1400.5, "at": E_NOW})
-    assert (ok.price, ok.status, ok.rejected) == (1400.5, "LIVE", False)
-    for q in ({"status": "NO_DATA", "bid": None, "ask": None, "last": None, "at": None},
-              {"status": "STALE", "bid": 1400.0, "ask": 1401.0, "last": 1400.5, "at": E_NOW},
-              {"status": "CLOSED", "bid": 1400.0, "ask": 1401.0, "last": 1400.5, "at": E_NOW}):
-        r = read(q)
-        assert r.price is None and not r.rejected and r.why
-    bad = read({"status": "LIVE", "bid": 1410.0, "ask": 1400.0, "last": 1405.0, "at": E_NOW})
-    assert bad.price is None and bad.rejected and bad.status == "CROSSED"
-    neg = Marker(s, store, _Hub({"status": "LIVE", "bid": None, "ask": None, "last": -1.0, "at": E_NOW}), "sim")
-    assert neg.spot("RELIANCE", E_NOW) is None and neg.spot_reading("RELIANCE", E_NOW).status == INVALID
+# ================= 3. (replaced 19-Nov-2026) =================
+# The quote-status escalation of item 3 was replaced by the last-valid-price design (user, 19-Nov-2026):
+# tests/test_settlement_last_price.py.
 
 
 # ================= 4. MEDIUM: "COVERAGE through YYYY-MM-DD" from the start, optional trailing source =================

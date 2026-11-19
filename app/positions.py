@@ -83,7 +83,11 @@ class ExitInputs:
     prices: list[float] | None           # closing prices of the position's legs (app.pricing.Marker.marks)
     price_why: str = ""                  # why prices are None
     spot: float | None = None            # the underlying's LIVE last price (cash: the share)
-    spot_quote: object | None = None     # how the live reader saw it (app.pricing.SpotReading: status, why); None = not told
+    # the settlement alert's price: the last valid continuous-session price and its time (any status: a stale price
+    # still counts, an auction, rejected or quarantined tick never replaces it); None = use `spot`
+    last_price: float | None = None
+    last_price_at: datetime | None = None
+    auction: bool = False                # the stock is in its closing auction now
     regime: str | None = None
     kill_reasons: tuple[str, ...] = ()   # kill-switch reasons other than "outside market hours"
     stock_trend: str | None = None       # phase 9 trend of the stock (UP / DOWN / None)
@@ -323,11 +327,11 @@ def _allowed_regimes(strategy_id: str):
 
 # ---------------- settlement readiness (sending of the phase 9 M3 alerts) ----------------
 def settlement_call(pos: Position, spot: float | None, now: datetime, settings, calendar,
-                    spot_quote=None) -> dict | None:
+                    spot_as_of: datetime | None = None, auction: bool = False) -> dict | None:
     """The settlement-readiness alert of a position with a sold STOCK option leg, as an exit call (kind SETTLEMENT)
-    whose level only rises while the position is open. None when nothing applies yet. `spot_quote`: the live reader's
-    SpotReading; a quote received and rejected (crossed, malformed) makes the alert URGENT at any distance to expiry,
-    while an absent one stays silent before E-7."""
+    whose level only rises while the position is open. None when nothing applies yet. `spot`: the last valid
+    continuous-session price, received at `spot_as_of`; `auction`: the closing auction is on (the text says so,
+    nothing else changes)."""
     if pos.trade_type != "STOCK_OPTION_SELLING" or not pos.legs:
         return None
     from .options.settlement import HeldLeg, HeldPosition, settlement_alert
@@ -335,14 +339,14 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
     held = HeldPosition(pos.symbol, min(expiries), tuple(HeldLeg(x.action, x.right, x.strike, x.lots, x.lot_size)
                                                           for x in pos.legs),
                         "UNHEDGED" if not pos.hedged else ("from a card" if pos.origin == "SIGNAL" else "manual"))
-    rejected = None
-    if spot_quote is not None and getattr(spot_quote, "rejected", False):
-        rejected = f"{spot_quote.status}: {spot_quote.why}" if spot_quote.why else spot_quote.status
     a = settlement_alert(held, spot, now, settings.stock_option_selling, settings.stock_option_selling.backtest.capital_inr,
-                         previous_level=pos.plan.get("settlement_level"), calendar=calendar, spot_rejected=rejected)
+                         previous_level=pos.plan.get("settlement_level"), calendar=calendar, spot_as_of=spot_as_of,
+                         auction=auction)
     if a is None:
         return None
     reason = "; ".join(f"{l['leg']}: {l['why']}" for l in a["legs"])
+    if a["price"]["auction"]:
+        reason = f"{a['price']['note']}; " + reason
     if a["invalid_inputs"]:
         reason = "; ".join(a["invalid_inputs"]) + "; " + reason
     if a["overdue"]:
@@ -351,12 +355,8 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
         reason += "; " + "; ".join(a["not_confirmed"])
     # no level of its own: URGENT once overdue (the hard limit), WARNING while only the planned exit time has come
     level = a["level"] or ("URGENT" if a["overdue"] or not a.get("due_now") else "WARNING")
-    # the closing auction: no current tradable spot. The alert escalates like a missing price, but that escalation is
-    # never kept: not in the position's settlement level, and the call is resolved once a price is known again
-    transient = getattr(spot_quote, "status", None) == "AUCTION"
     return {"kind": SETTLEMENT, "action": a["action"], "reason": reason, "level": level,
-            "overdue": bool(a["overdue"]), "transient": transient,
-            "values": {"alert": a, "transient": transient}}
+            "overdue": bool(a["overdue"]), "values": {"alert": a}}
 
 
 # ---------------- the call book: activation, repeats, resolution ----------------
@@ -439,8 +439,6 @@ class ExitCallBook:
                         resolve = f"stop confirmed at {fmt(pos.stop)}"
                 elif kind == PARTIAL and pos.plan.get("partial_booked"):
                     resolve = "partial profit recorded"
-                elif kind == SETTLEMENT and (old["values"] or {}).get("transient"):
-                    resolve = "raised in the closing auction only (no tradable spot then); not kept"
                 if resolve:
                     self._db.execute("UPDATE exit_calls SET active=0, resolved_utc=?, resolved_why=? WHERE position_id=? AND kind=?",
                                      (now.isoformat(), resolve, pos.position_id, kind))
@@ -491,12 +489,13 @@ def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: dat
     for pos in journal.positions("OPEN"):
         x = inputs_for(pos)
         calls, plan = evaluate(pos, x, settings, calendar, costs)
-        s = settlement_call(pos, x.spot, now, settings, calendar, x.spot_quote)
+        last = x.last_price if x.last_price is not None else x.spot
+        s = settlement_call(pos, last, now, settings, calendar, x.last_price_at if x.last_price is not None else None,
+                            x.auction)
         if s is not None:
             calls.append(s)
-            if not s.get("transient"):                  # an escalation caused by the closing auction is never kept
-                from .options.settlement import escalate
-                plan["settlement_level"] = escalate(plan.get("settlement_level"), s["level"])
+            from .options.settlement import escalate
+            plan["settlement_level"] = escalate(plan.get("settlement_level"), s["level"])
         if plan != pos.plan:
             journal.update_plan(pos.position_id, plan)
             pos = replace(pos, plan=plan)

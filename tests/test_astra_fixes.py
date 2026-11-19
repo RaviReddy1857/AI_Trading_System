@@ -183,17 +183,21 @@ def test_a_morning_swing_signal_on_the_previous_sessions_close_stays_valid():
 
 
 # ================= 4. MEDIUM: settlement inputs must be usable; unknown escalates =================
-from app.options.settlement import (MARGIN_UNKNOWN, PRICE_UNKNOWN, URGENT, delivery_estimate,  # noqa: E402
+from app.options.settlement import (MARGIN_UNKNOWN, NOTICE, PRICE_UNKNOWN, URGENT, delivery_estimate,  # noqa: E402
                                     delivery_margin, moneyness, settlement_alert)
 from tests.test_phase9_settlement import CAP, SOS, at, put_spread  # noqa: E402
 
 
 @pytest.mark.parametrize("spot", [math.inf, -math.inf, math.nan, -5.0, 0.0])
-def test_a_spot_that_is_not_a_finite_positive_price_is_price_unknown_and_escalates(spot):
+def test_a_spot_that_is_not_a_finite_positive_price_is_no_valid_price_and_assumed_near_the_money(spot):
+    # the last-valid-price design (user, 19-Nov-2026): an unusable spot never escalates by itself; with no valid price
+    # the sold leg is assumed near the money (E-7: NOTICE, from E-5: URGENT), never far out of the money
     pos = put_spread()
     assert moneyness(pos.legs[0], spot, 5.0)["state"] == PRICE_UNKNOWN
     a = settlement_alert(pos, spot, at(7), SOS, CAP)            # E-7: an OTM leg alone would be quiet
-    assert a is not None and a["level"] == URGENT
+    assert a is not None and a["level"] == NOTICE and a["invalid_inputs"] == []
+    assert a["price"]["assumed_near_money"] is True and "assumed near the money" in a["legs"][0]["why"]
+    assert settlement_alert(pos, spot, at(5), SOS, CAP)["level"] == URGENT
     assert all(x["state"] == PRICE_UNKNOWN for x in a["legs"])
     assert a["estimate"]["position"]["legs"][0]["at_last_price"] is None     # never assumed out of the money
     assert a["estimate"]["margin"]["status"] == MARGIN_UNKNOWN
@@ -201,7 +205,7 @@ def test_a_spot_that_is_not_a_finite_positive_price_is_price_unknown_and_escalat
 
 def test_infinite_spot_no_longer_reads_as_far_out_of_the_money():
     """Before the fix: inf passed `spot > 0`, the distance was infinite, the leg OUT_OF_THE_MONEY and the alert quiet."""
-    a = settlement_alert(put_spread(), math.inf, at(3), SOS, CAP)
+    a = settlement_alert(put_spread(), math.inf, at(3), SOS, CAP)           # E-3: assumed near the money -> URGENT
     assert a is not None and a["level"] == URGENT and a["legs"][0]["state"] == PRICE_UNKNOWN
 
 
