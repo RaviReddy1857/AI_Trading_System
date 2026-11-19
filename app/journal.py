@@ -830,11 +830,17 @@ class Journal:
                 "net_inr": None if net is None else float(net),
                 "note": "charges are the cost model's estimate; phase 7 compares them with the contract note"}
 
+    _CLOSE_SQL = "id,position_id,at_utc,units,exit_prices_json,gross_inr,costs_inr,net_inr,note"
+
     def closes(self, position_id: str | None = None) -> list[dict]:
-        q = "SELECT id,position_id,at_utc,units,exit_prices_json,gross_inr,costs_inr,net_inr,note FROM position_closes"
+        q = f"SELECT {self._CLOSE_SQL} FROM position_closes"
         with self._lock:
             rows = self._db.execute(q + (" WHERE position_id=?" if position_id else "") + " ORDER BY at_utc, id",
                                     (position_id,) if position_id else ()).fetchall()
+        return self._close_dicts(rows)
+
+    @staticmethod
+    def _close_dicts(rows) -> list[dict]:
         keys = ["id", "position_id", "at_utc", "units", "exit_prices", "gross_inr", "costs_inr", "net_inr", "note"]
         out = [dict(zip(keys, r)) for r in rows]
         for d in out:
@@ -959,31 +965,7 @@ class Journal:
         only its change from the last closing mark before `since` (net of the close less that mark per unit x units
         closed), so a position that gained up to yesterday's close and lost today shows today's loss whether it is
         still open or closed. No such mark: not known (None), as for the open P&L. Without `since`: since entry."""
-        total = Decimal(0)
-
-        def amount(ref: str, entry_utc: datetime, net, units: int) -> Decimal | None:
-            if net is None:
-                return None
-            if since is None or ist_day(entry_utc) >= since:
-                return _d(net)
-            m = self.last_mark_before(ref, since)
-            if m is None:
-                return None
-            return _paise(_d(net) - _d(m[1]) * units)
-
-        pos_by_id = {p.position_id: p for p in self.positions(status=None)}
-        for c in self.closes():
-            p = pos_by_id.get(c["position_id"])
-            if p is None or p.pool != pool:
-                continue
-            day = ist_day(datetime.fromisoformat(c["at_utc"]))
-            if (since and day < since) or (until and day > until):
-                continue
-            v = amount(p.position_id, p.entry_utc, c["net_inr"], c["units"])
-            if v is None:
-                return None
-            total += v
-        return _paise(total)
+        return realised_from(pool, self.positions(status=None), self.closes(), self.last_mark_before, since, until)
 
     def held_positions(self, pool: str) -> list[Position]:
         """My open positions in a pool (the real book). Paper trades are never counted here: they run in the paper
@@ -998,25 +980,47 @@ class Journal:
         return self.book_snapshot(pool, now)[1]
 
     def book_snapshot(self, pool: str, now: datetime) -> tuple[list[Position], list[dict]]:
-        """(open positions, pending reservations) of my real book in a pool, read in ONE consistent snapshot: one
-        lock hold and one SQLite read transaction over positions, decisions and signals. A TOOK recorded meanwhile
-        (it inserts the decision and the position together, under the same lock) is therefore either not yet seen
-        (the signal is still pending) or fully seen (it is a position): its exposure is counted exactly once."""
+        """(open positions, pending reservations) of my real book in a pool, from `account_snapshot`."""
+        snap = self.account_snapshot(pool, now)
+        return snap.held, snap.pending
+
+    def account_snapshot(self, pool: str, now: datetime) -> "BookSnapshot":
+        """Every journal input of my real book's accounting in a pool, read in ONE consistent snapshot: one lock hold
+        and one SQLite read transaction over open positions, decisions and signals (the pending reservations), every
+        position of the pool with its close records (realised P&L), the earlier marks (P&L since a day began) and the
+        equity history. A TOOK (decision and position inserted together) or a close (close record and the position's
+        status or quantity updated together) recorded meanwhile is either not yet seen or fully seen: a position that
+        closes while the book is read is counted once, as open P&L or as realised P&L, never as both or neither."""
+        cols = ",".join(self._POS_COLS)
+        in_pool = "SELECT position_id FROM positions WHERE pool=?"
         with self._lock:
             own = not self._db.in_transaction
             if own:
                 self._db.execute("BEGIN")
             try:
-                pos_rows = self._db.execute(f"SELECT {','.join(self._POS_COLS)} FROM positions WHERE status='OPEN' "
+                pos_rows = self._db.execute(f"SELECT {cols} FROM positions WHERE status='OPEN' "
                                             "AND pool=? ORDER BY opened_utc, position_id", (pool,)).fetchall()
                 decided = {r[0] for r in self._db.execute("SELECT signal_id FROM journal").fetchall()}
                 sig_rows = self._db.execute(f"SELECT {','.join(self._SIG_KEYS)} FROM signals WHERE valid_until_utc > ? "
                                             "ORDER BY created_utc", (now.isoformat(),)).fetchall()
+                all_rows = self._db.execute(f"SELECT {cols} FROM positions WHERE pool=? ORDER BY opened_utc, position_id",
+                                            (pool,)).fetchall()
+                close_rows = self._db.execute(f"SELECT {self._CLOSE_SQL} FROM position_closes WHERE position_id IN "
+                                              f"({in_pool}) ORDER BY at_utc, id", (pool,)).fetchall()
+                mark_rows = self._db.execute(f"SELECT ref, day, open_pnl_inr, at_utc FROM position_marks WHERE ref IN "
+                                             f"({in_pool}) ORDER BY ref, day", (pool,)).fetchall()
+                eq_rows = self._db.execute("SELECT day, equity_inr FROM equity_history WHERE pool=? ORDER BY day",
+                                           (pool,)).fetchall()
             finally:
                 if own:
                     self._db.commit()                    # ends the read transaction
-        held = [self._pos(r) for r in pos_rows]
-        return held, self._pending_from([self._sig_row(r) for r in sig_rows], decided, pool)
+        marks: dict[str, list[tuple[date, float, str]]] = {}
+        for ref, d, v, at in mark_rows:
+            marks.setdefault(ref, []).append((date.fromisoformat(d), v, at))
+        return BookSnapshot(pool, [self._pos(r) for r in pos_rows],
+                            self._pending_from([self._sig_row(r) for r in sig_rows], decided, pool),
+                            [self._pos(r) for r in all_rows], self._close_dicts(close_rows), marks,
+                            [(date.fromisoformat(d), e) for d, e in eq_rows])
 
     @staticmethod
     def _pending_from(rows: list[dict], decided: set, pool: str) -> list[dict]:
@@ -1096,6 +1100,50 @@ def invalidation_of(sig: dict) -> dict | None:
 
 
 # ---------------- the account state of one pool, for the risk engine ----------------
+def realised_from(pool: str, positions, closes, last_mark_before, since: date | None = None,
+                  until: date | None = None) -> Decimal | None:
+    """Realised P&L of `pool` from these positions and close records (`Journal.realised` says the basis);
+    `last_mark_before(ref, day)` gives the last mark of a position before a day. None when a figure is not known."""
+    total = Decimal(0)
+    pos_by_id = {p.position_id: p for p in positions}
+    for c in closes:
+        p = pos_by_id.get(c["position_id"])
+        if p is None or p.pool != pool:
+            continue
+        day = ist_day(datetime.fromisoformat(c["at_utc"]))
+        if (since and day < since) or (until and day > until):
+            continue
+        if c["net_inr"] is None:
+            return None
+        if since is None or ist_day(p.entry_utc) >= since:
+            total += _d(c["net_inr"])
+            continue
+        m = last_mark_before(p.position_id, since)
+        if m is None:
+            return None
+        total += _paise(_d(c["net_inr"]) - _d(m[1]) * c["units"])
+    return _paise(total)
+
+
+@dataclass(frozen=True)
+class BookSnapshot:
+    """The journal inputs of one pool's real-book accounting, read together (`Journal.account_snapshot`)."""
+    pool: str
+    held: list            # open positions
+    pending: list         # pending reservations (approved, undecided, within valid-until)
+    positions: list       # every position of the pool, any status (for the close records)
+    closes: list          # close records of the pool's positions
+    marks: dict           # position_id -> [(day, open P&L per unit, at_utc)] by day
+    equity: list          # [(day, equity)] by day
+
+    def last_mark_before(self, ref: str, day: date) -> tuple[date, float, str] | None:
+        earlier = [m for m in self.marks.get(ref, ()) if m[0] < day]
+        return earlier[-1] if earlier else None
+
+    def realised(self, since: date | None = None, until: date | None = None) -> Decimal | None:
+        return realised_from(self.pool, self.positions, self.closes, self.last_mark_before, since, until)
+
+
 def open_pnl(pos: Position, prices, costs) -> Decimal | None:
     """Open P&L of the whole position if closed at `prices` now, after the estimated round-trip charges."""
     if prices is None:
@@ -1122,8 +1170,10 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
     cap = pool_capital(settings, pool)
     today = ist_day(now)
     month_start = today.replace(day=1)
-    # positions, decisions and reservations in ONE snapshot: a TOOK recorded meanwhile is counted exactly once
-    held, pending = journal.book_snapshot(pool, now)
+    # positions, decisions, reservations, close records, marks and equity in ONE snapshot: a TOOK or a close recorded
+    # meanwhile is counted exactly once (open or realised), so the daily and monthly loss stops see every rupee once
+    snap = journal.account_snapshot(pool, now)
+    held, pending = snap.held, snap.pending
     rows, unknown, open_now_total = [], [], Decimal(0)
     for p in held:
         prices, why = marks(p, now)
@@ -1135,7 +1185,7 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
                 return None
             if ist_day(p.entry_utc) >= day_from:
                 return now_pnl
-            m = journal.last_mark_before(p.position_id, day_from)
+            m = snap.last_mark_before(p.position_id, day_from)
             if m is None:
                 return None
             return now_pnl - _paise(_d(m[1]) * units)
@@ -1168,13 +1218,13 @@ def pool_account(journal: Journal, settings, pool: str, now: datetime, marks, co
         rows.append(OpenPosition(f"pending:{t['signal_id']}", t["symbol"], kind_of_trade_type(t["trade_type"]), risk,
                                  margin, 0.0, 0.0, origin="PENDING", exposure=exposure_of(t["direction"], t["legs"]),
                                  session=t["session"] or today))
-    r_today = journal.realised(pool, since=today)
-    r_month = journal.realised(pool, since=month_start)
-    r_all = journal.realised(pool)
-    stored = [(d, e) for d, e in journal.equity_rows(pool) if d < today]
+    r_today = snap.realised(since=today)
+    r_month = snap.realised(since=month_start)
+    r_all = snap.realised()
+    stored = [(d, e) for d, e in snap.equity if d < today]
     curve = None
     if r_all is not None and open_now_total is not None and stored:
-        deposits = net_flows(journal, pool, flows, today)
+        deposits = net_flows(journal, pool, flows, today, rows=snap.equity)
         curve = tuple(stored) + ((today, float(_paise(_d(cap) + deposits + r_all + open_now_total))),)
     state = AccountState(capital_inr=cap, positions=tuple(rows), realised_today_inr=None if r_today is None else float(r_today),
                          realised_month_inr=None if r_month is None else float(r_month), equity_curve=curve,
@@ -1244,12 +1294,13 @@ def record_marks(journal: Journal, pool: str, now: datetime, marks, costs) -> in
     return n
 
 
-def net_flows(journal: Journal, pool: str, flows, upto: date) -> Decimal:
+def net_flows(journal: Journal, pool: str, flows, upto: date, rows=None) -> Decimal:
     """Net deposits (deposits +, withdrawals -) of a pool dated after its first equity point up to `upto` inclusive:
-    the part of the equity that is money put in, not profit (the deposit rule, module docstring). CASH_INDEX only."""
+    the part of the equity that is money put in, not profit (the deposit rule, module docstring). CASH_INDEX only.
+    `rows`: the pool's equity history already read (a snapshot); else it is read now."""
     if pool != CASH_INDEX or not flows:
         return Decimal(0)
-    rows = journal.equity_rows(pool)
+    rows = journal.equity_rows(pool) if rows is None else rows
     start = rows[0][0] if rows else None
     return sum((_d(a) for d, a in flows if (start is None or d > start) and d <= upto), Decimal(0))
 

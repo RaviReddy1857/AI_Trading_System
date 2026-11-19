@@ -3323,6 +3323,23 @@ the reasons in the note (`real_book_blocked`); any other reason as well, no pape
 that asserted "advisory" now assert the blocks (`test_stock_spread_capital_fit_blocks_my_real_book`). Tests: reserve
 and over-capital blocks with positions held; the paper trade of a signal blocked only by them; none with another reason.
 
+## Codex Astra re-review of main at 4ea35e0: fixes (2026-11-19)
+
+Tests: `tests/test_astra_rereview_snapshot.py` (item 1; items 2-6 follow in the next commit). Nothing in data/,
+config.yaml capital values, strategy logic or alert settings was changed; the live app was not restarted.
+
+**1. HIGH, realised P&L in the same snapshot** (`app/journal.py`). `pool_account` read the open positions in one
+snapshot but the close records afterwards: a position closed in between (close record and status/quantity are written
+together) was counted twice, once as open P&L and once as realised, which could hide a daily or monthly loss stop.
+Now `Journal.account_snapshot(pool, now)` reads, under one lock hold and one SQLite read transaction, the open
+positions, decisions and unexpired signals (pending reservations), every position of the pool with its close records,
+the earlier marks and the equity history; `pool_account` takes realised today / this month / to date, the "since the
+day began" marks and the equity curve from it (`BookSnapshot`; the arithmetic is `realised_from`, shared with
+`Journal.realised`). `book_snapshot` is kept and reads through it. Test: a close recorded by another thread right after
+the open positions are read, for a gain (+Rs 100) and a loss (-Rs 150): the loss stops' total (realised today + open
+P&L today) is the same figure before, during and after - once open, then once realised (fails on the old journal: it
+was doubled).
+
 ## Open issues
 
 | # | Found in phase | Issue | State |
