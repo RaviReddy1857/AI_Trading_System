@@ -440,10 +440,22 @@ class SignalEngine:
                 close = f[-1].close if f else None
             # the settlement price from ONE hub snapshot: the last valid continuous-session price and its time
             snap = self.hub.settlement_snapshot(pos.symbol, now)
+            px, at = self.settlement_price(snap, now)
             return ExitInputs(now=now, prices=prices, price_why=why, spot=self.m.spot(pos.symbol, now), regime=regime,
-                              kill_reasons=kill, stock_trend=trend, stock_close=close, last_price=snap["price"],
-                              last_price_at=snap["at"], auction=snap["phase"] == "AUCTION")
+                              kill_reasons=kill, stock_trend=trend, stock_close=close, last_price=px,
+                              last_price_at=at, auction=snap["phase"] == "AUCTION")
         return evaluate_positions(self.j, self.exits, self.s, self.cal, now, inputs_for, self.costs)
+
+    def settlement_price(self, snap: dict, now: datetime) -> tuple[float | None, datetime | None]:
+        """(price, time) the settlement alert may use from a hub snapshot: the last valid continuous-session price
+        only when it was received today or in the previous trading session (the holiday-aware calendar); anything
+        older is no valid price, and the alert assumes the sold legs near the money (your decision, 19-Nov-2026)."""
+        if snap["price"] is None or snap["at"] is None:
+            return None, None
+        day = ist_day(now)
+        if ist_day(snap["at"]) not in (day, self.cal.previous_trading_day(day)):
+            return None, None
+        return snap["price"], snap["at"]
 
     def price_notices(self, now: datetime) -> list[dict]:
         """The held-price notices due now (`feed.held_price_notice`): for each underlying of my open positions in
@@ -474,8 +486,9 @@ class SignalEngine:
             if why is None:
                 continue
             self._noticed.add(sym)
-            last = (f"; settlement alerts use the last valid price {snap['price']:g} as of "
-                    f"{snap['at'].astimezone(IST):%H:%M}" if snap["price"] is not None else
+            px, at = self.settlement_price(snap, now)
+            last = (f"; settlement alerts use the last valid price {px:g} as of "
+                    f"{at.astimezone(IST):%d-%b %H:%M}" if px is not None else
                     "; no valid price yet: settlement alerts assume the sold legs near the money")
             out.append({"symbol": sym, "day": day.isoformat(), "since": since, "why": why,
                         "text": f"PRICE UNAVAILABLE - {sym}: price unavailable since {since.astimezone(IST):%H:%M} "

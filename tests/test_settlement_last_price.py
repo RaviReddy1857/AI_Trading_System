@@ -61,7 +61,7 @@ class World:
     """A held RELIANCE put spread (sold 1300 PE, bought 1260 PE) at E-`left` on Monday 16 Nov, a real hub fed tick by
     tick, and the engine evaluating my positions on it."""
 
-    def __init__(self, left: int):
+    def __init__(self, left: int, calendar=COVERED):
         self.hub = MarketHub(S, Store(":memory:"), "breeze", MarketCalendar())
         self.j, store = new_journal(S)
         exp = expiry_at(left)
@@ -74,7 +74,7 @@ class World:
         self.book = ExitCallBook(store, S)
         self.eng = SignalEngine(settings=S, store=store, hub=self.hub, journal=self.j,
                                 marker=Marker(S, store, self.hub, "breeze"), risk=_Risk(), regime=None,
-                                calendar=COVERED, desk=None, source="breeze", costs=ZeroCosts(), execbook=None,
+                                calendar=calendar, desk=None, source="breeze", costs=ZeroCosts(), execbook=None,
                                 paper=None, exits=self.book, now_fn=lambda: None, strategies=[])
 
     def ticks(self, start, end, every_s, pattern):
@@ -179,6 +179,32 @@ def test_the_notice_is_only_in_continuous_trading_and_waits_five_minutes_after_t
     assert len(w.step(ist(9, 20))[1]) == 1
     w2 = World(left=9)
     assert w2.step(ist(15, 25))[1] == [] and w2.step(ist(15, 40))[1] == [] and w2.step(ist(8, 0))[1] == []
+
+
+# ---------------- a price counts only from today or the previous trading session ----------------
+THU, FRI = date(2026, 11, 12), date(2026, 11, 13)
+
+
+def test_a_price_from_two_sessions_ago_at_e6_is_no_valid_price_and_assumes_near_the_money():
+    w = World(left=6)
+    w.ticks(ist(15, 0, d=THU), ist(15, 10, d=THU), 10, [1400.0])           # Thursday: two sessions before Monday
+    assert w.hub.settlement_snapshot("RELIANCE", ist(9, 16))["price"] == 1400.0     # the hub still has it ...
+    due, _ = w.step(ist(9, 16))                                            # ... but it is too old for settlement
+    assert [c["level"] for c in due] == [NOTICE]                           # E-6, assumed near the money
+    a = due[0]["values"]["alert"]
+    assert a["price"]["assumed_near_money"] is True and a["price"]["spot"] is None
+    assert "assumed near the money" in due[0]["reason"]
+
+
+def test_a_price_from_the_previous_trading_session_counts_and_the_count_skips_holidays():
+    w = World(left=6)
+    w.ticks(ist(15, 0, d=FRI), ist(15, 10, d=FRI), 10, [1400.0])           # Friday: the previous session
+    due, _ = w.step(ist(9, 16))
+    assert due == [] and w.level() is None                                 # far out of the money at Friday's price
+    holiday = MarketCalendar({FRI: "a holiday", date(2026, 1, 1): "COVERAGE through 2026-12-31 test list"})
+    h = World(left=6, calendar=holiday)
+    h.ticks(ist(15, 0, d=THU), ist(15, 10, d=THU), 10, [1400.0])           # Friday a holiday: Thursday IS the previous
+    assert h.step(ist(9, 16))[0] == [] and h.level() is None
 
 
 # ---------------- an overnight rejection does not carry into the next session ----------------

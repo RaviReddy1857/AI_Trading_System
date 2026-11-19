@@ -394,7 +394,8 @@ with `data/holidays.csv`; unless a COVERAGE row (`COVERAGE through YYYY-MM-DD`, 
 verifies the holiday list for the expiry month, the count is made one session earlier, the card says so in red, and
 the deadline is marked "deadline unverified: holiday calendar missing; confirm before relying on it" on the alert, the
 API and the Telegram text (one session earlier is not enough if two holidays are missing). The FORCED_EXPIRY_EXIT
-call uses the same forced-exit day and warning. The price is the stock's last valid continuous-session price, shown
+call uses the same forced-exit day and warning. The price is the stock's last valid continuous-session price from today
+or the previous trading session (anything older counts as no valid price), shown
 with its time; auction, rejected, quarantined or stale ticks never replace it and never change the alert's level by
 themselves. With no valid price at all the sold leg is assumed near the money (NOTICE on E-7 and E-6, URGENT from E-5)
 and the alert says so. During the closing auction (15:15-15:35) nothing new is sent and the text reads "auction in

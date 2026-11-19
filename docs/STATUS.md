@@ -3451,10 +3451,12 @@ started, or the value is not a finite price above 0), the sold leg is assumed NE
 URGENT from E-5, never before E-7, and the leg's reason and `price.note` say "no valid price of the stock, so the sold
 leg is assumed near the money (conservative)". Before: "price unknown" was URGENT from E-7 (phase 9, 2026-11-15) and
 an unusable spot was URGENT at any distance (Astra audit item 4, 18-Nov). Those tests (tests/test_phase9_settlement.py,
-tests/test_astra_fixes.py) now assert the new rule. My reading of "no valid price at all for the session": the hub's
-last valid continuous price counts even when it is from an earlier session (the alert shows its date), so the open
-of a new day never flips a position to the assumption before its first tick; the assumption applies when the hub has
-no valid price at all.
+tests/test_astra_fixes.py) now assert the new rule (accepted by you, 19-Nov-2026). "No valid price for the session"
+(your decision, 19-Nov-2026): the hub's last valid continuous price counts only when it was received today or in the
+previous trading session by the holiday-aware calendar (`SignalEngine.settlement_price`; the alert shows its date), so
+the open of a new day never flips a position to the assumption before its first tick; anything older, or no price at
+all, is no valid price and the sold leg is assumed near the money. Tests: Thursday's price on Monday at E-6 -> the
+assumption (NOTICE); Friday's price counts; with Friday a holiday, Thursday's counts.
 
 **3. Feed degradation notice** (`SignalEngine.price_notices`, `Notifier.on_bar(price_notices=...)`, new config
 `feed.held_price_notice`: `no_valid_tick_minutes` 5, `rejection_window_minutes` 5, `rejection_share_pct` 50,
