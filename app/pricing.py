@@ -65,6 +65,25 @@ class LegQuote:
                 "depth": self.depth, "note": self.note, "substitute": self.substitute}
 
 
+# no current quote at all (silent before the settlement alerts start), against a quote received and rejected
+INVALID = "INVALID"
+ABSENT = frozenset({MISSING, STALE, "NO_DATA", "CLOSED"})
+
+
+@dataclass(frozen=True)
+class SpotReading:
+    """The underlying's last price as the live reader saw it: `price` (None unless LIVE and usable), the quote's
+    `status` (LIVE, MISSING, STALE, CLOSED, NO_DATA, CROSSED, INVALID) and `why` it was not used."""
+    price: float | None
+    status: str
+    why: str = ""
+
+    @property
+    def rejected(self) -> bool:
+        """A quote was there but could not be used (crossed, malformed): never silent, unlike an absent one."""
+        return self.price is None and self.status not in ABSENT
+
+
 class Marker:
     """Quotes for cash symbols (hub) and option contracts (stored chain)."""
 
@@ -131,8 +150,20 @@ class Marker:
                 for _ in legs]
 
     def spot(self, symbol: str, now: datetime) -> float | None:
+        return self.spot_reading(symbol, now).price
+
+    def spot_reading(self, symbol: str, now: datetime) -> "SpotReading":
+        """The underlying's LIVE last price, or None WITH the quote's status and why it was not used: an absent quote
+        (no tick, stale, market closed) is told apart from a quote that was received and rejected (crossed, a last
+        price that is not a finite number above 0)."""
         q = self.cash(symbol, now)
-        return q.last if q.usable and _pos(q.last) else None
+        if q.usable and _pos(q.last):
+            return SpotReading(q.last, LIVE, "")
+        if q.status in ABSENT:
+            return SpotReading(None, q.status, q.note or f"quote {q.status}")
+        if q.status == LIVE:
+            return SpotReading(None, INVALID, f"last price {q.last!r} is not a finite price above 0")
+        return SpotReading(None, q.status, q.note or f"quote {q.status}")
 
     def option(self, underlying: str, expiry: date, strike: float, right: str, now: datetime) -> LegQuote:
         from .options.chain import stored_quotes

@@ -390,8 +390,12 @@ has no holidays for use the NIFTY sessions instead (add the NSE holiday lists fo
 (`app/options/settlement.py`) give, for every open position with a sold stock option leg: NOTICE / WARNING from 7
 trading days before expiry and URGENT from 5 (or when the price is unknown), the delivery obligation and expiry-week
 margin estimate, and a red alert when the position is not marked closed by its exit deadline. Trading days are counted
-with `data/holidays.csv`; if that file has no holidays for a year the expiry month touches, the count is made one
-session earlier and the card says so in red: add each year's NSE holidays when they are published. In the delivery
+with `data/holidays.csv`; unless a COVERAGE row (`COVERAGE through YYYY-MM-DD`, optionally followed by its source)
+verifies the holiday list for the expiry month, the count is made one session earlier, the card says so in red, and
+the deadline is marked "deadline unverified: holiday calendar missing; confirm before relying on it" on the alert, the
+API and the Telegram text (one session earlier is not enough if two holidays are missing). A stock quote that arrives
+but is rejected (crossed, or a last price that is not a finite number above 0) makes the alert URGENT at any distance
+to expiry; no quote at all stays silent before E-7. In the delivery
 estimate each bought share nets one sold share at most (the most exposed sold legs first); sold quantity without a
 bought share in the money is shown as fully deliverable. They are alerts and
 estimates only; nothing closes or changes a position. No position is recorded before phase 6, so no alert is shown or

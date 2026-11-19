@@ -392,7 +392,9 @@ Current defaults: 1% loss per trade, 2.5% per option position, 2% daily stop, 6%
   has them (expired contracts too, back to at least 2017, with volume and OI; trades only, no bid/ask), so breeze-source
   option backtests use `option_bars`; only the sim source uses model prices. Every trade records its price source.
 - Margin is entered by the user from ICICI's margin calculator (`margins` table); Breeze's margin calculator is not a
-  data call and is not used. A spread without a current margin entry gives no signal (`MARGIN_UNKNOWN`).
+  data call and is not used. A credit spread or condor without a current margin entry gives no signal
+  (`MARGIN_UNKNOWN`); a debit spread is paid in full, so the capital it commits is its sized net debit plus the
+  estimated costs (user policy, 19-Nov-2026), with no margin entry needed.
 - IV rank: India VIX against its past year for an index; stored at-the-money implied volatility for a stock, point in time
   (a contract is used only from the day its strike was chosen, so a day's value never depends on a later close). Unknown
   IV rank means no signal. Options are bought only at or below `max_iv_rank` and spreads sold only at or above `min_iv_rank`.

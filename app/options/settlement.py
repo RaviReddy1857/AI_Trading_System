@@ -26,9 +26,10 @@ UNHEDGED. Days are NSE trading days before expiry: E-7 = seven trading days left
    continuously: from then the alert is sent as "exit now" (`due_now`), whatever the moneyness. Its hard limit is
    the options' close that day (15:40 from 3 Aug 2026); an ICICI time is its own hard limit. A position still open
    after the earliest hard limit gets a red alert on every call until it is closed (`overdue`).
-   Trading days are counted with the holiday calendar (data/holidays.csv). When the calendar has no holiday
-   row for a year the expiry month touches, a holiday may be missing: the count is then taken on weekdays
-   LESS ONE, so every alert and deadline comes one session earlier, and the alert says so (`calendar`).
+   Trading days are counted with the holiday calendar (data/holidays.csv). When no COVERAGE row verifies the
+   holiday list for the expiry month, a holiday may be missing: the count is then taken on weekdays LESS ONE
+   (one session earlier, enough for one missing holiday but not for two), and the alert says so (`calendar`)
+   and marks its deadline UNVERIFIED in the alert, the action and the Telegram text (`DEADLINE_UNVERIFIED`).
 4. Every ICICI rule used carries its `confirmed` flag; an unconfirmed one is named in `not_confirmed` as
    "ICICI rule not confirmed: ...".
 """
@@ -127,6 +128,9 @@ def moneyness(leg: HeldLeg, spot: float | None, near_money_pct: float) -> dict:
 
 CALENDAR_COVERED = "trading days counted with the holiday calendar (coverage verified)"
 HOLIDAY_COVERAGE_MISSING = "HOLIDAY COVERAGE MISSING"
+# a deadline counted without a verified holiday list: weekdays less one is one session early for ONE missing holiday,
+# but two or more missing holidays in the expiry month put it late, so it is never presented as verified
+DEADLINE_UNVERIFIED = "deadline unverified: holiday calendar missing; confirm before relying on it"
 COVERAGE_HOW = ("Add the NSE holiday list to data/holidays.csv with a COVERAGE row for the range it covers, e.g. "
                 "',2027-01-01,,COVERAGE through 2027-12-31 NSE circular <number>'.")
 
@@ -279,9 +283,12 @@ def overdue(pos: HeldPosition, now: datetime, closed: bool, sos, calendar=None) 
                 "text": f"{pos.underlying}: expiry not known, so no exit deadline can be set: check this position now"}
     if now < dl["hard_limit"]:
         return None
+    verified = day_count(pos.expiry, calendar).covered
     return {"kind": "EXIT_OVERDUE", "colour": "red", "repeat": True, "deadline": dl["hard_limit"].isoformat(),
+            "deadline_verified": verified,
             "text": f"{pos.underlying}: NOT marked closed after the exit deadline {dl['hard_limit']:%d-%b-%Y %H:%M} "
-                    f"({dl['what']}). Exit the position and mark it closed in the journal."}
+                    f"({dl['what']}{'' if verified else '; ' + DEADLINE_UNVERIFIED}). Exit the position and mark it "
+                    "closed in the journal."}
 
 
 # ---------------- delivery and margin estimate ----------------
@@ -446,12 +453,16 @@ def not_confirmed(pos: HeldPosition, sos, used_cutoffs: Sequence[dict]) -> list[
 
 def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, capital: float,
                      previous_level: str | None = None, closed: bool = False, calendar=None,
-                     base_margin_inr: float | None = None, near_month: bool = True) -> dict | None:
+                     base_margin_inr: float | None = None, near_month: bool = True,
+                     spot_rejected: str | None = None) -> dict | None:
     """The settlement-readiness alert of one open position at `now`, or None when the position is
     closed, has no sold leg, or nothing applies yet (no level and not overdue). `previous_level`: the
     level of its last alert (the level never drops while the position is open). The result states the
     level, each sold leg (strike, spot, moneyness in % and rupees, days left), the estimate, the
-    deadline, the action and every unconfirmed ICICI rule used. It is advice: nothing is changed."""
+    deadline, the action and every unconfirmed ICICI rule used. It is advice: nothing is changed.
+    `spot_rejected`: why the live reader rejected the stock's quote (status: reason), when it received one it could
+    not use; None when the quote was usable or simply absent. A rejected quote is an unusable input: URGENT at any
+    distance to expiry (an absent one is silent before E-7 and URGENT "price unknown" from E-7)."""
     if closed or not pos.shorts:
         return None
     st = sos.settlement
@@ -472,6 +483,8 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
     invalid = [] if usable_margin_base(base_margin_inr)[1] is None else [usable_margin_base(base_margin_inr)[1]]
     if spot is not None and usable_spot(spot) is None:
         invalid.append(f"{PRICE_UNKNOWN}: the last price ({spot!r}) is not a finite price above 0")
+    if spot_rejected:
+        invalid.append(f"{PRICE_UNKNOWN}: the stock's quote was received but rejected ({spot_rejected})")
     if invalid:
         level = escalate(level, URGENT)          # an unusable input never makes the alert quieter
     late = overdue(pos, now, closed, sos, calendar)
@@ -487,12 +500,16 @@ def settlement_alert(pos: HeldPosition, spot: float | None, now: datetime, sos, 
         action = (f"Exit the {kind} NOW: due by {by}" + (" while the stock trades continuously" if dl["rule"] ==
                                                           "forced exit" else "")
                   + f"; hard limit {hard['hard_limit']:%H:%M}")
+    verified = dl is None or dc.covered
+    if not verified:
+        action += f" ({DEADLINE_UNVERIFIED})"      # the alert card, the exit-call API and the Telegram text carry it
     return {"underlying": pos.underlying, "label": pos.label, "level": level, "colour": "red" if late or level == URGENT else None,
             "expiry": pos.expiry.isoformat() if pos.expiry else None, "trading_days_left": left,
             # how the days were counted; not covered = one session earlier, shown on the card in red
             "calendar": {"covered": dc.covered, "note": dc.note, "colour": None if dc.covered else "red"},
             "legs": legs, "estimate": estimate, "invalid_inputs": invalid,
             "deadline": dl["at"].isoformat() if dl else None, "deadline_set_by": dl["what"] if dl else None,
+            "deadline_verified": verified, "deadline_note": None if verified else DEADLINE_UNVERIFIED,
             "hard_limit": hard["hard_limit"].isoformat() if hard else None, "due_now": due_now,
             "cutoffs": [{**c, "at": c["at"].isoformat(), "hard_limit": c["hard_limit"].isoformat()} for c in cs],
             "action": action, "overdue": late,
@@ -511,7 +528,8 @@ def rules_view(sos, calendar=None, today: date | None = None) -> dict:
                "note": CALENDAR_COVERED if not missing else
                f"{HOLIDAY_COVERAGE_MISSING}: the holiday list is not verified complete for "
                f"{', '.join(map(str, missing))}: for expiries there, trading days are counted on weekdays less one "
-               f"(alerts one session earlier). {COVERAGE_HOW}"}
+               f"(alerts one session earlier). {COVERAGE_HOW}",
+               "deadline_verified": not missing, "deadline_note": None if not missing else DEADLINE_UNVERIFIED}
     b = sos.settlement.broker
     st = sos.settlement
 

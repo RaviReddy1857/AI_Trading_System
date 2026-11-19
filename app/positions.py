@@ -83,6 +83,7 @@ class ExitInputs:
     prices: list[float] | None           # closing prices of the position's legs (app.pricing.Marker.marks)
     price_why: str = ""                  # why prices are None
     spot: float | None = None            # the underlying's LIVE last price (cash: the share)
+    spot_quote: object | None = None     # how the live reader saw it (app.pricing.SpotReading: status, why); None = not told
     regime: str | None = None
     kill_reasons: tuple[str, ...] = ()   # kill-switch reasons other than "outside market hours"
     stock_trend: str | None = None       # phase 9 trend of the stock (UP / DOWN / None)
@@ -321,9 +322,12 @@ def _allowed_regimes(strategy_id: str):
 
 
 # ---------------- settlement readiness (sending of the phase 9 M3 alerts) ----------------
-def settlement_call(pos: Position, spot: float | None, now: datetime, settings, calendar) -> dict | None:
+def settlement_call(pos: Position, spot: float | None, now: datetime, settings, calendar,
+                    spot_quote=None) -> dict | None:
     """The settlement-readiness alert of a position with a sold STOCK option leg, as an exit call (kind SETTLEMENT)
-    whose level only rises while the position is open. None when nothing applies yet."""
+    whose level only rises while the position is open. None when nothing applies yet. `spot_quote`: the live reader's
+    SpotReading; a quote received and rejected (crossed, malformed) makes the alert URGENT at any distance to expiry,
+    while an absent one stays silent before E-7."""
     if pos.trade_type != "STOCK_OPTION_SELLING" or not pos.legs:
         return None
     from .options.settlement import HeldLeg, HeldPosition, settlement_alert
@@ -331,11 +335,16 @@ def settlement_call(pos: Position, spot: float | None, now: datetime, settings, 
     held = HeldPosition(pos.symbol, min(expiries), tuple(HeldLeg(x.action, x.right, x.strike, x.lots, x.lot_size)
                                                           for x in pos.legs),
                         "UNHEDGED" if not pos.hedged else ("from a card" if pos.origin == "SIGNAL" else "manual"))
+    rejected = None
+    if spot_quote is not None and getattr(spot_quote, "rejected", False):
+        rejected = f"{spot_quote.status}: {spot_quote.why}" if spot_quote.why else spot_quote.status
     a = settlement_alert(held, spot, now, settings.stock_option_selling, settings.stock_option_selling.backtest.capital_inr,
-                         previous_level=pos.plan.get("settlement_level"), calendar=calendar)
+                         previous_level=pos.plan.get("settlement_level"), calendar=calendar, spot_rejected=rejected)
     if a is None:
         return None
     reason = "; ".join(f"{l['leg']}: {l['why']}" for l in a["legs"])
+    if a["invalid_inputs"]:
+        reason = "; ".join(a["invalid_inputs"]) + "; " + reason
     if a["overdue"]:
         reason = f"OVERDUE: {a['overdue'].get('text', 'planned exit deadline passed')}; " + reason
     if a["not_confirmed"]:
@@ -476,7 +485,7 @@ def evaluate_positions(journal, book: ExitCallBook, settings, calendar, now: dat
     for pos in journal.positions("OPEN"):
         x = inputs_for(pos)
         calls, plan = evaluate(pos, x, settings, calendar, costs)
-        s = settlement_call(pos, x.spot, now, settings, calendar)
+        s = settlement_call(pos, x.spot, now, settings, calendar, x.spot_quote)
         if s is not None:
             calls.append(s)
             from .options.settlement import escalate

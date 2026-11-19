@@ -38,7 +38,7 @@ def test_no_order_routes():
 
 def _sim_rows(path) -> dict:
     import sqlite3
-    db = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)   # file:///D:/... on Windows
     try:
         return {t: db.execute(f"SELECT COUNT(*) FROM {t} WHERE lower(source) LIKE 'sim%'").fetchone()[0]
                 for t in ("bars_1m", "bars_1d", "bars_5m", "quality_events")}

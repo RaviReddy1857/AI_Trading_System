@@ -300,7 +300,7 @@ def test_settlement_route_and_page_are_read_only():
     with TestClient(app) as c:
         j = c.get("/api/stock-option-selling/settlement").json()
         assert j["alerts"] == [] and "never closes or changes" in j["note"]
-        assert set(j["calendar"]) == {"covered", "colour", "note"} and isinstance(j["calendar"]["covered"], bool)
+        assert set(j["calendar"]) == {"covered", "colour", "note", "deadline_verified", "deadline_note"} and isinstance(j["calendar"]["covered"], bool)
         assert j["alerts_from"] == {"from_trading_days": 7, "urgent_from_trading_days": 5, "near_money_pct": 5.0,
                                     "forced_exit_trading_days": 5}
         assert any(r["label"] == f"{NOT_CONFIRMED}: auto close" for r in j["rules"])
@@ -398,7 +398,8 @@ def test_coverage_is_judged_on_the_expiry_month_and_shown_on_the_page_card():
     assert sm.days_left(EXP + timedelta(days=1), EXP, None) == -1
     # the page card: covered or, in red, what is missing
     ok = rules_view(SOS, only_2026, date(2026, 6, 1))["calendar"]
-    assert ok == {"covered": True, "colour": None, "note": CALENDAR_COVERED}
+    assert ok == {"covered": True, "colour": None, "note": CALENDAR_COVERED, "deadline_verified": True,
+                  "deadline_note": None}
     late = rules_view(SOS, only_2026, date(2026, 11, 15))["calendar"]                 # 70 days ahead reaches January 2027
     assert late["covered"] is False and late["colour"] == "red" and "2027" in late["note"] and "one session earlier" in late["note"]
     assert rules_view(SOS)["calendar"] is None                                        # no date given: nothing claimed

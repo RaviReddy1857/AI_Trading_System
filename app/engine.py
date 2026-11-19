@@ -431,6 +431,7 @@ class SignalEngine:
                 trend = trend_of(d, p9.sma_short, p9.sma_mid, p9.atr_days)[0] if d else None
                 f = (five or {}).get(pos.symbol)
                 close = f[-1].close if f else None
-            return ExitInputs(now=now, prices=prices, price_why=why, spot=self.m.spot(pos.symbol, now), regime=regime,
+            sq = self.m.spot_reading(pos.symbol, now)        # the price WITH its status: a rejected quote is not silent
+            return ExitInputs(now=now, prices=prices, price_why=why, spot=sq.price, spot_quote=sq, regime=regime,
                               kill_reasons=kill, stock_trend=trend, stock_close=close)
         return evaluate_positions(self.j, self.exits, self.s, self.cal, now, inputs_for, self.costs)

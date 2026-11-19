@@ -7,7 +7,8 @@ capital passed in, so changing account.capital_inr rescales everything.
 
 Checks (all of them are evaluated; each failing one adds its code):
 - inputs: capital (CAPITAL_UNKNOWN), positions and P&L (PORTFOLIO_UNKNOWN), cost rates, lot size,
-  sector (DATA_MISSING / LOT_SIZE_UNKNOWN), margin of anything with a sold leg (MARGIN_UNKNOWN);
+  sector (DATA_MISSING / LOT_SIZE_UNKNOWN), margin of a credit spread or condor (MARGIN_UNKNOWN; a debit spread
+  commits its net debit plus costs);
 - kill switch (KILL_SWITCH): index price not LIVE, outside market hours, quarantined-tick spike;
 - the signal's own price LIVE (DATA_STALE), not expired (SIGNAL_EXPIRED), regime allowed (OUTSIDE_REGIME);
 - loss stops on realised + open P&L (DAILY_STOP, MONTHLY_PAUSE); drawdown (sizes halved; DRAWDOWN_PAUSE);
@@ -358,10 +359,16 @@ def _legs_known(signal, no) -> bool:
 
 
 def _margin(signal, structure, pay, n, no) -> Decimal | None:
-    """Cash or margin needed for n lots: a bought option needs its premium; anything with a sold leg
-    needs the user's margin entry per lot (never assumed)."""
+    """Cash or margin needed for n lots: a bought option needs its premium; a debit spread commits its net debit for
+    the sized lots, paid in full, plus the estimated costs (user policy, 19-Nov-2026); a credit spread or condor needs
+    the user's verified margin entry per lot (never assumed)."""
     if structure == "LONG_OPTION":
         return -pay.net_premium_inr
+    if structure == "DEBIT_SPREAD":
+        if pay.net_premium_inr >= 0 or not known(float(pay.costs_inr)) or pay.costs_inr < 0:
+            no(MARGIN_UNKNOWN, "a debit spread without a net debit and known costs: the capital it commits is not known")
+            return None
+        return paise(-pay.net_premium_inr + pay.costs_inr)
     per_lot = (signal.details or {}).get("margin_per_lot_inr")
     if not known(per_lot) or per_lot <= 0:
         no(MARGIN_UNKNOWN, "no current margin entry for one lot of this structure (enter it from ICICI's margin "

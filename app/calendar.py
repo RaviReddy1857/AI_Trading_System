@@ -13,12 +13,15 @@ from .session import CLOSED, Hours, calendar as session_calendar
 
 
 COVERAGE = "COVERAGE"
-_THROUGH = re.compile(r"\bthrough\s+(\d{4}-\d{2}-\d{2})\b", re.I)
+# the whole description: "COVERAGE through YYYY-MM-DD" from its start, then optionally a source after a space
+# ("COVERAGE through 2027-12-31 NSE circular 123"). Anything else ("COVERAGE NOT VERIFIED through ...") is no coverage.
+_THROUGH = re.compile(r"COVERAGE\s+through\s+(\d{4}-\d{2}-\d{2})(?:\s+\S.*)?", re.I | re.S)
 
 
 def coverage_through(note: str | None) -> date | None:
-    """The end date of a COVERAGE row's note ("COVERAGE through 2027-12-31 ..."), None when it cannot be read."""
-    m = _THROUGH.search(note or "")
+    """The end date of a COVERAGE row's description, which must read "COVERAGE through YYYY-MM-DD" from its start
+    with an optional trailing source; None for anything else (the list is then not verified complete)."""
+    m = _THROUGH.fullmatch((note or "").strip())
     if not m:
         return None
     try:

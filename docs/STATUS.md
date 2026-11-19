@@ -3325,7 +3325,7 @@ and over-capital blocks with positions held; the paper trade of a signal blocked
 
 ## Codex Astra re-review of main at 4ea35e0: fixes (2026-11-19)
 
-Tests: `tests/test_astra_rereview_snapshot.py` (item 1; items 2-6 follow in the next commit). Nothing in data/,
+Tests: `tests/test_astra_rereview_snapshot.py` (item 1), `tests/test_astra_rereview.py` (items 2-6). Nothing in data/,
 config.yaml capital values, strategy logic or alert settings was changed; the live app was not restarted.
 
 **1. HIGH, realised P&L in the same snapshot** (`app/journal.py`). `pool_account` read the open positions in one
@@ -3339,6 +3339,51 @@ day began" marks and the equity curve from it (`BookSnapshot`; the arithmetic is
 the open positions are read, for a gain (+Rs 100) and a loss (-Rs 150): the loss stops' total (realised today + open
 P&L today) is the same figure before, during and after - once open, then once realised (fails on the old journal: it
 was doubled).
+
+**2. MEDIUM, debit spreads no longer MARGIN_UNKNOWN** (`app/risk/engine.py` `_margin`; your policy of 19-Nov-2026).
+The reversal bull call spread never carries `margin_per_lot_inr`, so every one was MARGIN_UNKNOWN. A debit spread's
+committed capital is now its sized net debit, paid in full, plus the estimated costs (= its maximum loss); it goes
+through the pool's capital fit (stock options: the reserve and over-capital blocks of audit item 7). Credit spreads and
+condors still need a verified margin entry. A TOOK copies the decision's margin to the position, so the held spread's
+commitment is known too. Not changed: the research shortlist's `actionable_check` still asks for a margin entry for any
+spread (it is never actionable while positions are not passed to it). Tests: a producer-built reversal bull call
+(no margin field) through `decide` to APPROVED with margin = debit x lot x lots + costs; a producer-built reversal put
+credit spread without its margin entry is still MARGIN_UNKNOWN. The shortlist's `actionable_check` is left as it is
+(your decision, 19-Nov-2026): open issue 109.
+
+**3. MEDIUM, a rejected quote is not silent before E-7** (`app/pricing.py`, `app/engine.py`, `app/positions.py`,
+`app/options/settlement.py`). `Marker.spot` returned None for every unusable quote, so a crossed or malformed quote at
+E-8 looked like "no price" and the alert stayed quiet. `Marker.spot_reading` returns the price with the quote's status
+and reason (`SpotReading`); the engine's exit evaluation passes it in `ExitInputs.spot_quote` through `settlement_call`
+to `settlement_alert(spot_rejected=...)`, which lists it in `invalid_inputs` and makes the alert URGENT; the reason is in
+the exit call's text (Telegram). Absent = MISSING, NO_DATA, STALE or CLOSED (silent before E-7, URGENT "price unknown"
+from E-7, as before); rejected = CROSSED, or LIVE with a last price that is not a finite number above 0. STALE counts
+as absent: silent at E-8, and from E-7 inside it escalates exactly like a missing quote (your decision, 19-Nov-2026).
+Tests: the real `SignalEngine.evaluate_exits` with a stub hub at E-8 (far out of the money): no quote -> no settlement
+call; crossed quote and NaN last -> URGENT with "rejected" in the reason and the Telegram text; the reader's statuses;
+a STALE quote silent at E-8 and, at E-7, E-6, E-5, E-3 and E-1, the same URGENT call (level, reason, action, legs) as a
+missing one.
+
+**4. MEDIUM, strict COVERAGE rows** (`app/calendar.py`). The description must read `COVERAGE through YYYY-MM-DD` from
+its start (any case, extra spaces allowed), optionally followed by a space and its source; anything else is not
+coverage (e.g. "COVERAGE NOT VERIFIED through 2027-12-31", "COVERAGE of 2027 through ...", "NSE COVERAGE through ...",
+a date followed directly by text or a comma, an impossible date) and is rejected on import with the existing error.
+Tests: three accepted forms, eleven rejected ones.
+
+**5. MEDIUM, unverified deadlines are marked** (`app/options/settlement.py`). Weekdays less one is one session early
+for one missing holiday, but two missing holidays in the expiry month put the computed deadline LATE. When the calendar
+does not cover the expiry month, the alert has `deadline_verified: false` and `deadline_note`, its action ends with
+"(deadline unverified: holiday calendar missing; confirm before relying on it)" - the card, the exit-call API and the
+Telegram text - the overdue alert's text says it too, and the settlement API's calendar block carries the same two
+fields. Tests: 24 and 25 Dec missing before a 29 Dec expiry: the computed forced-exit deadline (21 Dec) is after the
+true one (18 Dec) and is marked unverified everywhere; with the holidays and a COVERAGE row it is verified. Two phase 9
+settlement tests that pinned the calendar block's keys now include the two new fields.
+
+**6. LOW, read-only URI** (`tests/test_safety.py`). `_sim_rows` builds it with `Path(path).resolve().as_uri() + "?mode=ro"`
+(file:///D:/... on Windows). Test: the URI form opens a real file read-only.
+
+**Not tested here:** the live Breeze feed's real crossed or malformed ticks reaching `spot_reading` (the hub is stubbed);
+the opt-in `test_real_live_db_holds_no_sim_rows` (it reads data/, not run).
 
 ## Open issues
 
@@ -3452,6 +3497,7 @@ was doubled).
 | 107 | 6 | Phase 9 portfolio check needs `history_verified`, which stays False live: stock option selling signals would be PORTFOLIO_UNKNOWN | Open: phase 9 remainder (stock option selling signals are not generated in phase 6) |
 | 108 | data | `python -m app.options.stock_backtest` runs the Phase 4 option reports (long_option, credit_spread, iron_condor) at the stock-option capital Rs 10,00,000, not account.capital_inr | Closed 2026-11-16: `run_index_reports` uses account.capital_inr (review 7 fixes) |
 | 33 | 3b | holidays.csv covers 2026 only: sessions after 2019-2025 holidays get an UNKNOWN regime in swing tests | Waiting for user (add earlier years if wanted) |
+| 109 | Astra re-review | The research shortlist's `actionable_check` (`app/options/actionable.py`) still requires `details.margin_inr` for every spread, so a debit spread (the reversal bull call) shows MARGIN_UNKNOWN there although the risk engine now commits its net debit plus costs | Open: left as is by your decision of 19-Nov-2026 (the check is never actionable while positions are not passed to it) |
 
 ## Decisions log
 
